@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request, Depends, UploadFile, File
 from schemas.angel_schemas import ChatRequestSchema, CreateSessionSchema
 from services.session_service import create_session, list_sessions, get_session, patch_session
-from services.chat_service import fetch_chat_history, save_chat_message, fetch_phase_chat_history
+from services.chat_service import fetch_chat_history, save_chat_message, fetch_phase_chat_history, delete_chat_messages
 from services.generate_plan_service import generate_full_business_plan, generate_full_roadmap_plan, generate_comprehensive_business_plan_summary, generate_implementation_insights, generate_service_provider_preview, generate_motivational_quote
 from services.angel_service import get_angel_reply, handle_roadmap_generation, handle_roadmap_to_implementation_transition
 from utils.progress import parse_tag, TOTALS_BY_PHASE, calculate_phase_progress, calculate_combined_progress, smart_trim_history
@@ -502,6 +502,24 @@ async def go_back_to_previous_question(session_id: str, request: Request):
             "message": "Cannot go back - no previous question available"
         }
     
+    # Prepare the latest assistant prompt and corresponding user answer for removal
+    messages_to_delete = []
+    assistant_found = False
+    user_found = False
+    for message in reversed(history):
+        role = message.get("role")
+        message_id = message.get("id")
+        if not message_id:
+            continue
+        if not assistant_found and role == "assistant":
+            messages_to_delete.append(message_id)
+            assistant_found = True
+            continue
+        if assistant_found and not user_found and role == "user":
+            messages_to_delete.append(message_id)
+            user_found = True
+            break
+    
     # Get current phase and question
     current_tag = session.get("asked_q", "")
     current_phase = session.get("current_phase", "KYC")
@@ -527,8 +545,9 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                 # Create previous question tag
                 previous_tag = f"{phase_prefix}.{previous_q_num:02d}"
                 
-                # Remove last 2 chat history entries (last Q&A pair)
-                # This happens on frontend - backend just needs to update state
+                # Remove last chat messages reflecting the most recent question/answer pair
+                if assistant_found:
+                    delete_chat_messages(messages_to_delete)
                 
                 # Update session to previous question
                 await patch_session(session_id, {

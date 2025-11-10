@@ -12,7 +12,10 @@ auth_router = APIRouter()
 
 @auth_router.post("/signup")
 async def signup(user: SignUpSchema):
-    created_user = await create_user(user.email, user.password)
+    try:
+        created_user = await create_user(user.email, user.password, user.full_name, user.contact_number)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"success": True, "message": "User created successfully", "result": {"user": created_user}}
 
 @auth_router.post("/signin")
