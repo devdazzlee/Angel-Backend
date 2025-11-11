@@ -7,6 +7,7 @@ from services.angel_service import get_angel_reply, handle_roadmap_generation, h
 from utils.progress import parse_tag, TOTALS_BY_PHASE, calculate_phase_progress, calculate_combined_progress, smart_trim_history
 from middlewares.auth import verify_auth_token
 from fastapi.middleware.cors import CORSMiddleware
+from db.supabase import supabase
 import re
 import os
 import uuid
@@ -554,10 +555,30 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                 
                 # Create previous question tag
                 previous_tag = f"{phase_prefix}.{previous_q_num:02d}"
-                
-                # Remove last 2 chat history entries (last Q&A pair)
-                # This happens on frontend - backend just needs to update state
-                
+
+                # Remove most recent assistant question and user answer from history to persist navigation
+                history_response = supabase.from_("chat_history").select("id, role, content").eq("session_id", session_id).order("created_at", desc=True).limit(20).execute()
+                records = history_response.data or []
+                ids_to_remove = []
+                user_removed = False
+                assistant_removed = False
+
+                for record in records:
+                    role = record.get("role")
+                    content = record.get("content") or ""
+                    if role == "assistant" and not assistant_removed and "[[Q:" in content:
+                        ids_to_remove.append(record["id"])
+                        assistant_removed = True
+                        continue
+                    if role == "user" and not user_removed:
+                        ids_to_remove.append(record["id"])
+                        user_removed = True
+                    if assistant_removed and user_removed:
+                        break
+
+                if ids_to_remove:
+                    supabase.from_("chat_history").delete().in_("id", ids_to_remove).execute()
+
                 # Update session to previous question
                 await patch_session(session_id, {
                     "asked_q": previous_tag,
