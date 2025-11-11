@@ -18,3 +18,12 @@ class ChatRequestSchema(BaseModel):
         if value is None:
             raise ValueError("content cannot be null")
         return value
+
+class RefreshTokenSchema(BaseModel):
+    refresh_token: str
+
+
+class SyncProgressSchema(BaseModel):
+    phase: str
+    answered_count: int = Field(ge=0)
+    asked_q: Optional[str] = None
