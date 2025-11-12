@@ -613,25 +613,51 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                 # Create previous question tag
                 previous_tag = f"{previous_phase}.{previous_q_num:02d}"
 
-                # Remove most recent assistant question and user answer from history to persist navigation
-                history_response = supabase.from_("chat_history").select("id, role, content").eq("session_id", session_id).order("created_at", desc=True).limit(20).execute()
-                records = history_response.data or []
-                ids_to_remove = []
-                user_removed = False
-                assistant_removed = False
+                # Remove the current question and any responses after the previous question
+                history_response = (
+                    supabase
+                    .from_("chat_history")
+                    .select("id, role, content")
+                    .eq("session_id", session_id)
+                    .order("created_at")
+                    .execute()
+                )
+                history_records = history_response.data or []
 
-                for record in records:
-                    role = record.get("role")
-                    content = record.get("content") or ""
-                    if role == "assistant" and not assistant_removed and "[[Q:" in content:
-                        ids_to_remove.append(record["id"])
-                        assistant_removed = True
-                        continue
-                    if role == "user" and not user_removed:
-                        ids_to_remove.append(record["id"])
-                        user_removed = True
-                    if assistant_removed and user_removed:
+                # Find the most recent occurrence of the previous question in history
+                target_index = None
+                previous_tag_marker = f"[[Q:{previous_tag}]]"
+
+                for idx in range(len(history_records) - 1, -1, -1):
+                    record = history_records[idx]
+                    if record.get("role") == "assistant" and previous_tag_marker in (record.get("content") or ""):
+                        target_index = idx
                         break
+
+                ids_to_remove = []
+
+                if target_index is not None:
+                    # Remove everything AFTER the previous question so the user can answer again
+                    ids_to_remove = [
+                        rec["id"]
+                        for rec in history_records[target_index + 1:]
+                    ]
+                else:
+                    # Fallback: remove the latest assistant question and the following user response
+                    latest_assistant_index = None
+                    for idx in range(len(history_records) - 1, -1, -1):
+                        record = history_records[idx]
+                        if record.get("role") == "assistant" and "[[Q:" in (record.get("content") or ""):
+                            latest_assistant_index = idx
+                            break
+
+                    if latest_assistant_index is not None:
+                        ids_to_remove.append(history_records[latest_assistant_index]["id"])
+                        # Remove the immediate next user message (their answer to that question) if it exists
+                        if latest_assistant_index + 1 < len(history_records):
+                            next_record = history_records[latest_assistant_index + 1]
+                            if next_record.get("role") == "user":
+                                ids_to_remove.append(next_record["id"])
 
                 if ids_to_remove:
                     supabase.from_("chat_history").delete().in_("id", ids_to_remove).execute()

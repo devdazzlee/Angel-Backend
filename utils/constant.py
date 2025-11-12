@@ -373,20 +373,18 @@ ABSOLUTE RULE: Ask ONLY ONE question per response. NEVER ask multiple questions 
 --- SECTION 1: BUSINESS FOUNDATION ---
 
 **Question 1:** What is your business name? If you haven't decided yet, what are your top 3-5 name options?
-• Consider: Is it memorable, easy to spell, and available as a domain?
-• Think about: How does it reflect your brand and values?
 
 **Question 2:** What is your business tagline or mission statement? How would you describe your business in one compelling sentence?
-• Consider: What makes your business special and different from competitors?
-• Think about: How would you explain your business to a friend in one sentence?
+ What makes your business special and different from competitors?
+ How would you explain your business to a friend in one sentence?
 
 **Question 3:** What problem does your business solve? Who has this problem and how significant is it for them?
-• Consider: What pain point or need does your business address?
-• Think about: Who specifically experiences this problem and how often?
+ What pain point or need does your business address?
+ Who specifically experiences this problem and how often?
 
 **Question 4:** What makes your business unique? What's your competitive advantage or unique value proposition?
-• Consider: What can you do better or differently than existing solutions?
-• Think about: What special skills, resources, or approaches do you bring?
+ What can you do better or differently than existing solutions?
+ What special skills, resources, or approaches do you bring?
 
 --- SECTION 1 SUMMARY ---
 After Question 4, provide this summary and verification request:
@@ -438,201 +436,201 @@ CRITICAL RULES:
 --- SECTION 2: PRODUCT/SERVICE DETAILS ---
 
 [[Q:BUSINESS_PLAN.05]] Describe your core product or service in detail. What exactly will you be offering to customers?
-• Consider: What specific features, benefits, or outcomes will customers receive?
-• Think about: How will customers interact with or use your product/service?
+ What specific features, benefits, or outcomes will customers receive?
+ How will customers interact with or use your product/service?
 
 [[Q:BUSINESS_PLAN.06]] What are the key features and benefits of your product/service? How does it work?
-• Consider: What are the main components or steps involved?
-• Think about: What value or results will customers get from using it?
+ What are the main components or steps involved?
+ What value or results will customers get from using it?
 
 [[Q:BUSINESS_PLAN.07]] Do you have any intellectual property (patents, trademarks, copyrights) or proprietary technology?
-• Consider: Do you have any unique processes, formulas, or technology?
-• Think about: What legal protections might be important for your business?
+ Do you have any unique processes, formulas, or technology?
+ What legal protections might be important for your business?
 
 [[Q:BUSINESS_PLAN.08]] What is your product development timeline? Do you have a working prototype or MVP?
-• Consider: What milestones do you need to reach before launch?
-• Think about: How will you validate your concept before full development?
+ What milestones do you need to reach before launch?
+ How will you validate your concept before full development?
 
 --- Continue to Section 3 ---
 
 --- SECTION 3: MARKET RESEARCH ---
 
 [[Q:BUSINESS_PLAN.09]] Who is your target market? Be specific about demographics, psychographics, and behaviors.
-• Consider: What characteristics define your ideal customer?
-• Think about: How can you reach and connect with this audience?
+ What characteristics define your ideal customer?
+ How can you reach and connect with this audience?
 
 [[Q:BUSINESS_PLAN.10]] What is the size of your target market? How many potential customers exist?
-• Consider: Is the market large enough to support your business?
-• Think about: What percentage of this market can you realistically capture?
+ Is the market large enough to support your business?
+ What percentage of this market can you realistically capture?
 
 [[Q:BUSINESS_PLAN.11]] Who are your main competitors? What are their strengths and weaknesses?
-• Consider: How do you compare to existing solutions?
-• Think about: What opportunities exist in the competitive landscape?
+ How do you compare to existing solutions?
+ What opportunities exist in the competitive landscape?
 
 [[Q:BUSINESS_PLAN.12]] How is your target market currently solving this problem? What alternatives exist?
-• Consider: What solutions are customers using now?
-• Think about: How can you provide a better solution?
+ What solutions are customers using now?
+ How can you provide a better solution?
 
 --- Continue to Section 4 ---
 
 --- SECTION 4: LOCATION & OPERATIONS ---
 
 [[Q:BUSINESS_PLAN.13]] Where will your business be located? Why did you choose this location?
-• Consider: How does location impact your business success?
-• Think about: What factors influenced your location decision?
+ How does location impact your business success?
+ What factors influenced your location decision?
 
 [[Q:BUSINESS_PLAN.14]] What are your space and facility requirements? Do you need special equipment or infrastructure?
-• Consider: What physical resources do you need to operate?
-• Think about: How will you acquire and maintain these resources?
+ What physical resources do you need to operate?
+ How will you acquire and maintain these resources?
 
 [[Q:BUSINESS_PLAN.15]] What are your short-term operational needs (e.g., hiring initial staff, securing space)?
-• Consider: What immediate operational requirements do you need to address?
-• Think about: What staffing, space, and equipment needs are critical for launch?
+ What immediate operational requirements do you need to address?
+ What staffing, space, and equipment needs are critical for launch?
 
 [[Q:BUSINESS_PLAN.16]] What suppliers or vendors will you need? Have you identified any key partners?
-• Consider: What external resources are critical to your business?
-• Think about: How will you build and maintain these relationships?
+ What external resources are critical to your business?
+ How will you build and maintain these relationships?
 
 [[Q:BUSINESS_PLAN.17]] What are your staffing needs? Will you hire employees, contractors, or work solo initially?
-• Consider: What skills and expertise do you need on your team?
-• Think about: How will you find and retain the right people?
+ What skills and expertise do you need on your team?
+ How will you find and retain the right people?
 
 --- Continue to Section 5 ---
 
 --- SECTION 5: FINANCIAL PLANNING ---
 
 [[Q:BUSINESS_PLAN.18]] How will you price your product/service? What pricing strategy will you use?
-• Consider: What pricing model aligns with your value proposition?
-• Think about: How will you test and adjust your pricing?
+ What pricing model aligns with your value proposition?
+ How will you test and adjust your pricing?
 
 [[Q:BUSINESS_PLAN.19]] What are your projected sales for the first year? How did you arrive at these numbers?
-• Consider: What assumptions underlie your sales projections?
-• Think about: How realistic are these projections given market conditions?
+ What assumptions underlie your sales projections?
+ How realistic are these projections given market conditions?
 
 [[Q:BUSINESS_PLAN.20]] What are your estimated startup costs? What one-time expenses will you have?
-• Consider: What initial investments are required to launch?
-• Think about: How will you fund these startup costs?
+ What initial investments are required to launch?
+ How will you fund these startup costs?
 
 [[Q:BUSINESS_PLAN.21]] What are your estimated monthly operating expenses? Include all recurring costs.
-• Consider: What ongoing costs will you have each month?
-• Think about: How will you manage cash flow with these expenses?
+ What ongoing costs will you have each month?
+ How will you manage cash flow with these expenses?
 
 [[Q:BUSINESS_PLAN.22]] When do you expect to break even? What's your path to profitability?
-• Consider: How long can you operate before becoming profitable?
-• Think about: What milestones indicate progress toward profitability?
+ How long can you operate before becoming profitable?
+ What milestones indicate progress toward profitability?
 
 [[Q:BUSINESS_PLAN.23]] How much funding do you need to get started? How will you use this money?
-• Consider: What funding sources are available to you?
-• Think about: How will you use funding to accelerate growth?
+ What funding sources are available to you?
+ How will you use funding to accelerate growth?
 
 [[Q:BUSINESS_PLAN.24]] What are your financial projections for years 1-3? Include revenue, expenses, and profit.
-• Consider: What assumptions underlie your financial projections?
-• Think about: How realistic are these projections given market conditions?
+ What assumptions underlie your financial projections?
+ How realistic are these projections given market conditions?
 
 [[Q:BUSINESS_PLAN.25]] How will you track and manage your finances? What accounting systems will you use?
-• Consider: What financial management tools and processes do you need?
-• Think about: How will you maintain accurate financial records?
+ What financial management tools and processes do you need?
+ How will you maintain accurate financial records?
 
 --- Continue to Section 6 ---
 
 --- SECTION 6: MARKETING & SALES ---
 
 [[Q:BUSINESS_PLAN.26]] How will you reach your target customers? What marketing channels will you use?
-• Consider: Where do your customers spend their time and attention?
-• Think about: Which channels offer the best return on investment?
+ Where do your customers spend their time and attention?
+ Which channels offer the best return on investment?
 
 [[Q:BUSINESS_PLAN.27]] What is your sales process? How will you convert prospects into customers?
-• Consider: What steps lead from interest to purchase?
-• Think about: How can you optimize each step of the sales funnel?
+ What steps lead from interest to purchase?
+ How can you optimize each step of the sales funnel?
 
 [[Q:BUSINESS_PLAN.28]] What is your customer acquisition cost? How much will it cost to acquire each customer?
-• Consider: What marketing and sales expenses are required per customer?
-• Think about: How can you reduce acquisition costs over time?
+ What marketing and sales expenses are required per customer?
+ How can you reduce acquisition costs over time?
 
 [[Q:BUSINESS_PLAN.29]] What is your customer lifetime value? How much revenue will each customer generate over time?
-• Consider: How much value does each customer provide over their relationship with you?
-• Think about: How can you increase customer lifetime value?
+ How much value does each customer provide over their relationship with you?
+ How can you increase customer lifetime value?
 
 [[Q:BUSINESS_PLAN.30]] How will you build brand awareness and credibility in your market?
-• Consider: What strategies will establish your reputation?
-• Think about: How will you differentiate your brand from competitors?
+ What strategies will establish your reputation?
+ How will you differentiate your brand from competitors?
 
 [[Q:BUSINESS_PLAN.31]] What partnerships or collaborations could help you reach more customers?
-• Consider: Who has access to your target market?
-• Think about: What mutually beneficial partnerships could you create?
+ Who has access to your target market?
+ What mutually beneficial partnerships could you create?
 
 --- Continue to Section 7 ---
 
 --- SECTION 7: LEGAL & COMPLIANCE ---
 
 [[Q:BUSINESS_PLAN.32]] What licenses and permits do you need? Have you researched local requirements?
-• Consider: What legal requirements apply to your business?
-• Think about: How will you stay compliant with regulations?
+ What legal requirements apply to your business?
+ How will you stay compliant with regulations?
 
 [[Q:BUSINESS_PLAN.33]] What insurance coverage do you need? What risks does your business face?
-• Consider: What potential liabilities could threaten your business?
-• Think about: How will insurance protect your assets and operations?
+ What potential liabilities could threaten your business?
+ How will insurance protect your assets and operations?
 
 [[Q:BUSINESS_PLAN.34]] How will you protect your intellectual property? Do you need patents, trademarks, or copyrights?
-• Consider: What intellectual assets need protection?
-• Think about: How will you prevent others from copying your innovations?
+ What intellectual assets need protection?
+ How will you prevent others from copying your innovations?
 
 [[Q:BUSINESS_PLAN.35]] What contracts and agreements will you need? (employment, vendor, customer, etc.)
-• Consider: What legal relationships require formal agreements?
-• Think about: How will contracts protect your interests?
+ What legal relationships require formal agreements?
+ How will contracts protect your interests?
 
 [[Q:BUSINESS_PLAN.36]] How will you handle taxes and compliance? What tax obligations will you have?
-• Consider: What tax requirements apply to your business structure?
-• Think about: How will you maintain tax compliance?
+ What tax requirements apply to your business structure?
+ How will you maintain tax compliance?
 
 [[Q:BUSINESS_PLAN.37]] What data privacy and security measures will you implement?
-• Consider: What data protection requirements apply to your business?
-• Think about: How will you protect customer and business data?
+ What data protection requirements apply to your business?
+ How will you protect customer and business data?
 
 --- Continue to Section 8 ---
 
 --- SECTION 8: GROWTH & SCALING ---
 
 [[Q:BUSINESS_PLAN.38]] What are the key milestones you hope to achieve in the first year of your business? Consider both short-term and long-term goals.
-• Consider: What growth milestones do you want to achieve?
-• Think about: What resources will you need to support this growth?
+ What growth milestones do you want to achieve?
+ What resources will you need to support this growth?
 • Note: Short-term = 12-24 months, Long-term = years 2-5
 
 [[Q:BUSINESS_PLAN.39]] What additional products or services could you offer in the future?
-• Consider: What complementary offerings could expand your market?
-• Think about: How will new offerings align with your core business?
+ What complementary offerings could expand your market?
+ How will new offerings align with your core business?
 
 [[Q:BUSINESS_PLAN.40]] How will you expand to new markets or customer segments?
-• Consider: What new opportunities exist beyond your initial market?
-• Think about: How will you adapt your approach for different markets?
+ What new opportunities exist beyond your initial market?
+ How will you adapt your approach for different markets?
 
 [[Q:BUSINESS_PLAN.41]] What partnerships or strategic alliances could accelerate your growth?
-• Consider: Who could help you scale faster?
-• Think about: What value can you offer potential partners?
+ Who could help you scale faster?
+ What value can you offer potential partners?
 
 --- Continue to Section 9 ---
 
 --- SECTION 9: RISK MANAGEMENT ---
 
 [[Q:BUSINESS_PLAN.42]] What are the biggest risks and challenges your business might face?
-• Consider: What could threaten your business success?
-• Think about: How likely are these risks and what impact would they have?
+ What could threaten your business success?
+ How likely are these risks and what impact would they have?
 
 [[Q:BUSINESS_PLAN.43]] What contingency plans do you have for major risks or setbacks?
-• Consider: How will you respond if key assumptions prove wrong?
-• Think about: What backup plans will keep your business running?
+ How will you respond if key assumptions prove wrong?
+ What backup plans will keep your business running?
 
 [[Q:BUSINESS_PLAN.44]] What is your biggest concern or fear about launching this business, and how do you plan to address it?
-• Consider: What keeps you up at night about this business venture?
-• Think about: How can you proactively address these concerns before launch?
+ What keeps you up at night about this business venture?
+ How can you proactively address these concerns before launch?
 
 [[Q:BUSINESS_PLAN.45]] What additional considerations or final thoughts do you have about your business plan?
-• Consider: What else should be included in your comprehensive business plan?
-• Think about: Are there any gaps or areas that need more attention?
+ What else should be included in your comprehensive business plan?
+ Are there any gaps or areas that need more attention?
 
 [[Q:BUSINESS_PLAN.46]] Now that we've covered all aspects of your business plan, what is your overall vision for where you see this business in 5 years?
-• Consider: What does success look like for your business in the long term?
-• Think about: What legacy or impact do you want your business to create?
+ What does success look like for your business in the long term?
+ What legacy or impact do you want your business to create?
 
 --- Business Plan Complete - Transition to Roadmap Phase ---
 
