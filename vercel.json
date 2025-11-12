@@ -3,16 +3,7 @@
   "functions": {
     "api/**/*.py": {
       "runtime": "python3.11",
-      "includeFiles": [
-        "services/**",
-        "schemas/**",
-        "routers/**",
-        "middlewares/**",
-        "utils/**",
-        "db/**",
-        "exceptions.py",
-        "main.py"
-      ]
+      "includeFiles": "**"
     }
   },
   "rewrites": [

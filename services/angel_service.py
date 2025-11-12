@@ -4015,13 +4015,14 @@ async def handle_roadmap_generation(session_data, history):
     
     # Generate comprehensive roadmap using RAG principles
     roadmap_content = await generate_detailed_roadmap(session_data, history)
+    quote_payload = pick_motivational_quote()
     
     # Create the roadmap presentation message
     roadmap_message = f"""🗺️ **Your Launch Roadmap is Ready!** 🗺️
 
 Congratulations! Based on your comprehensive business plan, I've generated a detailed, actionable launch roadmap that will guide you from planning to execution.
 
-**"The way to get started is to quit talking and begin doing."** – Walt Disney
+**"{quote_payload['quote']}"** – {quote_payload['author']}
 
 ---
 
@@ -4055,7 +4056,8 @@ Your roadmap is now ready for implementation! Each phase is designed to build up
     return {
         "reply": roadmap_message,
         "transition_phase": "ROADMAP_GENERATED",
-        "roadmap_content": roadmap_content
+        "roadmap_content": roadmap_content,
+        "quote": quote_payload
     }
 
 async def handle_roadmap_to_implementation_transition(session_data, history):

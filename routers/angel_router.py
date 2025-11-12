@@ -1063,6 +1063,11 @@ async def handle_transition_decision(session_id: str, request: Request, payload:
     decision = payload.get("decision")  # "approve" or "revisit"
     
     if decision == "approve":
+        history = await fetch_chat_history(session_id)
+        business_plan_artifact = await generate_business_plan_artifact(session, history)
+        session["business_plan_artifact"] = business_plan_artifact
+        session["business_plan_generated_at"] = datetime.now().isoformat()
+        
         # Transition to Roadmap phase
         session["current_phase"] = "ROADMAP"
         session["asked_q"] = "ROADMAP.01"
@@ -1071,11 +1076,12 @@ async def handle_transition_decision(session_id: str, request: Request, payload:
         await patch_session(session_id, {
             "current_phase": session["current_phase"],
             "asked_q": session["asked_q"],
-            "answered_count": session["answered_count"]
+            "answered_count": session["answered_count"],
+            "business_plan_artifact": session["business_plan_artifact"],
+            "business_plan_generated_at": session["business_plan_generated_at"]
         })
         
         # Generate roadmap
-        history = await fetch_chat_history(session_id)
         roadmap_response = await handle_roadmap_generation(session, history)
         
         return {
@@ -1084,6 +1090,8 @@ async def handle_transition_decision(session_id: str, request: Request, payload:
             "result": {
                 "action": "transition_to_roadmap",
                 "roadmap": roadmap_response["roadmap_content"],
+                "business_plan": business_plan_artifact,
+                "quote": roadmap_response.get("quote"),
                 "progress": {
                     "phase": "ROADMAP",
                     "answered": 0,
