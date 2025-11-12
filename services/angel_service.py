@@ -2,6 +2,7 @@ from openai import AsyncOpenAI
 import os
 import json
 import re
+import random
 from datetime import datetime
 from functools import lru_cache
 from typing import Optional
@@ -12,6 +13,55 @@ client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Web search throttling
 web_search_count = 0
 web_search_reset_time = datetime.now()
+
+MOTIVATIONAL_QUOTES = [
+    {
+        "quote": "Success is not final; failure is not fatal: it is the courage to continue that counts.",
+        "author": "Winston Churchill",
+        "category": "Persistence"
+    },
+    {
+        "quote": "The way to get started is to quit talking and begin doing.",
+        "author": "Walt Disney",
+        "category": "Action"
+    },
+    {
+        "quote": "Innovation distinguishes between a leader and a follower.",
+        "author": "Steve Jobs",
+        "category": "Innovation"
+    },
+    {
+        "quote": "The future belongs to those who believe in the beauty of their dreams.",
+        "author": "Eleanor Roosevelt",
+        "category": "Dreams"
+    },
+    {
+        "quote": "Don't be afraid to give up the good to go for the great.",
+        "author": "John D. Rockefeller",
+        "category": "Excellence"
+    },
+    {
+        "quote": "Opportunities don't happen, you create them.",
+        "author": "Chris Grosser",
+        "category": "Opportunity"
+    },
+    {
+        "quote": "Dream big. Start small. Act now.",
+        "author": "Robin Sharma",
+        "category": "Momentum"
+    },
+    {
+        "quote": "The future depends on what you do today.",
+        "author": "Mahatma Gandhi",
+        "category": "Action"
+    }
+]
+
+
+def pick_motivational_quote(exclude: Optional[str] = None) -> dict:
+    available = [quote for quote in MOTIVATIONAL_QUOTES if quote["quote"] != exclude]
+    pool = available if available else MOTIVATIONAL_QUOTES
+    return random.choice(pool)
 
 def should_conduct_web_search():
     """Throttle web searches to prevent excessive API calls"""
