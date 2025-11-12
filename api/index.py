@@ -72,4 +72,3 @@ app.add_exception_handler(AuthApiError, supabase_auth_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
-
