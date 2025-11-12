@@ -8,6 +8,8 @@ from utils.progress import parse_tag, TOTALS_BY_PHASE, calculate_phase_progress,
 from middlewares.auth import verify_auth_token
 from fastapi.middleware.cors import CORSMiddleware
 from db.supabase import supabase
+from utils.constant import ANGEL_SYSTEM_PROMPT
+from openai import AsyncOpenAI
 import re
 import os
 import uuid
@@ -17,6 +19,50 @@ router = APIRouter(
     tags=["Angel"],
     dependencies=[Depends(verify_auth_token)]
 )
+
+# Build a lookup of canonical question text keyed by tag (e.g., "KYC.10")
+QUESTION_TEXT_MAP = dict(
+    re.findall(r'\[\[Q:([A-Z_]+\.\d{2})]]\s*([^\n]+)', ANGEL_SYSTEM_PROMPT)
+)
+
+PHASE_SEQUENCE = [
+    "KYC",
+    "BUSINESS_PLAN",
+    "PLAN_TO_ROADMAP_TRANSITION",
+    "ROADMAP",
+    "ROADMAP_GENERATED",
+    "ROADMAP_TO_IMPLEMENTATION_TRANSITION",
+    "IMPLEMENTATION",
+]
+
+def enforce_question_tag(reply: str, question_tag: str) -> str:
+    """
+    Ensure the assistant message references the expected question tag
+    and leverages the canonical question text when available.
+    """
+    if not reply:
+        return reply
+
+    canonical_text = QUESTION_TEXT_MAP.get(question_tag)
+    tag_pattern = re.compile(r'\[\[Q:[A-Z_]+\.\d{2}\]\]')
+
+    if tag_pattern.search(reply):
+        reply = tag_pattern.sub(f'[[Q:{question_tag}]]', reply, count=1)
+        if canonical_text:
+            reply = re.sub(
+                r'\[\[Q:[A-Z_]+\.\d{2}\]\]\s*[^\n]*',
+                f'[[Q:{question_tag}]] {canonical_text}',
+                reply,
+                count=1
+            )
+    else:
+        question_line = (
+            f'[[Q:{question_tag}]] {canonical_text}'
+            if canonical_text else f'[[Q:{question_tag}]]'
+        )
+        reply = reply.rstrip() + "\n\n" + question_line
+
+    return reply
 
 @router.post("/sessions")
 async def post_session(request: Request, payload: CreateSessionSchema):
@@ -544,9 +590,20 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                 phase_prefix = parts[0]
                 current_q_num = int(parts[1])
                 
-                # Calculate previous question number
+                # Calculate previous question number/phase
                 previous_q_num = current_q_num - 1
-                
+                previous_phase = phase_prefix
+
+                if previous_q_num < 1 and phase_prefix in PHASE_SEQUENCE:
+                    current_index = PHASE_SEQUENCE.index(phase_prefix)
+                    for idx in range(current_index - 1, -1, -1):
+                        candidate_phase = PHASE_SEQUENCE[idx]
+                        total_questions = TOTALS_BY_PHASE.get(candidate_phase)
+                        if total_questions and total_questions > 0:
+                            previous_phase = candidate_phase
+                            previous_q_num = total_questions
+                            break
+
                 if previous_q_num < 1:
                     return {
                         "success": False,
@@ -554,7 +611,7 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                     }
                 
                 # Create previous question tag
-                previous_tag = f"{phase_prefix}.{previous_q_num:02d}"
+                previous_tag = f"{previous_phase}.{previous_q_num:02d}"
 
                 # Remove most recent assistant question and user answer from history to persist navigation
                 history_response = supabase.from_("chat_history").select("id, role, content").eq("session_id", session_id).order("created_at", desc=True).limit(20).execute()
@@ -580,19 +637,26 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                     supabase.from_("chat_history").delete().in_("id", ids_to_remove).execute()
 
                 # Update session to previous question
-                await patch_session(session_id, {
+                if previous_phase == phase_prefix:
+                    new_answered_count = max(0, answered_count - 1)
+                else:
+                    new_answered_count = max(
+                        0, TOTALS_BY_PHASE.get(previous_phase, 1) - 1
+                    )
+
+                updates = {
                     "asked_q": previous_tag,
-                    "answered_count": max(0, answered_count - 1)
-                })
+                    "answered_count": new_answered_count,
+                    "current_phase": previous_phase
+                }
+                
+                await patch_session(session_id, updates)
+                session.update(updates)
                 
                 # Re-fetch updated session
                 updated_session = await get_session(session_id, user_id)
                 
                 # Generate the previous question
-                from utils.constant import ANGEL_SYSTEM_PROMPT
-                from openai import AsyncOpenAI
-                import os
-                
                 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
                 
                 question_prompt = f"""
@@ -601,17 +665,40 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                 Use the proper format with the [[Q:{previous_tag}]] tag.
                 """
                 
-                response = await client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": ANGEL_SYSTEM_PROMPT},
-                        {"role": "user", "content": question_prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=500
-                )
+                # Try to reuse the previously stored assistant question after trimming history
+                refreshed_history = await fetch_chat_history(session_id)
+                reply = None
+                reply_from_history = False
+                if refreshed_history:
+                    for item in reversed(refreshed_history):
+                        if item.get("role") == "assistant":
+                            content = item.get("content") or ""
+                            if "[[Q:" in content:
+                                reply = content
+                                reply_from_history = True
+                                break
+
+                # If we could not find the previous question (edge case), regenerate it
+                if not reply:
+                    response = await client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": ANGEL_SYSTEM_PROMPT},
+                            {"role": "user", "content": question_prompt}
+                        ],
+                        temperature=0.7,
+                        max_tokens=500
+                    )
+                    reply = response.choices[0].message.content
+                    reply_from_history = False
                 
-                reply = response.choices[0].message.content
+                reply = enforce_question_tag(reply, previous_tag)
+
+                if not reply_from_history:
+                    try:
+                        await save_chat_message(session_id, user_id, "assistant", reply)
+                    except Exception as save_error:
+                        print(f"Warning: failed to save regenerated go-back reply: {save_error}")
                 
                 # Calculate progress
                 current_phase = updated_session.get("current_phase", "KYC")
