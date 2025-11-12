@@ -1083,6 +1083,17 @@ async def handle_transition_decision(session_id: str, request: Request, payload:
         
         # Generate roadmap
         roadmap_response = await handle_roadmap_generation(session, history)
+        roadmap_payload = {
+            "content": roadmap_response["roadmap_content"],
+            "structured_steps": roadmap_response.get("structured_steps", []),
+            "tasks": roadmap_response.get("implementation_tasks", []),
+            "metadata": roadmap_response.get("roadmap_metadata", {})
+        }
+        session["roadmap_data"] = roadmap_payload
+        
+        await patch_session(session_id, {
+            "roadmap_data": roadmap_payload
+        })
         
         return {
             "success": True,
@@ -1092,6 +1103,8 @@ async def handle_transition_decision(session_id: str, request: Request, payload:
                 "roadmap": roadmap_response["roadmap_content"],
                 "business_plan": business_plan_artifact,
                 "quote": roadmap_response.get("quote"),
+                "structured_steps": roadmap_response.get("structured_steps", []),
+                "implementation_tasks": roadmap_response.get("implementation_tasks", []),
                 "progress": {
                     "phase": "ROADMAP",
                     "answered": 0,

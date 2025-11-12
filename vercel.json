@@ -1,12 +1,24 @@
 {
   "version": 2,
-  "functions": {
-    "api/**/*.py": {
-      "runtime": "@vercel/python@6.0.2",
-      "includeFiles": "**"
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python@6.0.2",
+      "config": {
+        "includeFiles": [
+          "services/**",
+          "schemas/**",
+          "routers/**",
+          "middlewares/**",
+          "utils/**",
+          "db/**",
+          "exceptions.py",
+          "main.py"
+        ]
+      }
     }
-  },
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index.py" }
+  ],
+  "routes": [
+    { "src": "/(.*)", "dest": "api/index.py" }
   ]
 }

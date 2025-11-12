@@ -5,7 +5,7 @@ import re
 import random
 from datetime import datetime
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Dict, List, Any
 from utils.constant import ANGEL_SYSTEM_PROMPT
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -1619,7 +1619,11 @@ What would you like to do?"""
         "immediate_response": None,
         "transition_phase": "PLAN_TO_ROADMAP",
         "business_plan_summary": business_plan_summary,
-        "show_accept_modify": button_detection.get("show_buttons", False)
+        "show_accept_modify": button_detection.get("show_buttons", False),
+        "reference_documents": [
+            "Business Plan Deep Research Questions V2",
+            "Roadmap Deep Research Questions V3"
+        ]
     }
 
 async def generate_business_plan_summary(session_data, history):
@@ -4010,12 +4014,170 @@ async def generate_roadmap_artifact(session_data, business_plan_data):
     
     return response.choices[0].message.content
 
+def parse_roadmap_step_tables(roadmap_content: str) -> List[Dict[str, Any]]:
+    """Parse roadmap markdown tables into structured phases and steps"""
+    lines = roadmap_content.splitlines()
+    phases: List[Dict[str, Any]] = []
+    current_phase: Optional[Dict[str, Any]] = None
+    current_phase_title: Optional[str] = None
+    in_table = False
+    table_lines: List[str] = []
+
+    def flush_table():
+        nonlocal table_lines, current_phase
+        if not table_lines or not current_phase:
+            table_lines = []
+            return
+
+        header_cells = [cell.strip() for cell in table_lines[0].split('|') if cell.strip()]
+        if len(header_cells) < 4:
+            table_lines = []
+            return
+
+        is_step_table = (
+            header_cells[0].lower().startswith('step name')
+            and header_cells[1].lower().startswith('step description')
+            and 'timeline' in header_cells[2].lower()
+            and 'source' in header_cells[3].lower()
+        )
+
+        if is_step_table:
+            for row_line in table_lines[2:]:
+                row_cells = [cell.strip() for cell in row_line.split('|') if cell.strip()]
+                if len(row_cells) < 4:
+                    continue
+                step_entry = {
+                    "step_name": row_cells[0],
+                    "step_description": row_cells[1],
+                    "timeline": row_cells[2],
+                    "research_source": row_cells[3]
+                }
+                current_phase.setdefault("steps", []).append(step_entry)
+
+        table_lines = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if line.startswith('###'):
+            if current_phase and current_phase.get("steps"):
+                phases.append(current_phase)
+            current_phase_title = line.lstrip('#').strip()
+            current_phase = None
+            continue
+
+        if line.lower().startswith('**roadmap steps -'):
+            if current_phase and current_phase.get("steps"):
+                phases.append(current_phase)
+            phase_title = line.replace('*', '').replace(':', '').strip()
+            current_phase = {
+                "phase_title": current_phase_title or phase_title,
+                "raw_heading": phase_title,
+                "steps": []
+            }
+            continue
+
+        if line.startswith('|'):
+            if not in_table:
+                flush_table()
+                in_table = True
+            table_lines.append(raw_line)
+        else:
+            if in_table:
+                flush_table()
+                in_table = False
+
+    if in_table:
+        flush_table()
+
+    if current_phase and current_phase.get("steps"):
+        phases.append(current_phase)
+
+    return phases
+
+async def generate_step_substeps(step: Dict[str, Any], session_data: Dict[str, Any]) -> List[str]:
+    """Generate 3-5 actionable substeps for a roadmap step"""
+    prompt = f"""
+    You are assisting an entrepreneur in the {session_data.get('industry', 'general business')} industry located in {session_data.get('location', 'the United States')}.
+    Break the following roadmap task into 3-5 sequential, actionable substeps that help them complete the task end-to-end.
+
+    Task Name: {step.get('step_name', 'Unnamed Task')}
+    Task Description: {step.get('step_description', '')}
+    Timeline Guidance: {step.get('timeline', 'No timeline provided')}
+    Research Source Summary: {step.get('research_source', '')}
+
+    Requirements:
+    - Provide exactly 3, 4, or 5 substeps depending on what is necessary.
+    - Begin each substep with an action verb.
+    - Include key deliverables or decision points.
+    - Reference the provided research sources when relevant.
+    - Keep each substep concise (max 25 words) and specific.
+    - Format your response as a JSON array of strings.
+    """
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=300
+        )
+        content = response.choices[0].message.content
+        substeps = json.loads(content)
+        if isinstance(substeps, list):
+            return [str(step).strip() for step in substeps if step]
+    except Exception as e:
+        print(f"Failed to generate substeps for {step.get('step_name')}: {e}")
+
+    fallback = step.get('step_description', '')
+    return [fallback] if fallback else ["Complete this task following the guidance provided."]
+
+async def build_structured_roadmap_data(session_data: Dict[str, Any], roadmap_content: str) -> Dict[str, Any]:
+    """Build structured roadmap data including phases, steps, and implementation tasks"""
+    phases = parse_roadmap_step_tables(roadmap_content)
+    tasks: List[Dict[str, Any]] = []
+
+    for phase_index, phase in enumerate(phases, start=1):
+        phase_title = phase.get("phase_title", f"Phase {phase_index}")
+        for step_index, step in enumerate(phase.get("steps", []), start=1):
+            task_id = f"PHASE{phase_index:02d}_STEP{step_index:02d}"
+            substeps = await generate_step_substeps(step, session_data)
+
+            tasks.append({
+                "id": task_id,
+                "phase_index": phase_index,
+                "phase_title": phase_title,
+                "step_index": step_index,
+                "step_name": step.get("step_name"),
+                "step_description": step.get("step_description"),
+                "timeline": step.get("timeline"),
+                "research_source": step.get("research_source"),
+                "substeps": substeps
+            })
+
+    return {
+        "phases": phases,
+        "tasks": tasks,
+        "generated_at": datetime.now().isoformat()
+    }
+
 async def handle_roadmap_generation(session_data, history):
     """Handle the transition from Plan to Roadmap phase"""
     
     # Generate comprehensive roadmap using RAG principles
     roadmap_content = await generate_detailed_roadmap(session_data, history)
+    structured_data = await build_structured_roadmap_data(session_data, roadmap_content)
     quote_payload = pick_motivational_quote()
+    
+    # Replace static inspirational quote in roadmap content with the dynamically selected quote
+    if "**Inspirational Quote:**" in roadmap_content:
+        replacement_text = f'**Inspirational Quote:** "{quote_payload["quote"]}" – {quote_payload["author"]}'
+        roadmap_content = re.sub(
+            r'\*\*Inspirational Quote:\*\* ".*?" – .*',
+            replacement_text,
+            roadmap_content,
+            count=1
+        )
     
     # Create the roadmap presentation message
     roadmap_message = f"""🗺️ **Your Launch Roadmap is Ready!** 🗺️
@@ -4057,7 +4219,13 @@ Your roadmap is now ready for implementation! Each phase is designed to build up
         "reply": roadmap_message,
         "transition_phase": "ROADMAP_GENERATED",
         "roadmap_content": roadmap_content,
-        "quote": quote_payload
+        "quote": quote_payload,
+        "structured_steps": structured_data.get("phases", []),
+        "implementation_tasks": structured_data.get("tasks", []),
+        "roadmap_metadata": {
+            "generated_at": structured_data.get("generated_at"),
+            "total_tasks": len(structured_data.get("tasks", []))
+        }
     }
 
 async def handle_roadmap_to_implementation_transition(session_data, history):

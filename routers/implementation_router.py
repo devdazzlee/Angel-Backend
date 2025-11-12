@@ -4,7 +4,7 @@ from services.implementation_task_manager import ImplementationTaskManager
 from services.specialized_agents_service import agents_manager
 from services.rag_service import conduct_rag_research, validate_with_rag
 from services.service_provider_tables_service import generate_provider_table, get_task_providers
-from services.session_service import get_session
+from services.session_service import get_session, patch_session
 from services.chat_service import fetch_chat_history
 from middlewares.auth import verify_auth_token
 import json
