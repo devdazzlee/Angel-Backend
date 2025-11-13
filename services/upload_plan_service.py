@@ -243,3 +243,144 @@ async def validate_business_plan_content(content: str) -> Dict[str, Any]:
             "content_type": "Unknown document type",
             "recommendations": "Unable to validate document structure"
         }
+
+async def analyze_plan_completeness(content: str, business_info: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Analyze the uploaded business plan and identify what information is missing
+    Returns analysis with missing questions that need to be answered
+    """
+    try:
+        # List of all 46 business plan questions to check against
+        business_plan_questions = [
+            "What is your business name?",
+            "What is your business tagline or mission statement?",
+            "What problem does your business solve?",
+            "What makes your business unique?",
+            "Describe your core product or service in detail",
+            "What are the key features and benefits of your product/service?",
+            "What is your product development timeline?",
+            "Who is your target market?",
+            "What is the size of your target market?",
+            "Who are your main competitors?",
+            "How is your target market currently solving this problem?",
+            "Where will your business be located?",
+            "What are your space and facility requirements?",
+            "What are your short-term operational needs?",
+            "What suppliers or vendors will you need?",
+            "What are your staffing needs?",
+            "How will you price your product/service?",
+            "What are your projected sales for the first year?",
+            "What are your estimated startup costs?",
+            "What are your estimated monthly operating expenses?",
+            "When do you expect to break even?",
+            "How much funding do you need to get started?",
+            "What are your financial projections for years 1-3?",
+            "How will you track and manage your finances?",
+            "How will you reach your target customers?",
+            "What is your sales process?",
+            "What is your customer acquisition cost?",
+            "What is your customer lifetime value?",
+            "How will you build brand awareness and credibility?",
+            "What partnerships or collaborations could help you reach more customers?",
+            "What business structure will you use (LLC, Corporation, etc.)?",
+            "What licenses and permits do you need?",
+            "What insurance coverage do you need?",
+            "How will you protect your intellectual property?",
+            "What contracts and agreements will you need?",
+            "How will you handle taxes and compliance?",
+            "What data privacy and security measures will you implement?",
+            "What are the key milestones you hope to achieve in the first year?",
+            "What additional products or services could you offer in the future?",
+            "How will you expand to new markets or customer segments?",
+            "What partnerships or strategic alliances could accelerate your growth?",
+            "What are the biggest risks and challenges your business might face?",
+            "What contingency plans do you have for major risks or setbacks?",
+            "What is your biggest concern or fear about launching this business?",
+            "What additional considerations or final thoughts do you have about your business plan?"
+        ]
+        
+        analysis_prompt = f"""
+        Analyze this business plan document and compare it against the standard business plan questions.
+        
+        Business Plan Content (first 10000 characters):
+        {content[:10000]}
+        
+        Extracted Business Information:
+        {json.dumps(business_info, indent=2)}
+        
+        Standard Business Plan Questions:
+        {json.dumps(business_plan_questions, indent=2)}
+        
+        Return a JSON object with:
+        {{
+            "summary": "Brief summary of what information is present in the plan",
+            "completeness_score": 0.0-1.0,
+            "found_information": {{
+                "business_name": true/false,
+                "mission_vision": true/false,
+                "problem_solution": true/false,
+                "target_market": true/false,
+                "competitors": true/false,
+                "financial_projections": true/false,
+                "marketing_strategy": true/false,
+                "operational_plan": true/false,
+                "legal_structure": true/false,
+                "risk_analysis": true/false
+            }},
+            "missing_questions": [
+                {{
+                    "question_number": 1-46,
+                    "question_text": "Full question text",
+                    "category": "Category (e.g., Financial, Marketing, Operations)",
+                    "priority": "high/medium/low"
+                }}
+            ],
+            "recommendations": "Overall recommendations for completing the plan"
+        }}
+        
+        Only include questions in missing_questions if the information is truly missing or insufficient.
+        Be specific about what's missing - don't just list all questions.
+        """
+
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert business plan analyst. Analyze business plans and identify missing information accurately."},
+                {"role": "user", "content": analysis_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=3000
+        )
+
+        analysis_text = response.choices[0].message.content.strip()
+        
+        # Clean up JSON response
+        if analysis_text.startswith('```json'):
+            analysis_text = analysis_text[7:]
+        elif analysis_text.startswith('```'):
+            analysis_text = analysis_text[3:]
+        if analysis_text.endswith('```'):
+            analysis_text = analysis_text[:-3]
+            
+        analysis_result = json.loads(analysis_text)
+        
+        return analysis_result
+        
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error in plan analysis: {e}")
+        return {
+            "summary": "Unable to fully analyze the plan. Please review manually.",
+            "completeness_score": 0.5,
+            "found_information": {},
+            "missing_questions": [],
+            "recommendations": "The plan was uploaded but could not be automatically analyzed. Please proceed with the business planning questions."
+        }
+    except Exception as e:
+        print(f"Error analyzing plan completeness: {e}")
+        return {
+            "summary": "Error analyzing plan",
+            "completeness_score": 0.5,
+            "found_information": {},
+            "missing_questions": [],
+            "recommendations": "An error occurred during analysis. Please proceed with the business planning questions."
+        }

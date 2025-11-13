@@ -2063,7 +2063,46 @@ Do NOT include question numbers, progress percentages, or step counts in your re
 """
     
     # Handle empty input based on context - preserve current phase state
+    # BUT FIRST check if this might be a jump request (even if empty, check session metadata)
     if not user_msg.get("content") or user_msg["content"].strip() == "":
+        # Check if session has missing questions metadata (from uploaded plan)
+        # Get from business_context JSON
+        business_context = session_data.get("business_context", {}) or {} if session_data else {}
+        uploaded_plan_mode = business_context.get("uploaded_plan_mode", False) if isinstance(business_context, dict) else False
+        missing_questions = business_context.get("missing_questions", []) if isinstance(business_context, dict) else []
+        
+        if session_data and uploaded_plan_mode and session_data.get("current_phase") == "BUSINESS_PLAN":
+            try:
+                if isinstance(missing_questions, list) and len(missing_questions) > 0:
+                    first_missing = min(missing_questions)
+                    target_tag = f"BUSINESS_PLAN.{first_missing:02d}"
+                    print(f"🎯 Empty message but session has missing questions - jumping to Q{first_missing}")
+                    
+                    # Generate dynamic question for missing information
+                    reply_content = await generate_dynamic_business_question(
+                        target_tag, 
+                        session_data, 
+                        history,
+                        is_missing_question=True
+                    )
+                    
+                    # Update business_context
+                    business_context["missing_questions"] = missing_questions
+                    business_context["uploaded_plan_mode"] = True
+                    
+                    return {
+                        "reply": reply_content,
+                        "web_search_status": {"is_searching": False, "query": None},
+                        "immediate_response": None,
+                        "patch_session": {
+                            "current_phase": "BUSINESS_PLAN",
+                            "asked_q": target_tag,
+                            "business_context": business_context  # Store in business_context JSON
+                        }
+                    }
+            except Exception as e:
+                print(f"⚠️ Error checking missing questions from session: {e}")
+        
         # Get current phase to maintain state on refresh
         current_phase = session_data.get("current_phase", "KYC") if session_data else "KYC"
         
@@ -2081,36 +2120,103 @@ Do NOT include question numbers, progress percentages, or step counts in your re
         elif current_phase == "BUSINESS_PLAN":
             current_tag = session_data.get("asked_q", "BUSINESS_PLAN.01")
             if current_tag and current_tag.startswith("BUSINESS_PLAN."):
-                # Generate the current question
-                question_prompt = f"""
-                Generate the business plan question for tag: {current_tag}
-                
-                Make sure to:
-                1. Ask the appropriate business plan question for this tag
-                2. Include the proper tag: [[Q:{current_tag}]]
-                3. Use structured format with proper line breaks
-                4. Provide context if this is a verification or continuation
-                """
-                
-                response = await client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": ANGEL_SYSTEM_PROMPT},
-                        {"role": "system", "content": TAG_PROMPT},
-                        {"role": "system", "content": FORMATTING_INSTRUCTION},
-                        {"role": "user", "content": question_prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=1000
-                )
-                
-                return response.choices[0].message.content
+                # Generate dynamic, context-aware question
+                return await generate_dynamic_business_question(current_tag, session_data, history)
         
         # Default to "hi" for KYC or initial phases
         user_msg["content"] = "hi"
 
     user_content = user_msg["content"].strip()
-    print(f"🚀 Starting Angel reply generation for: {user_content[:50]}...")
+    print(f"🚀 Starting Angel reply generation for: {user_content[:100]}...")
+    
+    # Check if user wants to start from a specific question (from uploaded plan analysis)
+    # This MUST happen early, before any other processing
+    # Try multiple patterns to catch variations
+    start_from_question_match = None
+    patterns = [
+        r'start from question (\d+)',
+        r'start.*question (\d+)',
+        r'jump.*question (\d+)',
+        r'begin.*question (\d+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, user_content.lower())
+        if match:
+            start_from_question_match = match
+            print(f"🔍 Found pattern match: '{pattern}' -> question {match.group(1)}")
+            break
+    
+    if not start_from_question_match:
+        print(f"🔍 No 'start from question' pattern found in: '{user_content[:100]}'")
+    
+    if start_from_question_match and session_data:
+        target_question_num = int(start_from_question_match.group(1))
+        current_phase = session_data.get("current_phase", "BUSINESS_PLAN")
+        
+        print(f"🎯 Jump request detected: target_question={target_question_num}, current_phase={current_phase}")
+        
+        # Force phase to BUSINESS_PLAN if we're jumping to a business plan question
+        if 1 <= target_question_num <= 46:
+            if current_phase != "BUSINESS_PLAN":
+                print(f"⚠️ Phase mismatch - forcing to BUSINESS_PLAN (was {current_phase})")
+                session_data["current_phase"] = "BUSINESS_PLAN"
+                current_phase = "BUSINESS_PLAN"
+        
+        if current_phase == "BUSINESS_PLAN" and 1 <= target_question_num <= 46:
+            # Extract missing questions list from message
+            missing_questions = []
+            missing_match = re.search(r'missing questions:\s*([\d,\s]+)', user_content.lower())
+            if missing_match:
+                missing_str = missing_match.group(1)
+                missing_questions = [int(q.strip()) for q in missing_str.split(',') if q.strip().isdigit()]
+            else:
+                # Fallback: get from business_context JSON
+                business_context = session_data.get("business_context", {}) or {}
+                if isinstance(business_context, dict):
+                    missing_questions = business_context.get("missing_questions", [])
+                else:
+                    missing_questions = []
+            
+            # Store missing questions in business_context for tracking
+            business_context = session_data.get("business_context", {}) or {}
+            if not isinstance(business_context, dict):
+                business_context = {}
+            business_context["missing_questions"] = missing_questions
+            business_context["uploaded_plan_mode"] = True
+            session_data["business_context"] = business_context
+            
+            # Update session to start from this question
+            target_tag = f"BUSINESS_PLAN.{target_question_num:02d}"
+            session_data["asked_q"] = target_tag
+            print(f"🎯 Starting from question {target_question_num} based on uploaded plan analysis")
+            print(f"📋 Missing questions to answer: {missing_questions}")
+            
+            # Generate dynamic question for missing information
+            reply_content = await generate_dynamic_business_question(
+                target_tag, 
+                session_data, 
+                history,
+                is_missing_question=True
+            )
+            
+            # Store missing questions in business_context JSON
+            business_context = session_data.get("business_context", {}) or {}
+            if not isinstance(business_context, dict):
+                business_context = {}
+            business_context["missing_questions"] = missing_questions
+            business_context["uploaded_plan_mode"] = True
+            
+            return {
+                "reply": reply_content,
+                "web_search_status": {"is_searching": False, "query": None},
+                "immediate_response": None,
+                "patch_session": {
+                    "current_phase": "BUSINESS_PLAN",  # Ensure phase is set
+                    "asked_q": target_tag,
+                    "business_context": business_context  # Store in business_context JSON
+                }
+            }
     
     # Check if user just answered the final KYC question BEFORE generating AI response
     if session_data and session_data.get("current_phase") == "KYC":
@@ -2337,19 +2443,43 @@ Do NOT include question numbers, progress percentages, or step counts in your re
             except (ValueError, IndexError):
                 pass
         
+        # Check if we're in missing questions mode
+        missing_questions_instruction = ""
+        next_question_to_ask = next_question_num
+        business_context = session_data.get("business_context", {}) or {} if session_data else {}
+        uploaded_plan_mode = business_context.get("uploaded_plan_mode", False) if isinstance(business_context, dict) else False
+        missing_questions = business_context.get("missing_questions", []) if isinstance(business_context, dict) else []
+        
+        if session_data and uploaded_plan_mode and current_phase == "BUSINESS_PLAN":
+            if isinstance(missing_questions, list) and len(missing_questions) > 0:
+                # In missing questions mode, next question should be the next missing question
+                next_missing = min(missing_questions)
+                next_question_to_ask = f"{next_missing:02d}"
+                missing_questions_instruction = f"""
+MISSING QUESTIONS MODE:
+- The user uploaded a business plan and is only answering MISSING questions
+- You MUST only ask questions from this list: {missing_questions}
+- When moving to the next question, skip to the NEXT MISSING question (not sequential)
+- The next missing question to ask is: {next_missing} (BUSINESS_PLAN.{next_question_to_ask})
+- Do NOT ask questions that are NOT in the missing list - skip them
+- Once all missing questions are answered, proceed normally to roadmap
+
+"""
+        
         session_context = f"""
 CURRENT SESSION STATE:
 - Current Phase: {current_phase}
 - Last Question Asked: {asked_q}
 - Questions Answered: {answered_count}
-- Next Question Should Be: {current_phase}.{next_question_num}
+- Next Question Should Be: {current_phase}.{next_question_to_ask}
 
+{missing_questions_instruction}
 CRITICAL INSTRUCTIONS:
 1. You must continue from where the user left off
 2. Do NOT restart the phase or go back to earlier questions
-3. The next question should be {current_phase}.{next_question_num}
+3. The next question should be {current_phase}.{next_question_to_ask}
 4. Only ask ONE question at a time
-5. Use the proper tag format: [[Q:{current_phase}.{next_question_num}]]
+5. Use the proper tag format: [[Q:{current_phase}.{next_question_to_ask}]]
 6. NEVER include "Question X" text in your response - the UI displays it automatically
 7. Do NOT ask about business plan drafting or other phases - stay in {current_phase} phase
 8. Continue with the next sequential question in the {current_phase} phase
@@ -2359,6 +2489,12 @@ CRITICAL INSTRUCTIONS:
 12. Do NOT jump to random questions - follow the exact sequence
 13. Do NOT list option bullets in your message - the UI displays clickable option buttons
 14. Do NOT provide section summaries - just acknowledge answers briefly and wait for user confirmation
+15. **IMPORTANT FOR BUSINESS_PLAN PHASE**: When asking business plan questions, make them DYNAMIC and TAILORED to the user's specific business type and industry. For example:
+    - If it's a restaurant: ask about menu, service hours, dining capacity, kitchen equipment, food suppliers
+    - If it's a service business: ask about service offerings, timelines, client management, service delivery methods
+    - If it's a product business: ask about product features, manufacturing, inventory, distribution
+    - Use industry-specific terminology and examples
+    - Include relevant follow-up prompts (e.g., "Will you offer all services upon opening, or add certain services at specific times?")
 
 """
         msgs.append({"role": "system", "content": session_context})
@@ -2514,6 +2650,65 @@ CRITICAL:
     # Ensure proper question formatting with line breaks and structure
     reply_content = ensure_proper_question_formatting(reply_content, session_data)
     reply_content = await personalize_business_question(reply_content, history, session_data)
+
+    # Check if we're in "missing questions mode" and AI is moving to next question
+    # Only auto-advance if AI is generating a new question (has a tag) and we need to skip to next missing
+    business_context = session_data.get("business_context", {}) or {} if session_data else {}
+    uploaded_plan_mode = business_context.get("uploaded_plan_mode", False) if isinstance(business_context, dict) else False
+    missing_questions = business_context.get("missing_questions", []) if isinstance(business_context, dict) else []
+    
+    if session_data and uploaded_plan_mode and session_data.get("current_phase") == "BUSINESS_PLAN":
+        # Ensure missing_questions is a list
+        if not isinstance(missing_questions, list):
+            missing_questions = []
+        
+        # Check if AI generated a tag in the reply
+        tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', reply_content)
+        if tag_match and missing_questions:
+            ai_question_num = int(tag_match.group(1))
+            current_tag = session_data.get("asked_q", "")
+            
+            # If AI is trying to ask a question that's NOT in missing list, redirect to next missing
+            if current_tag and current_tag.startswith("BUSINESS_PLAN."):
+                try:
+                    current_q_num = int(current_tag.split(".")[1])
+                    
+                    # If user just answered a missing question, remove it from list
+                    is_answer = (len(user_content.strip()) > 0 and 
+                                not user_content.lower().startswith(("support", "draft", "scrapping", "accept", "modify", "kickstart")))
+                    if is_answer and current_q_num in missing_questions:
+                        missing_questions = [q for q in missing_questions if q != current_q_num]
+                    
+                    # If AI is asking a question not in missing list, redirect to next missing
+                    if ai_question_num not in missing_questions and missing_questions:
+                        next_missing_q = min(missing_questions)
+                        next_tag = f"BUSINESS_PLAN.{next_missing_q:02d}"
+                        
+                        print(f"🎯 Redirecting from Q{ai_question_num} to next missing question Q{next_missing_q}")
+                        print(f"📋 Remaining missing questions: {missing_questions}")
+                        
+                        # Replace tag in reply
+                        reply_content = re.sub(
+                            r'\[\[Q:BUSINESS_PLAN\.\d+\]\]',
+                            f'[[Q:{next_tag}]]',
+                            reply_content,
+                            count=1
+                        )
+                        
+                        # Update session and business_context
+                        business_context["missing_questions"] = missing_questions
+                        business_context["uploaded_plan_mode"] = True
+                        patch_session["asked_q"] = next_tag
+                        patch_session["business_context"] = business_context
+                        session_data["asked_q"] = next_tag
+                        session_data["business_context"] = business_context
+                        
+                        print(f"✅ Redirected to Q{next_missing_q}")
+                    elif not missing_questions:
+                        # All missing questions answered
+                        print(f"🎉 All missing questions answered! Proceeding normally.")
+                except (ValueError, IndexError) as e:
+                    print(f"⚠️ Error parsing question number: {e}")
 
     end_time = time.time()
     response_time = end_time - start_time
@@ -4440,6 +4635,184 @@ async def generate_detailed_roadmap(session_data, history):
     except Exception as e:
         print(f"Error generating detailed roadmap: {e}")
         return "Roadmap generation in progress..."
+
+async def generate_dynamic_business_question(
+    question_tag: str, 
+    session_data: dict, 
+    history: list = None,
+    is_missing_question: bool = False
+) -> str:
+    """
+    Generate a dynamic, context-aware business plan question tailored to the user's specific business.
+    
+    Args:
+        question_tag: The question tag (e.g., "BUSINESS_PLAN.19")
+        session_data: Session data containing business context
+        history: Chat history for context
+        is_missing_question: Whether this is a missing question from uploaded plan
+    
+    Returns:
+        Formatted question string with tag
+    """
+    # Extract business context from KYC history (prioritize KYC answers over session title)
+    extracted_context = {}
+    if history:
+        extracted_context = extract_business_context_from_history(history)
+    
+    # Merge: KYC-extracted context takes priority, then session business_context, then session title as fallback
+    business_context = session_data.get("business_context", {}) or {}
+    if not isinstance(business_context, dict):
+        business_context = {}
+    
+    # Prioritize extracted context from KYC over stored business_context
+    industry = extracted_context.get("industry") or business_context.get("industry") or ""
+    business_type = extracted_context.get("business_type") or business_context.get("business_type") or ""
+    location = extracted_context.get("location") or business_context.get("location") or ""
+    
+    # For business name, use extracted if available, otherwise use session title only if it's not a generic title
+    business_name = extracted_context.get("business_name") or business_context.get("business_name") or ""
+    if not business_name:
+        session_title = session_data.get("title", "")
+        # Only use session title if it doesn't look like a generic/default title
+        if session_title and session_title.lower() not in ["untitled", "new venture", "my business", "business"]:
+            business_name = session_title
+        else:
+            business_name = "your business"
+    
+    print(f"🎯 Dynamic question context: industry={industry}, business_type={business_type}, location={location}, name={business_name}")
+    
+    # Get question topic/objective
+    question_num = int(question_tag.split(".")[1]) if "." in question_tag else 1
+    question_topics = {
+        1: "business name",
+        2: "mission statement or tagline",
+        3: "problem your business solves",
+        4: "unique value proposition",
+        5: "core product or service description",
+        6: "product/service features",
+        7: "intellectual property",
+        8: "target market",
+        9: "market size",
+        10: "competitors",
+        11: "competitive advantage",
+        12: "location",
+        13: "space and facility requirements",
+        14: "short-term operational needs",
+        15: "suppliers and vendors",
+        16: "equipment and technology needs",
+        17: "pricing strategy",
+        18: "revenue model",
+        19: "startup costs",
+        20: "monthly operating expenses",
+        21: "funding needs",
+        22: "funding sources",
+        23: "financial projections (years 1-3)",
+        24: "sales projections",
+        25: "marketing strategy",
+        26: "customer acquisition",
+        27: "distribution channels",
+        28: "partnerships",
+        29: "team and staffing",
+        30: "key personnel",
+        31: "business structure (LLC, Corp, etc.)",
+        32: "licenses and permits",
+        33: "insurance coverage",
+        34: "legal requirements",
+        35: "compliance needs",
+        36: "risk analysis",
+        37: "contingency plans",
+        38: "growth strategy",
+        39: "scalability plans",
+        40: "exit strategy",
+        41: "biggest risks and challenges",
+        42: "contingency plans for major risks",
+        43: "success metrics",
+        44: "milestones and goals",
+        45: "timeline for launch",
+        46: "next steps"
+    }
+    
+    topic = question_topics.get(question_num, "business planning")
+    
+    # Build context from history
+    business_info_summary = ""
+    if history:
+        recent_answers = []
+        for msg in history[-10:]:  # Last 10 messages for context
+            if msg.get("role") == "user" and msg.get("content"):
+                content = msg.get("content", "").strip()
+                if content and len(content) > 10:  # Skip very short answers
+                    recent_answers.append(content[:100])  # Truncate long answers
+        
+        if recent_answers:
+            business_info_summary = f"\n\nBased on what you've shared so far:\n" + "\n".join(f"- {ans}" for ans in recent_answers[-3:])  # Last 3 answers
+    
+    # Create dynamic question prompt
+    industry_context = f" in the {industry} industry" if industry else ""
+    business_type_context = f" as a {business_type}" if business_type else ""
+    location_context = f" in {location}" if location else ""
+    
+    question_prompt = f"""Generate a dynamic, tailored business plan question for {business_name}{industry_context}{business_type_context}{location_context}.
+
+QUESTION TOPIC: {topic}
+QUESTION TAG: {question_tag}
+
+CRITICAL REQUIREMENTS:
+1. The question MUST be specifically tailored to {business_name}'s business type and industry
+2. For a restaurant: ask about menu, service hours, dining capacity, kitchen equipment, food suppliers, etc.
+3. For a service business: ask about service offerings, timelines, client management, service delivery methods, etc.
+4. For a product business: ask about product features, manufacturing, inventory, distribution, etc.
+5. Include follow-up prompts that are relevant to the specific business type
+6. Use industry-specific terminology and examples
+7. Make the question conversational and natural
+8. Include the tag: [[Q:{question_tag}]]
+9. Add 1-2 thought-provoking follow-up questions if relevant
+
+EXAMPLES:
+- For a restaurant asking about operations: "What are your service offering timelines? Will you offer all services (dine-in, takeout, delivery) upon opening, or will you add certain services at specific times after opening?"
+- For a digital marketing agency asking about services: "What services will you offer initially? Will you start with a full suite of services or launch with core offerings and expand later?"
+- For a retail store asking about location: "What are your space requirements for your store? Do you need display areas, storage, fitting rooms, or a back office?"
+
+{business_info_summary}
+
+Generate the question now:"""
+    
+    if is_missing_question:
+        question_prompt += "\n\nNOTE: This information was missing from the user's uploaded business plan. Mention this contextually."
+    
+    # Define formatting instruction for question generation
+    formatting_instruction = """
+FORMATTING REQUIREMENTS:
+- Use clear, conversational language
+- Include proper line breaks for readability (add blank line after question)
+- Keep questions concise but informative
+- Use the exact tag format: [[Q:QUESTION_TAG]]
+- Do NOT include "Question X" text - the UI displays it automatically
+- Format the main question text with **bold** markdown for emphasis
+- Add a blank line after the question for spacing
+- Keep follow-up prompts concise and on separate lines if needed
+
+EXAMPLE FORMAT:
+[[Q:BUSINESS_PLAN.01]]
+
+**What will you name your POS Development business?**
+
+If you haven't settled on a name yet, what are your top 3-5 options?
+"""
+    
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": ANGEL_SYSTEM_PROMPT},
+            {"role": "system", "content": TAG_PROMPT},
+            {"role": "system", "content": formatting_instruction},
+            {"role": "user", "content": question_prompt}
+        ],
+        temperature=0.8,  # Higher temperature for more creative, tailored questions
+        max_tokens=500
+    )
+    
+    return response.choices[0].message.content
 
 async def generate_next_question(question_tag: str, session_data: dict) -> str:
     """Generate the next business planning question based on the question tag"""

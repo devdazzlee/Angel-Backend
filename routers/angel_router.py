@@ -117,6 +117,9 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     session = await get_session(session_id, user_id)
     history = await fetch_chat_history(session_id)
 
+    # Log the incoming message for debugging
+    print(f"📨 POST /chat - Received message: '{payload.content[:200]}...' (length: {len(payload.content)})")
+    
     # Save user message
     await save_chat_message(session_id, user_id, "user", payload.content)
 
