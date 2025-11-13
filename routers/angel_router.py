@@ -312,21 +312,45 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
                         tag = corrected_tag
                         current_num = message_question_num
                 
-                # Check for backwards progression
-                if prev_phase == current_phase and current_num < prev_num:
-                    print(f"⚠️ WARNING: Backwards question progression detected!")
-                    print(f"  Previous: {previous_tag} (question {prev_num})")
-                    print(f"  Current: {tag} (question {current_num})")
-                    print(f"  This may indicate an AI model error in tag generation")
-                    
-                    # Fix backwards progression by incrementing the question number
-                    corrected_num = prev_num + 1
-                    corrected_tag = f"{current_phase}.{corrected_num:02d}"
-                    print(f"🔧 Correcting tag from {tag} to {corrected_tag}")
-                    tag = corrected_tag
+                # CRITICAL: Check for non-sequential progression (skipping questions)
+                if prev_phase == current_phase and current_num != prev_num + 1:
+                    if current_num < prev_num:
+                        print(f"⚠️ WARNING: Backwards question progression detected!")
+                        print(f"  Previous: {previous_tag} (question {prev_num})")
+                        print(f"  Current: {tag} (question {current_num})")
+                        print(f"  This may indicate an AI model error in tag generation")
+                        
+                        # Fix backwards progression by incrementing the question number
+                        corrected_num = prev_num + 1
+                        corrected_tag = f"{current_phase}.{corrected_num:02d}"
+                        print(f"🔧 Correcting tag from {tag} to {corrected_tag}")
+                        tag = corrected_tag
+                    elif current_num > prev_num + 1:
+                        print(f"❌ ERROR: Question skipping detected!")
+                        print(f"  Previous: {previous_tag} (question {prev_num})")
+                        print(f"  Current: {tag} (question {current_num})")
+                        print(f"  Skipped questions: {list(range(prev_num + 1, current_num))}")
+                        print(f"  🔧 FORCING sequential progression - correcting to {prev_num + 1}")
+                        
+                        # Force sequential progression - don't allow skipping
+                        corrected_num = prev_num + 1
+                        corrected_tag = f"{current_phase}.{corrected_num:02d}"
+                        print(f"🔧 Correcting tag from {tag} to {corrected_tag}")
+                        tag = corrected_tag
+                        current_num = corrected_num
+                        
+                        # Also correct the tag in the reply content
+                        assistant_reply = re.sub(
+                            r'\[\[Q:[A-Z_]+\.\d+\]\]',
+                            f'[[Q:{corrected_tag}]]',
+                            assistant_reply,
+                            count=1
+                        )
+                        print(f"🔧 Corrected tag in reply content to {corrected_tag}")
             except (ValueError, IndexError) as e:
                 print(f"⚠️ Error parsing tag format: {e}")
         
+        # Only update session if tag is valid and sequential
         session["asked_q"] = tag
         session["current_phase"] = tag.split(".")[0]
         print(f"📝 Updated session: asked_q={tag}, current_phase={tag.split('.')[0]}")
