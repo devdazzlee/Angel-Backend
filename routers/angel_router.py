@@ -660,7 +660,15 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                                 ids_to_remove.append(next_record["id"])
 
                 if ids_to_remove:
-                    supabase.from_("chat_history").delete().in_("id", ids_to_remove).execute()
+                    try:
+                        delete_response = supabase.from_("chat_history").delete().in_("id", ids_to_remove).execute()
+                        print(f"✅ Deleted {len(ids_to_remove)} chat history records: {ids_to_remove}")
+                        # Verify deletion succeeded
+                        if not delete_response.data:
+                            print(f"⚠️ Warning: Deletion may have failed - no data in response")
+                    except Exception as delete_error:
+                        print(f"❌ Error deleting chat history records: {delete_error}")
+                        # Continue anyway - the session update will still happen
 
                 # Update session to previous question
                 if previous_phase == phase_prefix:
