@@ -138,6 +138,19 @@ CREATE TABLE IF NOT EXISTS rag_documents (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Research Cache Table
+CREATE TABLE IF NOT EXISTS research_cache (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    bucket TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    session_id UUID REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    data JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    UNIQUE (bucket, cache_key)
+);
+
 -- =============================================
 -- SPECIALIZED AGENTS TABLES
 -- =============================================
@@ -222,6 +235,10 @@ CREATE INDEX IF NOT EXISTS idx_service_providers_is_local ON service_providers(i
 -- Research Sources Indexes
 CREATE INDEX IF NOT EXISTS idx_research_sources_session_id ON research_sources(session_id);
 CREATE INDEX IF NOT EXISTS idx_research_sources_source_type ON research_sources(source_type);
+
+-- Research Cache Indexes
+CREATE INDEX IF NOT EXISTS idx_research_cache_bucket_key ON research_cache(bucket, cache_key);
+CREATE INDEX IF NOT EXISTS idx_research_cache_expires ON research_cache(expires_at);
 
 -- RAG Documents Indexes
 CREATE INDEX IF NOT EXISTS idx_rag_documents_document_type ON rag_documents(document_type);
@@ -308,6 +325,11 @@ CREATE POLICY "Users can insert their own service providers" ON service_provider
 CREATE POLICY "Users can view their own research sources" ON research_sources FOR SELECT USING (auth.uid() = user_id);
 CREATE POLICY "Users can insert their own research sources" ON research_sources FOR INSERT WITH CHECK (auth.uid() = user_id);
 
+-- RLS Policies for research_cache
+CREATE POLICY "Users can view their own research cache" ON research_cache FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "Users can insert their own research cache" ON research_cache FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "Users can delete their own research cache" ON research_cache FOR DELETE USING (auth.uid() = user_id);
+
 -- RLS Policies for agent_interactions
 CREATE POLICY "Users can view their own agent interactions" ON agent_interactions FOR SELECT USING (auth.uid() = user_id);
 CREATE POLICY "Users can insert their own agent interactions" ON agent_interactions FOR INSERT WITH CHECK (auth.uid() = user_id);
@@ -350,5 +372,7 @@ AND table_name IN (
 )
 ORDER BY table_name;
 
-
+ALTER TABLE chat_sessions
+    ADD COLUMN IF NOT EXISTS business_plan_artifact text,
+    ADD COLUMN IF NOT EXISTS business_plan_generated_at timestamptz;
 

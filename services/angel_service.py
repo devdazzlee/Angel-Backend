@@ -2121,6 +2121,14 @@ Do NOT include question numbers, progress percentages, or step counts in your re
                 "patch_session": None
             }
         
+        elif current_phase in ["IMPLEMENTATION", "ROADMAP_GENERATED"]:
+            return {
+                "reply": "You're already in the implementation workspace. Continue working through your roadmap tasks or use the interface controls to navigate steps—no new questions are needed right now.",
+                "web_search_status": {"is_searching": False, "query": None},
+                "immediate_response": None,
+                "patch_session": None
+            }
+        
         # If we're in BUSINESS_PLAN phase, continue with current question
         elif current_phase == "BUSINESS_PLAN":
             current_tag = session_data.get("asked_q", "BUSINESS_PLAN.01")
@@ -2753,6 +2761,39 @@ CRITICAL:
     end_time = time.time()
     response_time = end_time - start_time
     print(f"⏱️ Angel reply generated in {response_time:.2f} seconds")
+    
+    # Keep Supabase business_context in sync with answers captured in history
+    should_update_context = (
+        session_data
+        and history
+        and session_data.get("current_phase") in [
+            "KYC",
+            "BUSINESS_PLAN",
+            "PLAN_TO_ROADMAP_TRANSITION",
+            "ROADMAP",
+            "ROADMAP_GENERATED",
+        ]
+    )
+    if should_update_context:
+        try:
+            extracted_context = extract_business_context_from_history(history) or {}
+            if extracted_context:
+                existing_context = session_data.get("business_context") or {}
+                if not isinstance(existing_context, dict):
+                    existing_context = {}
+                updated_context = existing_context.copy()
+                changed = False
+                for key, value in extracted_context.items():
+                    if isinstance(value, str):
+                        value = value.strip()
+                    if value and updated_context.get(key) != value:
+                        updated_context[key] = value
+                        changed = True
+                if changed:
+                    session_data["business_context"] = updated_context
+                    patch_session["business_context"] = updated_context
+        except Exception as exc:
+            print(f"⚠️ Failed to update business context: {exc}")
     
     # Use AI to determine if Accept/Modify buttons should be shown (pass session_data)
     button_detection = await should_show_accept_modify_buttons(reply_content, user_content, session_data)

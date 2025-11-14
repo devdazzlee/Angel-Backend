@@ -170,11 +170,14 @@ async def get_current_implementation_task(session_id: str, request: Request):
             raise HTTPException(status_code=404, detail="Session not found")
         
         # Extract business context from session data (if available)
+        stored_context = session.get("business_context") or {}
+        if not isinstance(stored_context, dict):
+            stored_context = {}
         session_data = {
-            "business_name": session.get("business_name"),
-            "industry": session.get("industry"),
-            "location": session.get("location"),
-            "business_type": session.get("business_type")
+            "business_name": stored_context.get("business_name") or session.get("business_name"),
+            "industry": stored_context.get("industry") or session.get("industry"),
+            "location": stored_context.get("location") or session.get("location"),
+            "business_type": stored_context.get("business_type") or session.get("business_type")
         }
         
         # If session data doesn't have business context, extract from chat history
@@ -331,11 +334,17 @@ async def complete_implementation_task(
     
     try:
         # Get session data
+        session = await get_session(session_id, user_id)
+        stored_context = {}
+        if session:
+            stored_context = session.get("business_context") or {}
+            if not isinstance(stored_context, dict):
+                stored_context = {}
         session_data = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
+            "business_name": stored_context.get("business_name", "Your Business"),
+            "industry": stored_context.get("industry", "Technology"),
+            "location": stored_context.get("location", "Karachi"),
+            "business_type": stored_context.get("business_type", "Startup")
         }
         
         # Validate completion using RAG

@@ -1,9 +1,15 @@
-from fastapi import APIRouter, Request, Depends, UploadFile, File
+from fastapi import APIRouter, Request, Depends, UploadFile, File, HTTPException
 from schemas.angel_schemas import ChatRequestSchema, CreateSessionSchema, SyncProgressSchema
 from services.session_service import create_session, list_sessions, get_session, patch_session
 from services.chat_service import fetch_chat_history, save_chat_message, fetch_phase_chat_history
 from services.generate_plan_service import generate_full_business_plan, generate_full_roadmap_plan, generate_comprehensive_business_plan_summary, generate_implementation_insights, generate_service_provider_preview, generate_motivational_quote
-from services.angel_service import get_angel_reply, handle_roadmap_generation, handle_roadmap_to_implementation_transition
+from services.angel_service import (
+    get_angel_reply,
+    handle_roadmap_generation,
+    handle_roadmap_to_implementation_transition,
+    generate_business_plan_artifact,
+    extract_business_context_from_history,
+)
 from utils.progress import parse_tag, TOTALS_BY_PHASE, calculate_phase_progress, calculate_combined_progress, smart_trim_history
 from middlewares.auth import verify_auth_token
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +40,60 @@ PHASE_SEQUENCE = [
     "ROADMAP_TO_IMPLEMENTATION_TRANSITION",
     "IMPLEMENTATION",
 ]
+
+BUSINESS_CONTEXT_KEYS = ["business_name", "industry", "location", "business_type"]
+DEFAULT_BUSINESS_CONTEXT = {
+    "business_name": "Your Business",
+    "industry": "General Business",
+    "location": "United States",
+    "business_type": "Startup",
+}
+
+
+def _phase_index(phase: str) -> int:
+    try:
+        return PHASE_SEQUENCE.index(phase)
+    except ValueError:
+        return -1
+
+
+def _question_progress(asked_q: str):
+    """
+    Return a tuple (phase_index, question_number) that can be compared to prevent regressions.
+    """
+    if not asked_q or "." not in asked_q:
+        return -1, -1
+    phase, _, number = asked_q.partition(".")
+    try:
+        question_number = int(number)
+    except ValueError:
+        question_number = -1
+    return _phase_index(phase), question_number
+
+
+def _normalize_business_context(context: dict) -> dict:
+    normalized = DEFAULT_BUSINESS_CONTEXT.copy()
+    if not context or not isinstance(context, dict):
+        return normalized
+    for key in BUSINESS_CONTEXT_KEYS:
+        value = context.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+        if value:
+            normalized[key] = value
+    return normalized
+
+
+def _has_meaningful_context(context: dict) -> bool:
+    if not context or not isinstance(context, dict):
+        return False
+    for key in BUSINESS_CONTEXT_KEYS:
+        value = context.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+        if value:
+            return True
+    return False
 
 def enforce_question_tag(reply: str, question_tag: str) -> str:
     """
@@ -84,18 +144,95 @@ async def chat_history(request: Request, session_id: str):
     return {"success": True, "message": "Chat history fetched", "data": history}
 
 
+@router.get("/sessions/{session_id}/business-context")
+async def get_business_context(session_id: str, request: Request):
+    """Return authoritative business context derived from KYC + Business Plan phases."""
+    user_id = request.state.user["id"]
+    session = await get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    stored_context = session.get("business_context") if isinstance(session.get("business_context"), dict) else {}
+    if stored_context is None:
+        stored_context = {}
+
+    needs_refresh = (
+        not stored_context
+        or any(
+            not stored_context.get(key) or not str(stored_context.get(key)).strip()
+            for key in BUSINESS_CONTEXT_KEYS
+        )
+    )
+
+    source = "stored"
+    updated = False
+
+    if needs_refresh:
+        history = await fetch_chat_history(session_id)
+        extracted_context = extract_business_context_from_history(history) or {}
+        if extracted_context:
+            merged_context = stored_context.copy()
+            for key, value in extracted_context.items():
+                if isinstance(value, str):
+                    value = value.strip()
+                if value and merged_context.get(key) != value:
+                    merged_context[key] = value
+                    updated = True
+            if updated:
+                await patch_session(session_id, {"business_context": merged_context})
+                session["business_context"] = merged_context
+                stored_context = merged_context
+                source = "extracted"
+        else:
+            source = "fallback"
+
+    normalized = _normalize_business_context(stored_context)
+
+    return {
+        "success": True,
+        "message": "Business context fetched",
+        "result": {
+            "business_context": normalized,
+            "source": source,
+            "updated": updated
+        }
+    }
+
+
 @router.post("/sessions/{session_id}/sync-progress")
 async def sync_progress(request: Request, session_id: str, payload: SyncProgressSchema):
     user_id = request.state.user["id"]
     session = await get_session(session_id, user_id)
 
+    current_phase = session.get("current_phase", "KYC")
+    current_phase_idx = _phase_index(current_phase)
+    incoming_phase = payload.phase or current_phase
+    incoming_phase_idx = _phase_index(incoming_phase)
+
+    # Prevent regressions: never allow the client to move the phase backwards
+    if incoming_phase_idx < current_phase_idx:
+        incoming_phase = current_phase
+        incoming_phase_idx = current_phase_idx
+
+    current_answered = session.get("answered_count", 0)
+    incoming_answered = payload.answered_count if payload.answered_count is not None else current_answered
+
+    if incoming_phase_idx < current_phase_idx:
+        incoming_answered = current_answered
+    elif incoming_phase_idx == current_phase_idx:
+        incoming_answered = max(current_answered, incoming_answered)
+
     updates = {
-        "current_phase": payload.phase,
-        "answered_count": payload.answered_count,
+        "current_phase": incoming_phase,
+        "answered_count": incoming_answered,
     }
 
     if payload.asked_q:
-        updates["asked_q"] = payload.asked_q
+        current_q_progress = _question_progress(session.get("asked_q"))
+        incoming_q_progress = _question_progress(payload.asked_q)
+        # Allow update only if it moves forward (or if no previous question)
+        if current_q_progress == (-1, -1) or incoming_q_progress >= current_q_progress:
+            updates["asked_q"] = payload.asked_q
 
     await patch_session(session_id, updates)
     session.update(updates)

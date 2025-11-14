@@ -5,12 +5,50 @@ from services.rag_service import conduct_rag_research, validate_with_rag, genera
 from services.service_provider_tables_service import generate_provider_table, get_task_providers
 from middlewares.auth import verify_auth_token
 from schemas.angel_schemas import ChatRequestSchema
+from datetime import datetime, timedelta
+import hashlib
 import json
 
 router = APIRouter(
     tags=["Specialized Agents & RAG"],
     dependencies=[Depends(verify_auth_token)]
 )
+
+CACHE_TTL = timedelta(hours=6)
+_cache_store: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+
+def _serialize_for_cache(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _get_cache(bucket: str, key: str) -> Optional[Any]:
+    bucket_store = _cache_store.get(bucket)
+    if not bucket_store:
+        return None
+    entry = bucket_store.get(key)
+    if not entry:
+        return None
+    if entry["expires_at"] < datetime.utcnow():
+        bucket_store.pop(key, None)
+        return None
+    return entry["data"]
+
+
+def _set_cache(bucket: str, key: str, data: Any) -> None:
+    bucket_store = _cache_store.setdefault(bucket, {})
+    bucket_store[key] = {
+        "data": data,
+        "expires_at": datetime.utcnow() + CACHE_TTL
+    }
+
+
+def _make_cache_key(*parts: Any) -> str:
+    raw = "||".join(_serialize_for_cache(part) for part in parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 @router.post("/agent-guidance")
 async def get_agent_guidance(
@@ -27,19 +65,29 @@ async def get_agent_guidance(
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
     
+    normalized_question = question.strip()
+    cache_key = _make_cache_key(user_id, agent_type, normalized_question, business_context)
+    cached_response = _get_cache("agent_guidance", cache_key)
+    if cached_response:
+        print(f"📦 Using cached agent guidance for agent={agent_type}")
+        return cached_response
+
     try:
+        response_payload = None
         if agent_type == "comprehensive":
             # Get guidance from all relevant agents
-            guidance = await get_comprehensive_guidance(question, business_context, [])
+            guidance = await get_comprehensive_guidance(normalized_question, business_context, [])
         else:
             # Get guidance from specific agent
-            guidance = await agents_manager.get_agent_guidance(agent_type, question, business_context, [])
+            guidance = await agents_manager.get_agent_guidance(agent_type, normalized_question, business_context, [])
         
-        return {
+        response_payload = {
             "success": True,
             "message": "Agent guidance generated successfully",
             "result": guidance
         }
+        _set_cache("agent_guidance", cache_key, response_payload)
+        return response_payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get agent guidance: {str(e)}")
 
@@ -57,12 +105,19 @@ async def get_provider_table(
     if not task_id:
         raise HTTPException(status_code=400, detail="Task ID is required")
     
+    cache_key = _make_cache_key(user_id, task_id, business_context)
+    cached_response = _get_cache("provider_table", cache_key)
+    if cached_response:
+        print(f"📦 Using cached provider table for task_id={task_id}")
+        return cached_response
+
     try:
+        response_payload = None
         # Create task description from task_id
         task_description = f"implementation task {task_id}"
         providers = await get_task_providers(task_id, task_description, business_context)
         
-        return {
+        response_payload = {
             "success": True,
             "message": "Provider table generated successfully",
             "result": {
@@ -70,6 +125,8 @@ async def get_provider_table(
                 "task_id": task_id
             }
         }
+        _set_cache("provider_table", cache_key, response_payload)
+        return response_payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get provider table: {str(e)}")
 
@@ -119,14 +176,22 @@ async def conduct_rag_research_simple(
     if not query:
         raise HTTPException(status_code=400, detail="Research query is required")
     
+    cache_key = _make_cache_key(user_id, query, business_context, "standard")
+    cached_response = _get_cache("rag_research", cache_key)
+    if cached_response:
+        print(f"📦 Using cached RAG research (simple) for query={query[:40]}")
+        return cached_response
+
     try:
         research_results = await conduct_rag_research(query, business_context, "standard")
         
-        return {
+        response_payload = {
             "success": True,
             "message": "RAG research completed successfully",
             "result": research_results
         }
+        _set_cache("rag_research", cache_key, response_payload)
+        return response_payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to conduct RAG research: {str(e)}")
 
@@ -208,14 +273,22 @@ async def conduct_rag_research_endpoint(
     if not query:
         raise HTTPException(status_code=400, detail="Research query is required")
     
+    cache_key = _make_cache_key(session_id, user_id, query, business_context, research_depth)
+    cached_response = _get_cache("rag_research_session", cache_key)
+    if cached_response:
+        print(f"📦 Using cached session RAG research for query={query[:40]}")
+        return cached_response
+
     try:
         research_results = await conduct_rag_research(query, business_context, research_depth)
         
-        return {
+        response_payload = {
             "success": True,
             "message": "RAG research completed successfully",
             "result": research_results
         }
+        _set_cache("rag_research_session", cache_key, response_payload)
+        return response_payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to conduct RAG research: {str(e)}")
 
@@ -319,14 +392,22 @@ async def generate_service_provider_table_endpoint(
     if not task_context:
         raise HTTPException(status_code=400, detail="Task context is required")
     
+    cache_key = _make_cache_key(session_id, task_context, business_context, location)
+    cached_response = _get_cache("provider_table_session", cache_key)
+    if cached_response:
+        print(f"📦 Using cached session provider table for task_context={task_context[:40]}")
+        return cached_response
+
     try:
         provider_table = await generate_provider_table(task_context, business_context, location)
         
-        return {
+        response_payload = {
             "success": True,
             "message": "Service provider table generated successfully",
             "result": provider_table
         }
+        _set_cache("provider_table_session", cache_key, response_payload)
+        return response_payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate provider table: {str(e)}")
 

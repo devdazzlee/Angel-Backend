@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 import asyncio
 from services.angel_service import conduct_web_search
+from services.research_cache_service import build_cache_key, get_cached_entry, set_cached_entry
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -47,12 +48,18 @@ class RAGResearchEngine:
         """Conduct comprehensive research using multiple authoritative sources with caching"""
         
         # Check cache first for performance
-        cache_key = f"{query}_{research_depth}_{hash(str(business_context))}"
+        cache_key = build_cache_key(query, business_context, research_depth)
         if cache_key in self.cache:
-            cached_result = self.cache[cache_key]
-            if (datetime.now() - cached_result['timestamp']).seconds < self.cache_ttl:
+            cached_entry = self.cache[cache_key]
+            if (datetime.now() - cached_entry["timestamp"]).seconds < self.cache_ttl:
                 print(f"📋 Using cached research for: {query[:50]}...")
-                return cached_result['data']
+                return cached_entry["data"]
+
+        persistent_cached = get_cached_entry("rag_research", cache_key)
+        if persistent_cached:
+            print(f"📦 Using persistent cached research for: {query[:50]}...")
+            self.cache[cache_key] = {"data": persistent_cached, "timestamp": datetime.now()}
+            return persistent_cached
         
         # Enhance query with business context
         enhanced_query = self._enhance_query(query, business_context)
@@ -100,17 +107,24 @@ class RAGResearchEngine:
         }
         
         # Cache the result
+        now = datetime.now()
         self.cache[cache_key] = {
             'data': result,
-            'timestamp': datetime.now()
+            'timestamp': now
         }
+        set_cached_entry("rag_research", cache_key, result)
         
         return result
     
     async def _conduct_fast_research(self, query: str, business_context: Dict[str, Any]) -> Dict[str, Any]:
         """Conduct fast research for implementation phase with minimal sources"""
         
-        # Use only the most essential sources for speed
+        # Use cache for fast research when available
+        cache_key = build_cache_key(query, business_context, "implementation_fast")
+        cached_result = get_cached_entry("rag_research_fast", cache_key)
+        if cached_result:
+            return cached_result
+
         fast_sources = {
             "government": ["sba.gov"],
             "industry_reports": ["hbr.org"]
@@ -139,7 +153,7 @@ class RAGResearchEngine:
         # Generate quick analysis
         analysis = "Based on current business best practices and regulatory requirements, here are the key considerations for this implementation task."
         
-        return {
+        result = {
             "query": query,
             "enhanced_query": query,
             "business_context": business_context,
@@ -149,6 +163,9 @@ class RAGResearchEngine:
             "timestamp": datetime.now().isoformat(),
             "sources_consulted": len([r for r in research_results if not isinstance(r, Exception)])
         }
+
+        set_cached_entry("rag_research_fast", cache_key, result, ttl_seconds=1800)
+        return result
     
     def _enhance_query(self, query: str, business_context: Dict[str, Any]) -> str:
         """Enhance query with business context for more targeted research"""
@@ -438,11 +455,15 @@ class RAGServiceProviderEngine:
         """Research service providers for a specific service type"""
         
         # Check cache first
-        cache_key = f"{service_type}_{business_context.get('industry', '')}_{location or 'default'}"
+        cache_key = build_cache_key(service_type, business_context, location or "default")
         if cache_key in self.cache:
             cache_entry = self.cache[cache_key]
             if (datetime.now() - cache_entry['timestamp']).seconds < self.cache_ttl:
                 return cache_entry['data']
+        persistent_cached = get_cached_entry("provider_research", cache_key)
+        if persistent_cached:
+            self.cache[cache_key] = {"data": persistent_cached, "timestamp": datetime.now()}
+            return persistent_cached
         
         # Determine relevant sources for the service type
         relevant_sources = self.provider_sources.get(service_type, self.provider_sources["general"])
@@ -478,10 +499,12 @@ class RAGServiceProviderEngine:
             "timestamp": datetime.now().isoformat()
         }
         
+        now = datetime.now()
         self.cache[cache_key] = {
             "data": result,
-            "timestamp": datetime.now()
+            "timestamp": now
         }
+        set_cached_entry("provider_research", cache_key, result, ttl_seconds=1800)
         
         return result
     

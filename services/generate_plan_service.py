@@ -6,6 +6,24 @@ from services.angel_service import generate_business_plan_artifact, conduct_web_
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+
+def _safe_excerpt(value, fallback_message, limit=1000):
+    """
+    Safely truncate research content for logging/prompts without assuming the
+    value is a string. Prevents 'NoneType' slicing errors and provides a clear
+    fallback when research wasn't retrieved.
+    """
+    if not value:
+        return fallback_message
+
+    if not isinstance(value, str):
+        try:
+            value = json.dumps(value)
+        except Exception:
+            value = str(value)
+
+    return value[:limit]
+
 async def generate_full_business_plan(history):
     """Generate comprehensive business plan with deep research"""
 
@@ -432,12 +450,12 @@ Your roadmap is complete, researched, and ready for execution. The next phase wi
 
     # Format the roadmap template with research data
     roadmap_content = ROADMAP_TEMPLATE.format(
-        government_resources=government_resources[:500] if government_resources else "Government sources researched",
-        regulatory_requirements=regulatory_requirements[:500] if regulatory_requirements else "Regulatory requirements identified",
-        academic_insights=academic_insights[:500] if academic_insights else "Academic research reviewed",
-        startup_research=startup_research[:500] if startup_research else "Startup research conducted",
-        market_entry_strategy=market_entry_strategy[:500] if market_entry_strategy else "Market entry strategy analyzed",
-        operational_insights=operational_insights[:500] if operational_insights else "Operational insights gathered"
+        government_resources=_safe_excerpt(government_resources, "Government sources researched", 500),
+        regulatory_requirements=_safe_excerpt(regulatory_requirements, "Regulatory requirements identified", 500),
+        academic_insights=_safe_excerpt(academic_insights, "Academic research reviewed", 500),
+        startup_research=_safe_excerpt(startup_research, "Startup research conducted", 500),
+        market_entry_strategy=_safe_excerpt(market_entry_strategy, "Market entry strategy analyzed", 500),
+        operational_insights=_safe_excerpt(operational_insights, "Operational insights gathered", 500)
     )
     
     # Generate final roadmap using AI with explicit reference to Roadmap Deep Research Questions V3
@@ -449,12 +467,12 @@ Your roadmap is complete, researched, and ready for execution. The next phase wi
     Session Data: {json.dumps(session_data, indent=2)}
     
     Deep Research Conducted:
-    Government Resources: {government_resources[:1000]}
-    Regulatory Requirements: {regulatory_requirements[:1000]}
-    Academic Insights: {academic_insights[:1000]}
-    Startup Research: {startup_research[:1000]}
-    Market Entry Strategy: {market_entry_strategy[:1000]}
-    Operational Insights: {operational_insights[:1000]}
+    Government Resources: {_safe_excerpt(government_resources, "Government sources researched")}
+    Regulatory Requirements: {_safe_excerpt(regulatory_requirements, "Regulatory requirements identified")}
+    Academic Insights: {_safe_excerpt(academic_insights, "Academic research reviewed")}
+    Startup Research: {_safe_excerpt(startup_research, "Startup research conducted")}
+    Market Entry Strategy: {_safe_excerpt(market_entry_strategy, "Market entry strategy analyzed")}
+    Operational Insights: {_safe_excerpt(operational_insights, "Operational insights gathered")}
     
     **Reference Document**: Roadmap Deep Research Questions V3
     
@@ -495,12 +513,12 @@ Your roadmap is complete, researched, and ready for execution. The next phase wi
         print(f"Error generating roadmap with AI: {e}")
         # Fallback to formatted template
         roadmap_content = ROADMAP_TEMPLATE.format(
-            government_resources=government_resources[:500] if government_resources else "Government sources researched",
-            regulatory_requirements=regulatory_requirements[:500] if regulatory_requirements else "Regulatory requirements identified",
-            academic_insights=academic_insights[:500] if academic_insights else "Academic research reviewed",
-            startup_research=startup_research[:500] if startup_research else "Startup research conducted",
-            market_entry_strategy=market_entry_strategy[:500] if market_entry_strategy else "Market entry strategy analyzed",
-            operational_insights=operational_insights[:500] if operational_insights else "Operational insights gathered"
+            government_resources=_safe_excerpt(government_resources, "Government sources researched", 500),
+            regulatory_requirements=_safe_excerpt(regulatory_requirements, "Regulatory requirements identified", 500),
+            academic_insights=_safe_excerpt(academic_insights, "Academic research reviewed", 500),
+            startup_research=_safe_excerpt(startup_research, "Startup research conducted", 500),
+            market_entry_strategy=_safe_excerpt(market_entry_strategy, "Market entry strategy analyzed", 500),
+            operational_insights=_safe_excerpt(operational_insights, "Operational insights gathered", 500)
         )
     
     return {
