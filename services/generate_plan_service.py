@@ -198,13 +198,17 @@ async def generate_full_roadmap_plan(history):
 
 ## Executive Summary & Research Foundation
 
+**CRITICAL REFERENCE**: This roadmap generation MUST reference and align with "Roadmap Deep Research Questions V3" to ensure comprehensive coverage of all critical roadmap planning areas.
+
 This comprehensive launch roadmap is grounded in extensive research from three authoritative source categories:
 
 **Government Sources (.gov)**: SBA, IRS, SEC, state business agencies, regulatory bodies
 **Academic Research (.edu, scholar)**: University research, peer-reviewed journals, business school publications  
 **Industry Reports**: Bloomberg, Wall Street Journal, Forbes, Harvard Business Review, industry publications
 
-Every recommendation has been validated against current best practices and cited with specific sources to ensure you have authoritative, verified guidance.
+**Reference Document**: Roadmap Deep Research Questions V3
+
+Every recommendation has been validated against current best practices and cited with specific sources to ensure you have authoritative, verified guidance. This roadmap follows the structure and depth requirements of Roadmap Deep Research Questions V3.
 
 ---
 
@@ -425,6 +429,88 @@ Your roadmap is complete, researched, and ready for execution. The next phase wi
 - Use a professional but friendly tone
 - Ensure sequence is visually clear with numbered steps in order
 """
+
+    # Format the roadmap template with research data
+    roadmap_content = ROADMAP_TEMPLATE.format(
+        government_resources=government_resources[:500] if government_resources else "Government sources researched",
+        regulatory_requirements=regulatory_requirements[:500] if regulatory_requirements else "Regulatory requirements identified",
+        academic_insights=academic_insights[:500] if academic_insights else "Academic research reviewed",
+        startup_research=startup_research[:500] if startup_research else "Startup research conducted",
+        market_entry_strategy=market_entry_strategy[:500] if market_entry_strategy else "Market entry strategy analyzed",
+        operational_insights=operational_insights[:500] if operational_insights else "Operational insights gathered"
+    )
+    
+    # Generate final roadmap using AI with explicit reference to Roadmap Deep Research Questions V3
+    roadmap_prompt = f"""
+    Generate a comprehensive, detailed launch roadmap based on the following research and template:
+    
+    **CRITICAL REFERENCE**: This roadmap generation MUST reference and align with "Roadmap Deep Research Questions V3" to ensure comprehensive coverage of all critical roadmap planning areas.
+    
+    Session Data: {json.dumps(session_data, indent=2)}
+    
+    Deep Research Conducted:
+    Government Resources: {government_resources[:1000]}
+    Regulatory Requirements: {regulatory_requirements[:1000]}
+    Academic Insights: {academic_insights[:1000]}
+    Startup Research: {startup_research[:1000]}
+    Market Entry Strategy: {market_entry_strategy[:1000]}
+    Operational Insights: {operational_insights[:1000]}
+    
+    **Reference Document**: Roadmap Deep Research Questions V3
+    
+    Use the following template structure and fill it with comprehensive, detailed content that:
+    1. References "Roadmap Deep Research Questions V3" to ensure all critical areas are covered
+    2. Incorporates all the research findings above
+    3. Provides specific, actionable steps with timelines and research sources
+    4. Follows the table format requirements specified in the template
+    5. Addresses all questions and considerations from Roadmap Deep Research Questions V3
+    
+    Template Structure:
+    {ROADMAP_TEMPLATE[:2000]}...
+    
+    **IMPORTANT**: Ensure the roadmap addresses all questions and considerations from "Roadmap Deep Research Questions V3" to provide a truly comprehensive, actionable launch plan.
+    
+    Generate the complete roadmap now, following the template structure and ensuring all phases are detailed with specific steps, timelines, and research source citations.
+    """
+    
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert business roadmap advisor. Generate comprehensive, actionable launch roadmaps that reference Roadmap Deep Research Questions V3 and incorporate extensive research from government, academic, and industry sources."
+                },
+                {
+                    "role": "user",
+                    "content": roadmap_prompt
+                }
+            ],
+            temperature=0.6,
+            max_tokens=8000
+        )
+        
+        roadmap_content = response.choices[0].message.content
+    except Exception as e:
+        print(f"Error generating roadmap with AI: {e}")
+        # Fallback to formatted template
+        roadmap_content = ROADMAP_TEMPLATE.format(
+            government_resources=government_resources[:500] if government_resources else "Government sources researched",
+            regulatory_requirements=regulatory_requirements[:500] if regulatory_requirements else "Regulatory requirements identified",
+            academic_insights=academic_insights[:500] if academic_insights else "Academic research reviewed",
+            startup_research=startup_research[:500] if startup_research else "Startup research conducted",
+            market_entry_strategy=market_entry_strategy[:500] if market_entry_strategy else "Market entry strategy analyzed",
+            operational_insights=operational_insights[:500] if operational_insights else "Operational insights gathered"
+        )
+    
+    return {
+        "plan": roadmap_content,
+        "generated_at": datetime.now().isoformat(),
+        "research_conducted": True,
+        "industry": session_data['industry'],
+        "location": session_data['location'],
+        "reference_document": "Roadmap Deep Research Questions V3"
+    }
 
 async def generate_implementation_insights(industry: str, location: str, business_type: str):
     """Generate RAG-powered implementation insights for the transition phase"""

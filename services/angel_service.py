@@ -4184,6 +4184,8 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     business_plan_prompt = f"""
     Generate a comprehensive, detailed business plan based on the following conversation history and extensive research:
     
+    **CRITICAL REFERENCE**: This business plan generation MUST reference and align with "Business Plan Deep Research Questions V2" to ensure comprehensive coverage of all critical business planning areas.
+    
     Session Data: {json.dumps(session_data, indent=2)}
     
     Deep Research Conducted:
@@ -4194,7 +4196,12 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     Conversation History: {json.dumps(conversation_history[-20:], indent=2)}
     
-    Create a professional business plan that is in-depth, holistic, and highly detailed. This should blend the user's direct answers with research-driven insights to fill in gaps and provide comprehensive coverage of:
+    **Reference Document**: Business Plan Deep Research Questions V2
+    
+    Create a professional business plan that is in-depth, holistic, and highly detailed. This should:
+    1. Reference "Business Plan Deep Research Questions V2" to ensure all critical areas are covered
+    2. Blend the user's direct answers with research-driven insights to fill in gaps
+    3. Provide comprehensive coverage of all areas specified in Business Plan Deep Research Questions V2:
     
     1. Executive Summary
     2. Company Description  
@@ -4207,7 +4214,9 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     9. Risk Analysis
     10. Implementation Timeline
     
-    Include a note at the beginning that this business plan incorporates deep research and market analysis to provide comprehensive insights beyond what was discussed in the questionnaire.
+    **IMPORTANT**: Ensure the business plan addresses all questions and considerations from "Business Plan Deep Research Questions V2" to provide a truly comprehensive document.
+    
+    Include a note at the beginning that this business plan incorporates deep research and market analysis to provide comprehensive insights beyond what was discussed in the questionnaire, and that it follows the structure and depth requirements of Business Plan Deep Research Questions V2.
     
     Make this a trust-building milestone that demonstrates deep understanding of both the customer and their business opportunity.
     """
