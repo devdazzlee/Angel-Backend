@@ -67,7 +67,10 @@ class ImplementationTaskManager:
         }
     
     async def get_next_implementation_task(self, session_data: Dict[str, Any], completed_tasks: List[str]) -> Dict[str, Any]:
-        """Get the next implementation task based on progress"""
+        """Get the next implementation task based on progress
+        
+        Each roadmap task is decomposed into 3-5 synchronous substeps that help the user complete the task completely.
+        """
         
         # Determine current phase and next task
         current_phase, next_task_id = self._determine_next_task(completed_tasks)
@@ -77,6 +80,11 @@ class ImplementationTaskManager:
         
         # Generate task details (use fast mode to avoid web search loops)
         task_details = await self._generate_task_details_fast(next_task_id, session_data)
+        
+        # CRITICAL: Decompose task into 3-5 synchronous substeps
+        substeps = await self._generate_substeps(next_task_id, session_data)
+        task_details["substeps"] = substeps
+        task_details["current_substep"] = self._get_current_substep(completed_tasks, next_task_id, substeps)
         
         # Get service providers for this task (use predefined providers for speed)
         service_providers = self._get_predefined_service_providers(next_task_id, session_data)
@@ -94,6 +102,239 @@ class ImplementationTaskManager:
             "estimated_time": self._get_estimated_time(next_task_id),
             "priority": self._get_priority(next_task_id)
         }
+    
+    async def _generate_substeps(self, task_id: str, session_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate 3-5 synchronous substeps for a roadmap task
+        
+        Each substep should be:
+        - Sequential and synchronous (must complete in order)
+        - Clear and actionable
+        - Help the user complete the task completely
+        """
+        
+        # Use AI to generate substeps based on task
+        substep_prompt = f"""
+        Decompose the implementation task "{task_id}" into 3-5 synchronous, sequential substeps.
+        
+        Task Context:
+        - Task ID: {task_id}
+        - Business: {session_data.get('business_name', 'Your Business')}
+        - Industry: {session_data.get('industry', 'General Business')}
+        - Location: {session_data.get('location', 'United States')}
+        
+        Requirements:
+        1. Generate exactly 3-5 substeps (prefer 4-5 for completeness)
+        2. Each substep must be sequential and synchronous (must complete in order)
+        3. Each substep should be clear, actionable, and help complete the task
+        4. Substeps should build upon each other logically
+        5. Include what the user needs to do and what Angel can help with
+        
+        Return as JSON array with format:
+        [
+            {{
+                "step_number": 1,
+                "title": "Substep title",
+                "description": "What the user needs to do",
+                "angel_can_help": "What Angel can do to help",
+                "estimated_time": "X hours/days",
+                "required": true
+            }},
+            ...
+        ]
+        
+        Generate substeps now:
+        """
+        
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",  # Use mini for faster response
+                messages=[
+                    {"role": "system", "content": "You are an expert business implementation advisor. Generate clear, actionable substeps for business tasks."},
+                    {"role": "user", "content": substep_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=1000,
+                response_format={"type": "json_object"}
+            )
+            
+            result = json.loads(response.choices[0].message.content)
+            substeps = result.get("substeps", result.get("steps", []))  # Handle both "substeps" and "steps" keys
+            
+            # Ensure we have 3-5 substeps
+            if len(substeps) < 3:
+                # Add default substeps if needed
+                substeps.extend(self._get_default_substeps(task_id, len(substeps)))
+            elif len(substeps) > 5:
+                substeps = substeps[:5]  # Limit to 5
+            
+            return substeps[:5]  # Ensure max 5 substeps
+            
+        except Exception as e:
+            print(f"Error generating substeps: {e}")
+            # Fallback to predefined substeps
+            return self._get_predefined_substeps(task_id)
+    
+    def _get_predefined_substeps(self, task_id: str) -> List[Dict[str, Any]]:
+        """Get predefined substeps for common tasks"""
+        
+        substeps_map = {
+            "business_structure_selection": [
+                {
+                    "step_number": 1,
+                    "title": "Research Business Structure Options",
+                    "description": "Research and compare LLC, Corporation, Partnership, and Sole Proprietorship options",
+                    "angel_can_help": "Generate comparison chart, research state-specific requirements, create decision matrix",
+                    "estimated_time": "2-4 hours",
+                    "required": True
+                },
+                {
+                    "step_number": 2,
+                    "title": "Evaluate Tax Implications",
+                    "description": "Understand tax implications and benefits of each structure for your business",
+                    "angel_can_help": "Research tax requirements, generate tax comparison analysis, consult with tax experts",
+                    "estimated_time": "1-2 hours",
+                    "required": True
+                },
+                {
+                    "step_number": 3,
+                    "title": "Consider Liability Protection",
+                    "description": "Evaluate liability protection needs and how each structure protects your personal assets",
+                    "angel_can_help": "Research liability protection, generate risk assessment, create protection comparison",
+                    "estimated_time": "1-2 hours",
+                    "required": True
+                },
+                {
+                    "step_number": 4,
+                    "title": "Make Final Decision",
+                    "description": "Select the business structure that best fits your needs, goals, and circumstances",
+                    "angel_can_help": "Generate decision summary, create action plan, prepare registration documents",
+                    "estimated_time": "1 hour",
+                    "required": True
+                }
+            ],
+            "business_registration": [
+                {
+                    "step_number": 1,
+                    "title": "Prepare Registration Documents",
+                    "description": "Gather required documents including business name, address, registered agent information",
+                    "angel_can_help": "Generate document checklist, draft registration forms, create document templates",
+                    "estimated_time": "2-3 hours",
+                    "required": True
+                },
+                {
+                    "step_number": 2,
+                    "title": "Check Name Availability",
+                    "description": "Verify business name is available in your state and not trademarked",
+                    "angel_can_help": "Check name availability, search trademarks, generate availability report",
+                    "estimated_time": "1-2 hours",
+                    "required": True
+                },
+                {
+                    "step_number": 3,
+                    "title": "File Registration Forms",
+                    "description": "Complete and submit registration forms to appropriate state agency",
+                    "angel_can_help": "Draft registration forms, review for accuracy, generate filing checklist",
+                    "estimated_time": "2-4 hours",
+                    "required": True
+                },
+                {
+                    "step_number": 4,
+                    "title": "Obtain Confirmation and EIN",
+                    "description": "Receive registration confirmation and apply for Employer Identification Number (EIN)",
+                    "angel_can_help": "Generate EIN application, create confirmation checklist, set up next steps",
+                    "estimated_time": "1-2 hours",
+                    "required": True
+                }
+            ],
+            "business_bank_account": [
+                {
+                    "step_number": 1,
+                    "title": "Research Bank Options",
+                    "description": "Compare business banking options including fees, features, and requirements",
+                    "angel_can_help": "Compare bank options, generate comparison chart, research requirements",
+                    "estimated_time": "2-3 hours",
+                    "required": True
+                },
+                {
+                    "step_number": 2,
+                    "title": "Gather Required Documents",
+                    "description": "Collect all documents needed for account opening (EIN, registration docs, ID, etc.)",
+                    "angel_can_help": "Generate document checklist, verify document completeness, create document organizer",
+                    "estimated_time": "1-2 hours",
+                    "required": True
+                },
+                {
+                    "step_number": 3,
+                    "title": "Schedule Appointment or Apply Online",
+                    "description": "Schedule in-person appointment or complete online application",
+                    "angel_can_help": "Find local branches, prepare application materials, generate appointment checklist",
+                    "estimated_time": "1-2 hours",
+                    "required": True
+                },
+                {
+                    "step_number": 4,
+                    "title": "Complete Account Setup",
+                    "description": "Finalize account setup, order checks, set up online banking, and activate account",
+                    "angel_can_help": "Generate setup checklist, create online banking guide, set up financial tracking",
+                    "estimated_time": "1-2 hours",
+                    "required": True
+                }
+            ]
+        }
+        
+        default_substeps = [
+            {
+                "step_number": 1,
+                "title": "Research and Plan",
+                "description": "Research requirements and create implementation plan",
+                "angel_can_help": "Research best practices, generate implementation plan, create checklist",
+                "estimated_time": "2-4 hours",
+                "required": True
+            },
+            {
+                "step_number": 2,
+                "title": "Prepare Materials",
+                "description": "Gather and prepare all required materials and documents",
+                "angel_can_help": "Generate document checklist, create templates, prepare materials",
+                "estimated_time": "1-2 hours",
+                "required": True
+            },
+            {
+                "step_number": 3,
+                "title": "Execute Implementation",
+                "description": "Complete the main implementation steps",
+                "angel_can_help": "Provide step-by-step guidance, review progress, troubleshoot issues",
+                "estimated_time": "2-4 hours",
+                "required": True
+            },
+            {
+                "step_number": 4,
+                "title": "Verify and Complete",
+                "description": "Verify completion, address any issues, and finalize",
+                "angel_can_help": "Verify completion, generate completion checklist, set up next steps",
+                "estimated_time": "1-2 hours",
+                "required": True
+            }
+        ]
+        
+        return substeps_map.get(task_id, default_substeps)
+    
+    def _get_default_substeps(self, task_id: str, current_count: int) -> List[Dict[str, Any]]:
+        """Get default substeps to ensure we have at least 3"""
+        default = self._get_predefined_substeps(task_id)
+        return default[current_count:3] if len(default) > current_count else []
+    
+    def _get_current_substep(self, completed_tasks: List[str], task_id: str, substeps: List[Dict[str, Any]]) -> int:
+        """Determine which substep the user is currently on"""
+        # Check if any substeps are completed (stored as task_id_substep_X)
+        for substep in substeps:
+            substep_id = f"{task_id}_substep_{substep.get('step_number', 0)}"
+            if substep_id not in completed_tasks:
+                return substep.get('step_number', 1)
+        # If all substeps completed or no substeps, return the last substep number or 1
+        if substeps:
+            return substeps[-1].get('step_number', len(substeps))
+        return 1  # Start with first substep
     
     def _determine_next_task(self, completed_tasks: List[str]) -> tuple[str, str]:
         """Determine the next task based on completed tasks"""

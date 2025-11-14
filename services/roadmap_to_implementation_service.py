@@ -142,7 +142,12 @@ async def get_motivational_quote(business_context: Dict) -> Dict:
     return random.choice(relevant_quotes)
 
 async def get_service_provider_preview(business_context: Dict) -> List[Dict]:
-    """Get a preview of service providers relevant to the business context"""
+    """Get a preview of service providers relevant to the business context
+    
+    Requirements:
+    - Minimum 3 providers
+    - At least 1 local provider
+    """
     
     industry = business_context.get('industry', '').lower()
     business_type = business_context.get('business_type', '').lower()
@@ -150,27 +155,37 @@ async def get_service_provider_preview(business_context: Dict) -> List[Dict]:
     
     providers = []
     
-    # Always include legal and financial providers
-    providers.extend(SERVICE_PROVIDER_CATEGORIES['legal'])
-    providers.extend(SERVICE_PROVIDER_CATEGORIES['financial'])
+    # Always include at least one legal provider
+    if SERVICE_PROVIDER_CATEGORIES['legal']:
+        providers.append(SERVICE_PROVIDER_CATEGORIES['legal'][0])
+    
+    # Always include at least one financial provider
+    if SERVICE_PROVIDER_CATEGORIES['financial']:
+        providers.append(SERVICE_PROVIDER_CATEGORIES['financial'][0])
     
     # Add industry-specific providers
     if 'tech' in industry or 'software' in industry:
-        providers.extend(SERVICE_PROVIDER_CATEGORIES['technology'])
+        if SERVICE_PROVIDER_CATEGORIES['technology']:
+            providers.append(SERVICE_PROVIDER_CATEGORIES['technology'][0])
     elif 'retail' in industry or 'ecommerce' in industry:
-        providers.extend(SERVICE_PROVIDER_CATEGORIES['technology'])
+        if SERVICE_PROVIDER_CATEGORIES['technology']:
+            providers.append(SERVICE_PROVIDER_CATEGORIES['technology'][0])
     elif 'service' in business_type or 'consulting' in business_type:
-        providers.extend(SERVICE_PROVIDER_CATEGORIES['marketing'])
+        if SERVICE_PROVIDER_CATEGORIES['marketing']:
+            providers.append(SERVICE_PROVIDER_CATEGORIES['marketing'][0])
     
-    # Add local providers (marked as local)
+    # CRITICAL: Always add at least 1 local provider (required)
     local_providers = []
-    if location != 'United States':
-        local_providers.append({
-            "name": f"Local Business Attorney - {location}",
-            "type": "Local Legal Services",
-            "description": f"Personalized legal guidance for business formation in {location}",
-            "local": True
-        })
+    # Always add a local provider regardless of location
+    local_providers.append({
+        "name": f"Local Business Attorney - {location}",
+        "type": "Local Legal Services",
+        "description": f"Personalized legal guidance for business formation in {location}",
+        "local": True
+    })
+    
+    # Add additional local provider if we need more
+    if len(providers) < 2:  # If we have less than 2 non-local, add another local
         local_providers.append({
             "name": f"Local CPA - {location}",
             "type": "Local Accounting Services", 
@@ -180,8 +195,31 @@ async def get_service_provider_preview(business_context: Dict) -> List[Dict]:
     
     providers.extend(local_providers)
     
-    # Return up to 6 providers
-    return providers[:6]
+    # Ensure we have at least 3 providers total
+    while len(providers) < 3:
+        # Add more providers from available categories
+        if len(providers) < 3 and SERVICE_PROVIDER_CATEGORIES['legal'] and len(providers) < 3:
+            if SERVICE_PROVIDER_CATEGORIES['legal'][1] not in providers:
+                providers.append(SERVICE_PROVIDER_CATEGORIES['legal'][1])
+        if len(providers) < 3 and SERVICE_PROVIDER_CATEGORIES['financial']:
+            if SERVICE_PROVIDER_CATEGORIES['financial'][1] not in providers:
+                providers.append(SERVICE_PROVIDER_CATEGORIES['financial'][1])
+        if len(providers) >= 3:
+            break
+    
+    # Verify we have at least 1 local provider
+    local_count = sum(1 for p in providers if p.get('local', False))
+    if local_count == 0:
+        # Force add a local provider if none exist
+        providers.insert(0, {
+            "name": f"Local Business Services - {location}",
+            "type": "Local Business Services",
+            "description": f"Comprehensive local business support in {location}",
+            "local": True
+        })
+    
+    # Return providers (minimum 3, at least 1 local)
+    return providers[:max(3, len(providers))]
 
 async def generate_implementation_insights(business_context: Dict, roadmap_content: str) -> str:
     """Generate research-backed implementation insights using RAG"""
