@@ -264,6 +264,8 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 ### 4. Your Complete Launch Timeline
 
+**IMPORTANT: All roadmap steps are organized in sequential tables below. Each table shows the exact order of tasks with timelines and research sources.**
+
 ### 5. Phase 1: Legal Formation & Compliance (Months 1-2)
 
 **Roadmap Steps - Phase 1: Legal Foundation**
@@ -288,6 +290,8 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 **Roadmap Steps - Phase 2: Financial Foundation**
 
+**Sequential Steps (Execute in Order):**
+
 | Step Name | Step Description | Timeline | Research Source |
 |-----------|------------------|----------|----------------|
 | **Open Business Bank Account** | Select and open dedicated business checking account. Compare traditional banks vs online/fintech options. Consider fees, features, integration capabilities. Gather required documents (EIN, formation docs, ID). | 1-2 weeks | **Government**: FDIC.gov banking guidance for small businesses<br>**Industry**: NerdWallet, Bankrate business banking comparisons<br>**Academic**: Business school research on startup financial management |
@@ -307,6 +311,8 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 ### 7. Phase 3: Product & Operations Development (Months 3-5)
 
 **Roadmap Steps - Phase 3: Operational Foundation**
+
+**Sequential Steps (Execute in Order):**
 
 | Step Name | Step Description | Timeline | Research Source |
 |-----------|------------------|----------|----------------|
@@ -328,6 +334,8 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 **Roadmap Steps - Phase 4: Market Launch Preparation**
 
+**Sequential Steps (Execute in Order):**
+
 | Step Name | Step Description | Timeline | Research Source |
 |-----------|------------------|----------|----------------|
 | **Develop Brand Identity** | Create brand positioning, messaging, visual identity (logo, colors, fonts). Define unique value proposition and brand voice. Develop brand guidelines document. | 3-4 weeks | **Academic**: University marketing research on brand positioning<br>**Industry**: Forbes/HBR branding strategy articles |
@@ -348,6 +356,8 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 ### 9. Phase 5: Full Launch & Scaling (Months 7-12)
 
 **Roadmap Steps - Phase 5: Launch & Growth**
+
+**Sequential Steps (Execute in Order):**
 
 | Step Name | Step Description | Timeline | Research Source |
 |-----------|------------------|----------|----------------|
@@ -401,10 +411,19 @@ Your roadmap is complete, researched, and ready for execution. The next phase wi
 
 *This roadmap is tailored specifically to your business, industry, and location. Every recommendation is designed to help you build the business of your dreams.*
 
-**Formatting Requirements:**
+**CRITICAL FORMATTING REQUIREMENTS:**
+- ALL roadmap steps MUST be in markdown table format with columns: Step Name | Step Description | Timeline | Research Source
+- Use sequential numbering (1, 2, 3, etc.) to show clear sequence of events
+- Each phase MUST have a table with ALL steps listed in order
+- Do NOT use bullet points or paragraphs for roadmap steps - ONLY use tables
+- Tables must follow this exact format:
+  | Step Name | Step Description | Timeline | Research Source |
+  |-----------|------------------|----------|----------------|
+  | **Step 1: [Name]** | [Detailed description] | [Timeframe] | [Source citations] |
+  | **Step 2: [Name]** | [Detailed description] | [Timeframe] | [Source citations] |
 - Bold all step titles and key terms
-- Use bullet lists for clarity
 - Use a professional but friendly tone
+- Ensure sequence is visually clear with numbered steps in order
 """
 
 async def generate_implementation_insights(industry: str, location: str, business_type: str):

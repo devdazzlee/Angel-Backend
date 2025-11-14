@@ -1571,11 +1571,9 @@ async def handle_business_plan_completion(session_data, history):
 
 You've successfully completed your comprehensive business plan! This is a significant milestone in your entrepreneurial journey.
 
-**"Success is not final; failure is not fatal: it is the courage to continue that counts."** – Winston Churchill
-
 ---
 
-## **Business Plan Summary Overview**
+## Business Plan Summary Overview
 
 **Note:** This is a high-level summary of your comprehensive Business Plan. Your complete Business Plan Artifact (the full, detailed document similar to the example provided on 10/10) will be generated and available for download once you proceed to the Roadmap phase.
 
@@ -1583,7 +1581,7 @@ You've successfully completed your comprehensive business plan! This is a signif
 
 ---
 
-## **What's Next: Roadmap Generation**
+## What's Next: Roadmap Generation
 
 Based on your detailed business plan, I will now generate a comprehensive, actionable launch roadmap that translates your plan into explicit, chronological tasks. This roadmap will include:
 
@@ -1667,6 +1665,13 @@ async def generate_business_plan_summary(session_data, history):
     5. Key Strategies
     6. Financial Considerations
     7. Next Steps
+    
+    CRITICAL FORMATTING REQUIREMENTS:
+    - Use markdown headers (## or ###) for section headers, NOT bold asterisks
+    - Section headers should be formatted as: ## Section Name (not **Section Name**)
+    - Numbered sections should be: ### 1. Section Name (not **1. Section Name**)
+    - Use **bold** only for emphasis within paragraphs, NOT for section headers
+    - Example: ## Business Overview (correct) vs **Business Overview** (incorrect)
     
     Make it professional and comprehensive, highlighting the key decisions and milestones achieved.
     """
@@ -2429,6 +2434,41 @@ Do NOT include question numbers, progress percentages, or step counts in your re
         asked_q = session_data.get("asked_q", "KYC.01")
         answered_count = session_data.get("answered_count", 0)
         
+        # CRITICAL: After Draft/Support commands, ensure AI remembers the current question
+        # Check if the last assistant message was a Draft/Support response
+        last_assistant_msg = None
+        for msg in reversed(history[-5:]):
+            if msg.get('role') == 'assistant':
+                last_assistant_msg = msg.get('content', '')
+                break
+        
+        # If last message was Draft/Support, add instruction to NOT repeat the question
+        if last_assistant_msg and any(indicator in last_assistant_msg.lower() for indicator in [
+            "here's a draft", "here's a research-backed draft", "let me help you with research-backed insights",
+            "support command", "draft command"
+        ]):
+            # User is now providing an answer after using Draft/Support
+            # AI should acknowledge and move to next question, NOT repeat the current question
+            msgs.append({
+                "role": "system",
+                "content": f"""
+⚠️ CRITICAL CONTEXT - USER JUST PROVIDED ANSWER AFTER DRAFT/SUPPORT:
+
+The user has just provided an answer to the current question: {asked_q}
+
+You MUST:
+1. Briefly acknowledge their answer (1-2 sentences max)
+2. Immediately ask the NEXT question (do NOT repeat the current question)
+3. Do NOT ask the same question again - they just answered it
+4. Move forward to the next sequential question
+
+The current question was: {asked_q}
+You should now ask the NEXT question in sequence.
+
+DO NOT repeat "{asked_q}" - the user has already answered it.
+"""
+            })
+        
         # Determine next question number
         next_question_num = "01"
         if "." in asked_q:
@@ -2938,6 +2978,15 @@ async def generate_draft_content(history, business_context, current_question="",
     10. Is comprehensive enough to be used as-is (500-700 words)
     11. NEVER mentions unrelated industries - stay focused on {industry.upper()}
     
+    ⚠️ CRITICAL FOR COST/FINANCIAL QUESTIONS:
+    - If the question asks about costs, expenses, pricing, acquisition costs, startup costs, or any financial estimates:
+      * You MUST provide ACTUAL NUMERICAL ESTIMATES based on the {industry.upper()} industry and {location} market
+      * Include specific dollar amounts, ranges, or percentages (e.g., "$50-$200 per customer", "15-25% of revenue", "$10,000-$25,000")
+      * Base estimates on research data, industry benchmarks, and {location} market conditions
+      * Break down costs by category if applicable
+      * DO NOT just provide general advice - provide actual numbers the user can use
+      * Example: For "customer acquisition cost" - provide a specific range like "$25-$75 per customer for a {industry.upper()} in {location}"
+    
     Structure the draft with clear sections like:
         - Main answer/core content for {industry.upper()} business (with data)
     - Key points or features with statistics (use bullet points)
@@ -3079,8 +3128,11 @@ We believe that every customer deserves solutions that are tailored to their spe
     elif any(keyword in current_question for keyword in ['monthly expenses', 'monthly operating expenses', 'recurring costs', 'operating expenses']):
         return await generate_monthly_expenses_draft(business_context, current_question)
     
-    elif any(keyword in current_question for keyword in ['customer acquisition cost', 'acquisition cost', 'customer acquisition']):
+    elif any(keyword in current_question for keyword in ['customer acquisition cost', 'acquisition cost', 'customer acquisition', 'cost to acquire', 'cac']):
         return await generate_customer_acquisition_cost_draft(business_context, current_question)
+    
+    elif any(keyword in current_question for keyword in ['pricing', 'price', 'pricing strategy', 'how will you price', 'pricing model']):
+        return await generate_pricing_with_cost_analysis_draft(business_context, current_question)
     
     elif any(keyword in current_question for keyword in ['financial', 'budget', 'costs', 'expenses', 'funding', 'investment']):
         return "Based on your business requirements, here's a draft for your financial planning: Your financial plan should include startup costs, operating expenses, cash flow projections, and funding requirements. Consider fixed costs (rent, salaries, equipment) and variable costs (materials, marketing, commissions). Focus on creating realistic budgets, identifying funding sources, and planning for financial sustainability. Think about break-even analysis, profit margins, and financial contingency planning to ensure long-term viability."
@@ -4659,7 +4711,8 @@ async def generate_dynamic_business_question(
     if history:
         extracted_context = extract_business_context_from_history(history)
     
-    # Merge: KYC-extracted context takes priority, then session business_context, then session title as fallback
+    # Merge: KYC-extracted context takes priority, then session business_context
+    # NEVER use session title as business name - it's just a venture label, not the actual business name
     business_context = session_data.get("business_context", {}) or {}
     if not isinstance(business_context, dict):
         business_context = {}
@@ -4669,20 +4722,25 @@ async def generate_dynamic_business_question(
     business_type = extracted_context.get("business_type") or business_context.get("business_type") or ""
     location = extracted_context.get("location") or business_context.get("location") or ""
     
-    # For business name, use extracted if available, otherwise use session title only if it's not a generic title
+    # For business name: ONLY use extracted from KYC/business plan answers, NEVER use session title
+    # Session title is just a venture label, not the actual business name
     business_name = extracted_context.get("business_name") or business_context.get("business_name") or ""
-    if not business_name:
-        session_title = session_data.get("title", "")
-        # Only use session title if it doesn't look like a generic/default title
-        if session_title and session_title.lower() not in ["untitled", "new venture", "my business", "business"]:
-            business_name = session_title
-        else:
-            business_name = "your business"
-    
-    print(f"🎯 Dynamic question context: industry={industry}, business_type={business_type}, location={location}, name={business_name}")
     
     # Get question topic/objective
     question_num = int(question_tag.split(".")[1]) if "." in question_tag else 1
+    
+    # If we're asking Question 1 (business name), don't use any name - we're asking for it
+    if question_num == 1:
+        business_name = ""  # Don't use any name for the name question itself
+    
+    # If no business name found, use generic placeholder
+    if not business_name:
+        business_name = "your business"
+    
+    print(f"🎯 Dynamic question context: industry={industry}, business_type={business_type}, location={location}, name={business_name}")
+    print(f"🎯 Question number: {question_num}, Using business_name: '{business_name}'")
+    
+    # Get question topic/objective
     question_topics = {
         1: "business name",
         2: "mission statement or tagline",
@@ -4748,30 +4806,42 @@ async def generate_dynamic_business_question(
             business_info_summary = f"\n\nBased on what you've shared so far:\n" + "\n".join(f"- {ans}" for ans in recent_answers[-3:])  # Last 3 answers
     
     # Create dynamic question prompt
+    # Use industry name as the primary identifier if available (from KYC)
+    if industry:
+        business_identifier = industry  # Use industry from KYC (e.g., "Chai Stall")
+    elif business_name and business_name != "your business":
+        business_identifier = business_name
+    else:
+        business_identifier = "your business"
+    
     industry_context = f" in the {industry} industry" if industry else ""
     business_type_context = f" as a {business_type}" if business_type else ""
     location_context = f" in {location}" if location else ""
     
-    question_prompt = f"""Generate a dynamic, tailored business plan question for {business_name}{industry_context}{business_type_context}{location_context}.
+    question_prompt = f"""Generate a dynamic, tailored business plan question for {business_identifier}{industry_context}{business_type_context}{location_context}.
 
 QUESTION TOPIC: {topic}
 QUESTION TAG: {question_tag}
 
 CRITICAL REQUIREMENTS:
-1. The question MUST be specifically tailored to {business_name}'s business type and industry
-2. For a restaurant: ask about menu, service hours, dining capacity, kitchen equipment, food suppliers, etc.
-3. For a service business: ask about service offerings, timelines, client management, service delivery methods, etc.
-4. For a product business: ask about product features, manufacturing, inventory, distribution, etc.
-5. Include follow-up prompts that are relevant to the specific business type
-6. Use industry-specific terminology and examples
-7. Make the question conversational and natural
-8. Include the tag: [[Q:{question_tag}]]
-9. Add 1-2 thought-provoking follow-up questions if relevant
+1. The question MUST be specifically tailored to {business_identifier}'s business type and industry
+2. Use the industry name from KYC answers (e.g., "Chai Stall", "POS Development") - NOT the venture/session title
+3. For a restaurant/chai stall: ask about menu, service hours, dining capacity, kitchen equipment, food suppliers, etc.
+4. For a service business: ask about service offerings, timelines, client management, service delivery methods, etc.
+5. For a product business: ask about product features, manufacturing, inventory, distribution, etc.
+6. Include follow-up prompts that are relevant to the specific business type
+7. Use industry-specific terminology and examples
+8. Make the question conversational and natural
+9. Include the tag: [[Q:{question_tag}]]
+10. Add 1-2 thought-provoking follow-up questions if relevant
 
-EXAMPLES:
+EXAMPLES (use these as patterns, NOT exact text):
+- For a food service business asking about name: "What will you name your [industry]? If you haven't decided yet, what are your top 3-5 name options?"
 - For a restaurant asking about operations: "What are your service offering timelines? Will you offer all services (dine-in, takeout, delivery) upon opening, or will you add certain services at specific times after opening?"
-- For a digital marketing agency asking about services: "What services will you offer initially? Will you start with a full suite of services or launch with core offerings and expand later?"
-- For a retail store asking about location: "What are your space requirements for your store? Do you need display areas, storage, fitting rooms, or a back office?"
+- For a service business asking about services: "What services will you offer initially? Will you start with a full suite of services or launch with core offerings and expand later?"
+- For a retail business asking about location: "What are your space requirements for your [business type]? Do you need display areas, storage, fitting rooms, or a back office?"
+
+IMPORTANT: Replace [industry] and [business type] with the ACTUAL industry and business type from the user's KYC answers. Do NOT use hardcoded examples like "Chai Stall" - use the actual industry name the user provided.
 
 {business_info_summary}
 
@@ -5140,6 +5210,90 @@ Adjust ALL numbers for {location}. Be SPECIFIC to {industry}."""
 - Marketing & advertising
 - Insurance & licenses
 - Technology & software"""
+async def generate_pricing_with_cost_analysis_draft(business_context, current_question):
+    """Generate pricing strategy with comprehensive cost analysis"""
+    industry = business_context.get("industry", "your industry")
+    business_name = business_context.get("business_name", "your business")
+    location = business_context.get("location", "your location")
+    business_type = business_context.get("business_type", "service")
+    
+    prompt = f"""You are a business pricing expert. Generate a comprehensive pricing strategy with detailed cost analysis for "{business_name}" - a {industry} business in {location}.
+
+CONTEXT:
+- Industry: {industry}
+- Business Type: {business_type}
+- Location: {location}
+
+REQUIREMENTS:
+1. Provide a comprehensive cost analysis that includes:
+   - Fixed costs (rent, salaries, insurance, utilities, etc.) with actual dollar amounts
+   - Variable costs per unit/service (materials, labor, commissions, etc.) with actual dollar amounts
+   - Overhead costs (marketing, administrative, etc.) with actual dollar amounts
+   - Total cost per unit/service calculation
+
+2. Develop pricing strategy based on cost analysis:
+   - Cost-plus pricing: Calculate minimum price needed to cover costs
+   - Competitive pricing: Research-based pricing relative to competitors
+   - Value-based pricing: Pricing based on customer value perception
+   - Recommended pricing range with specific dollar amounts
+
+3. Include break-even analysis:
+   - Break-even point in units/services
+   - Break-even point in revenue (actual dollar amount)
+   - Profit margin targets (specific percentages)
+
+4. Provide pricing tiers/options if applicable:
+   - Basic tier: $X - includes [features]
+   - Standard tier: $Y - includes [features]
+   - Premium tier: $Z - includes [features]
+
+5. Include industry-specific considerations for {industry}:
+   - Market pricing benchmarks for {location}
+   - Customer willingness to pay
+   - Seasonal pricing variations if applicable
+
+⚠️ CRITICAL: You MUST provide ACTUAL NUMERICAL ESTIMATES:
+- All costs must have specific dollar amounts (e.g., "$500-$1,200 per month", "$25-$50 per unit")
+- Pricing recommendations must include specific dollar ranges (e.g., "$99-$149 per service", "$49-$79 per product")
+- Break-even calculations must show actual numbers (e.g., "Break-even at 50 units/month = $5,000 revenue")
+- Base all estimates on {industry} industry benchmarks and {location} market conditions
+
+Be SPECIFIC to {industry} - use actual pricing strategies that industry uses, not generic ones.
+DO NOT provide general advice - provide actual numbers and calculations the user can use immediately."""
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=2000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"Error generating pricing with cost analysis: {e}")
+        return f"""Pricing Strategy with Cost Analysis for {industry} business:
+
+**Cost Analysis Required:**
+- Calculate all fixed costs (rent, salaries, insurance, utilities)
+- Calculate variable costs per unit/service (materials, labor, commissions)
+- Calculate overhead costs (marketing, administrative)
+- Determine total cost per unit/service
+
+**Pricing Strategy:**
+- Cost-plus pricing: Add desired profit margin to total costs
+- Competitive pricing: Research competitor pricing in {location}
+- Value-based pricing: Price based on customer value perception
+
+**Break-Even Analysis:**
+- Calculate break-even point in units/services
+- Calculate break-even revenue
+- Set profit margin targets
+
+**Recommendations:**
+- Research {industry} pricing benchmarks for {location}
+- Consider customer willingness to pay
+- Test pricing with target market"""
+
 async def generate_customer_acquisition_cost_draft(business_context, current_question):
     """Generate dynamic, AI-powered CAC analysis for ANY business type"""
     industry = business_context.get("industry", "your industry")
@@ -5162,6 +5316,15 @@ REQUIREMENTS:
 5. Give optimization recommendations
 6. Format as tables
 
+⚠️ CRITICAL: You MUST provide ACTUAL NUMERICAL ESTIMATES with specific dollar amounts:
+- Provide specific dollar ranges for CAC per channel (e.g., "$25-$75 per customer", "$50-$150 per customer")
+- Include actual monthly marketing spend estimates (e.g., "$500-$2,000 per month")
+- Provide specific conversion rate percentages (e.g., "2-5%", "10-15%")
+- Calculate actual total CAC with a specific dollar amount (e.g., "$45-$120 per customer")
+- Include actual LTV estimates with dollar amounts (e.g., "$200-$500 per customer")
+- Provide actual LTV:CAC ratios (e.g., "3:1", "4:1")
+- Base all estimates on {industry} industry benchmarks and {location} market conditions
+
 Marketing channels should be SPECIFIC to {industry}:
 - B2B SaaS: LinkedIn Ads, content marketing, cold outreach, webinars
 - Restaurant: Local SEO, food delivery apps, Instagram, Yelp
@@ -5171,17 +5334,18 @@ Marketing channels should be SPECIFIC to {industry}:
 - Professional services: Referrals, networking, SEO, professional directories
 
 Include:
-- Monthly cost per channel
-- Leads generated
-- Conversion rates (industry-realistic)
-- CAC per channel
-- Total CAC
-- LTV calculation
-- LTV:CAC ratio
-- Profitability assessment
+- Monthly cost per channel (with actual dollar amounts)
+- Leads generated (with actual numbers)
+- Conversion rates (industry-realistic percentages)
+- CAC per channel (with actual dollar amounts like "$30-$80")
+- Total CAC (with actual dollar amount like "$45-$120 per customer")
+- LTV calculation (with actual dollar amount)
+- LTV:CAC ratio (with actual ratio like "3:1" or "4:1")
+- Profitability assessment (with actual numbers)
 - Optimization recommendations
 
-Be SPECIFIC to {industry} - use actual channels that industry uses, not generic ones."""
+Be SPECIFIC to {industry} - use actual channels that industry uses, not generic ones.
+DO NOT provide general advice - provide actual numbers the user can use immediately."""
 
     try:
         response = await client.chat.completions.create(
