@@ -76,5 +76,5 @@ def set_cached_entry(
         "user_id": user_id,
         "data": data,
         "expires_at": expires_at.isoformat() + "Z"
-    }, on_conflict="cache_key").execute()
+    }, on_conflict="bucket,cache_key").execute()
 

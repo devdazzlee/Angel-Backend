@@ -376,3 +376,5 @@ ALTER TABLE chat_sessions
     ADD COLUMN IF NOT EXISTS business_plan_artifact text,
     ADD COLUMN IF NOT EXISTS business_plan_generated_at timestamptz;
 
+CREATE INDEX IF NOT EXISTS idx_research_cache_bucket_key ON research_cache(bucket, cache_key);
+CREATE INDEX IF NOT EXISTS idx_research_cache_expires ON research_cache(expires_at);
