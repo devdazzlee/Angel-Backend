@@ -1,6 +1,7 @@
 from db.supabase import supabase
 import logging
 from typing import Final
+from gotrue.errors import AuthApiError
 
 logger = logging.getLogger(__name__)
 
@@ -26,38 +27,36 @@ def _normalize_contact_number(contact_number: str) -> str:
 
 
 async def create_user(email: str, password: str, full_name: str, contact_number: str):
-    response = supabase.auth.sign_up({
-        "email": email,
-        "password": password,
-        "options": {
-            "data": {
-                "full_name": full_name,
-                "contact_number": contact_number,
-                "display_name": full_name,
-            }
-        }
-    })
-    if response.user is None:
-        raise Exception("User not created")
-
-    user_id = response.user.id
     normalized_phone = _normalize_contact_number(contact_number)
 
-    supabase.auth.admin.update_user_by_id(
-        user_id,
-        {
-            "phone": normalized_phone,
-            "user_metadata": {
-                "full_name": full_name,
-                "contact_number": contact_number,
-                "display_name": full_name,
-                "phone_e164": normalized_phone,
-            },
-        }
-    )
+    try:
+        response = supabase.auth.sign_up({
+            "email": email,
+            "password": password,
+            "options": {
+                "data": {
+                    "full_name": full_name,
+                    "contact_number": contact_number,
+                    "display_name": full_name,
+                    "phone_e164": normalized_phone,
+                }
+            }
+        })
+    except AuthApiError as exc:
+        logger.error("Supabase signup failed: %s", exc.message)
+        raise ValueError(exc.message) from exc
 
-    updated_user_response = supabase.auth.admin.get_user_by_id(user_id)
-    return updated_user_response.user
+    if response.user is None:
+        raise ValueError("User not created")
+
+    user_id = response.user.id
+
+    try:
+        updated_user_response = supabase.auth.admin.get_user_by_id(user_id)
+        return updated_user_response.user
+    except AuthApiError as exc:
+        logger.warning("Unable to fetch user after signup, returning created user: %s", exc.message)
+        return response.user
 
 async def authenticate_user(email: str, password: str):
     response = supabase.auth.sign_in_with_password({"email": email, "password": password})
