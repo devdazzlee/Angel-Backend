@@ -1,6 +1,6 @@
 from db.supabase import supabase
 import logging
-from typing import Final
+from typing import Final, Optional
 from gotrue.errors import AuthApiError
 
 logger = logging.getLogger(__name__)
@@ -9,10 +9,13 @@ _MIN_E164_LENGTH: Final[int] = 8
 _MAX_E164_LENGTH: Final[int] = 15
 
 
-def _normalize_contact_number(contact_number: str) -> str:
+def _normalize_contact_number(contact_number: Optional[str]) -> Optional[str]:
+    if not contact_number:
+        return None
+    
     stripped = contact_number.strip()
     if not stripped:
-        raise ValueError("Contact number is required")
+        return None
 
     if not stripped.startswith("+"):
         raise ValueError("Contact number must start with '+' followed by country code, e.g., +15551234567")
@@ -26,20 +29,24 @@ def _normalize_contact_number(contact_number: str) -> str:
     return normalized
 
 
-async def create_user(email: str, password: str, full_name: str, contact_number: str):
-    normalized_phone = _normalize_contact_number(contact_number)
+async def create_user(email: str, password: str, full_name: str, contact_number: Optional[str] = None):
+    user_data = {
+        "full_name": full_name,
+        "display_name": full_name,
+    }
+    
+    if contact_number:
+        normalized_phone = _normalize_contact_number(contact_number)
+        if normalized_phone:
+            user_data["contact_number"] = contact_number
+            user_data["phone_e164"] = normalized_phone
 
     try:
         response = supabase.auth.sign_up({
             "email": email,
             "password": password,
             "options": {
-                "data": {
-                    "full_name": full_name,
-                    "contact_number": contact_number,
-                    "display_name": full_name,
-                    "phone_e164": normalized_phone,
-                }
+                "data": user_data
             }
         })
     except AuthApiError as exc:

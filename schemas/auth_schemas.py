@@ -1,9 +1,10 @@
 from pydantic import BaseModel, EmailStr, Field, model_validator
+from typing import Optional
 
 
 class SignUpSchema(BaseModel):
     full_name: str = Field(..., min_length=1)
-    contact_number: str = Field(..., min_length=4)
+    contact_number: Optional[str] = None
     email: EmailStr
     password: str = Field(..., min_length=6)
     confirm_password: str = Field(..., min_length=6)
