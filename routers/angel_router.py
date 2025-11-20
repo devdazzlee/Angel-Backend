@@ -788,26 +788,66 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                 )
                 history_records = history_response.data or []
 
-                # Find the most recent occurrence of the previous question in history
+                # Find the LAST occurrence of the previous question BEFORE the current question
+                # This is important because going back to Q1 means we want the intro Q1, not a later Q1
                 target_index = None
                 previous_tag_marker = f"[[Q:{previous_tag}]]"
-
-                for idx in range(len(history_records) - 1, -1, -1):
+                current_tag_marker = f"[[Q:{current_tag}]]" if current_tag else None
+                
+                print(f"🔍 Looking for previous question tag: {previous_tag_marker}")
+                print(f"🔍 Current question tag: {current_tag_marker}")
+                print(f"🔍 History has {len(history_records)} records")
+                
+                # Find the position of the current question first (if it exists)
+                current_question_index = None
+                if current_tag_marker:
+                    for idx in range(len(history_records) - 1, -1, -1):
+                        record = history_records[idx]
+                        if record.get("role") == "assistant" and current_tag_marker in (record.get("content") or ""):
+                            current_question_index = idx
+                            print(f"🔍 Found current question at index {idx}")
+                            break
+                
+                # Now find the last occurrence of previous question BEFORE the current question
+                search_end = current_question_index if current_question_index is not None else len(history_records)
+                
+                for idx in range(search_end - 1, -1, -1):
                     record = history_records[idx]
-                    if record.get("role") == "assistant" and previous_tag_marker in (record.get("content") or ""):
+                    content = record.get("content") or ""
+                    if record.get("role") == "assistant" and previous_tag_marker in content:
                         target_index = idx
+                        print(f"✅ Found previous question at index {idx} (before current at {current_question_index})")
                         break
+                
+                if target_index is None:
+                    print(f"⚠️ Could not find previous question tag {previous_tag_marker} in history before index {search_end}")
+                    # Debug: Print all assistant messages with question tags
+                    for idx, record in enumerate(history_records[:search_end]):
+                        if record.get("role") == "assistant":
+                            content = record.get("content", "")
+                            if "[[Q:" in content:
+                                tag_match = content.find("[[Q:")
+                                tag_snippet = content[tag_match:tag_match+15] if tag_match >= 0 else "N/A"
+                                print(f"  Record {idx}: {tag_snippet}")
 
                 ids_to_remove = []
 
                 if target_index is not None:
-                    # Remove everything AFTER the previous question so the user can answer again
+                    # Remove the user's answer to the previous question AND everything after
+                    # This allows the user to re-answer the previous question
+                    # target_index = assistant message with previous question
+                    # target_index + 1 = user's answer to previous question (if exists)
+                    # target_index + 2 onwards = everything after
+                    
+                    # Start from target_index + 1 to include the user's answer to the previous question
                     ids_to_remove = [
                         rec["id"]
                         for rec in history_records[target_index + 1:]
                     ]
+                    print(f"🔍 Found previous question at index {target_index}, will delete {len(ids_to_remove)} records after it")
                 else:
                     # Fallback: remove the latest assistant question and the following user response
+                    print(f"⚠️ Could not find previous question tag {previous_tag_marker} in history, using fallback")
                     latest_assistant_index = None
                     for idx in range(len(history_records) - 1, -1, -1):
                         record = history_records[idx]
@@ -816,23 +856,83 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                             break
 
                     if latest_assistant_index is not None:
+                        # Delete the latest question and its answer
                         ids_to_remove.append(history_records[latest_assistant_index]["id"])
                         # Remove the immediate next user message (their answer to that question) if it exists
                         if latest_assistant_index + 1 < len(history_records):
                             next_record = history_records[latest_assistant_index + 1]
                             if next_record.get("role") == "user":
                                 ids_to_remove.append(next_record["id"])
+                        print(f"🔍 Fallback: Found latest question at index {latest_assistant_index}, will delete {len(ids_to_remove)} records")
 
                 if ids_to_remove:
                     try:
-                        delete_response = supabase.from_("chat_history").delete().in_("id", ids_to_remove).execute()
-                        print(f"✅ Deleted {len(ids_to_remove)} chat history records: {ids_to_remove}")
-                        # Verify deletion succeeded
-                        if not delete_response.data:
-                            print(f"⚠️ Warning: Deletion may have failed - no data in response")
+                        print(f"🗑️ Attempting to delete {len(ids_to_remove)} records")
+                        print(f"🗑️ Record IDs to delete: {ids_to_remove}")
+                        
+                        # Try batch deletion first
+                        try:
+                            delete_response = supabase.from_("chat_history").delete().in_("id", ids_to_remove).execute()
+                            deleted_data = delete_response.data or []
+                            print(f"✅ Batch delete response: {len(deleted_data)} records returned")
+                        except Exception as batch_error:
+                            print(f"⚠️ Batch delete failed, trying individual deletes: {batch_error}")
+                            deleted_data = []
+                        
+                        # If batch didn't work or didn't return data, delete individually
+                        if not deleted_data:
+                            print(f"🔄 Deleting {len(ids_to_remove)} records individually...")
+                            for record_id in ids_to_remove:
+                                try:
+                                    individual_response = supabase.from_("chat_history").delete().eq("id", record_id).execute()
+                                    if individual_response.data:
+                                        deleted_data.extend(individual_response.data)
+                                    print(f"  ✅ Deleted record {record_id}")
+                                except Exception as individual_error:
+                                    print(f"  ❌ Failed to delete record {record_id}: {individual_error}")
+                        
+                        deleted_count = len(deleted_data) if deleted_data else 0
+                        print(f"✅ Deleted {deleted_count} out of {len(ids_to_remove)} records")
+                        
+                        # Wait a moment for database to commit
+                        import asyncio
+                        await asyncio.sleep(0.2)
+                        
+                        # Verify deletion by re-fetching history
+                        try:
+                            verify_response = (
+                                supabase
+                                .from_("chat_history")
+                                .select("id")
+                                .eq("session_id", session_id)
+                                .in_("id", ids_to_remove)
+                                .execute()
+                            )
+                            remaining_records = verify_response.data or []
+                            remaining_ids = [rec["id"] for rec in remaining_records]
+                            
+                            if remaining_ids:
+                                print(f"⚠️ WARNING: {len(remaining_ids)} records still exist after deletion!")
+                                print(f"⚠️ Remaining IDs: {remaining_ids}")
+                                # Final attempt: delete remaining records one by one
+                                for record_id in remaining_ids:
+                                    try:
+                                        final_response = supabase.from_("chat_history").delete().eq("id", record_id).execute()
+                                        print(f"  🔄 Final attempt deleted {record_id}: {final_response.data is not None}")
+                                    except Exception as final_error:
+                                        print(f"  ❌ Final attempt failed for {record_id}: {final_error}")
+                            else:
+                                print(f"✅ VERIFICATION PASSED: All {len(ids_to_remove)} records successfully deleted")
+                        except Exception as verify_error:
+                            print(f"⚠️ Could not verify deletion: {verify_error}")
+                            
                     except Exception as delete_error:
-                        print(f"❌ Error deleting chat history records: {delete_error}")
+                        print(f"❌ CRITICAL ERROR deleting chat history records: {delete_error}")
+                        import traceback
+                        traceback.print_exc()
                         # Continue anyway - the session update will still happen
+                else:
+                    print(f"⚠️ No records to delete - target_index: {target_index}, history length: {len(history_records)}")
 
                 # Update session to previous question
                 if previous_phase == phase_prefix:

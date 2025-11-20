@@ -10,6 +10,8 @@ import uuid
 import tempfile
 import json
 import re
+import asyncio
+from datetime import datetime
 
 router = APIRouter()
 
@@ -183,29 +185,53 @@ async def save_found_info_to_history(
                         "answer": answer_text
                     })
         
-        # Sort by question number to maintain order
+        # Sort by question number to maintain order (1, 10, 11, etc.)
         qa_pairs_to_save.sort(key=lambda x: x["question_num"])
         
-        # Save all Q&A pairs in order
-        for qa_pair in qa_pairs_to_save:
+        found_question_numbers = [q["question_num"] for q in qa_pairs_to_save]
+        print(f"📋 Saving {len(qa_pairs_to_save)} found Q&A pairs in order: {found_question_numbers}")
+        
+        # Add a summary message at the start showing what was found from uploaded plan
+        if qa_pairs_to_save:
+            questions_list = ", ".join([f"Q{q['question_num']}" for q in qa_pairs_to_save])
+            summary_message = f"📄 **Business Plan Uploaded and Analyzed**\n\nI've extracted the following information from your uploaded business plan:\n\n**Questions Found in Your Plan:** {questions_list}\n\n**Total Questions Found:** {len(qa_pairs_to_save)}\n\nYour answers to these questions have been automatically saved. I'll now ask you only the missing questions to complete your business plan."
+            
+            # Save summary message as assistant message
+            await save_chat_message(session_id, user_id, "assistant", summary_message)
+            await asyncio.sleep(0.01)
+        
+        # Save all Q&A pairs in order with sequential delays to ensure proper timestamp ordering
+        for idx, qa_pair in enumerate(qa_pairs_to_save):
             question_num = qa_pair["question_num"]
             question_text = qa_pair["question_text"]
             answer_text = qa_pair["answer"]
             
             # Create assistant message with question
+            # Add indicator that this came from uploaded plan (optional - can be removed if not needed)
             assistant_content = f"[[Q:BUSINESS_PLAN.{question_num:02d}]] {question_text}"
             
             # Save assistant question
             await save_chat_message(session_id, user_id, "assistant", assistant_content)
             
+            # Small delay to ensure sequential timestamps (10ms between each save)
+            if idx < len(qa_pairs_to_save) - 1:  # Don't delay after last one
+                await asyncio.sleep(0.01)
+            
             # Save user answer
             await save_chat_message(session_id, user_id, "user", answer_text)
             
             saved_count += 1
-            print(f"✅ Saved found info: Q{question_num} - {question_text[:50]}...")
+            print(f"✅ Saved Q{question_num}: {question_text[:50]}... → {answer_text[:50]}...")
+            
+            # Small delay to ensure sequential timestamps
+            if idx < len(qa_pairs_to_save) - 1:  # Don't delay after last one
+                await asyncio.sleep(0.01)
         
-        # Get missing questions list from request
+        print(f"✅ Successfully saved {saved_count} Q&A pairs from uploaded plan in order")
+        
+        # Get missing questions list and business_info from request
         missing_questions = body.get("missing_questions", [])  # List of question numbers that are missing
+        uploaded_business_info = body.get("business_info", {}) or {}
         
         # Get current business_context or create new one
         session = await get_session(session_id, user_id)
@@ -213,10 +239,36 @@ async def save_found_info_to_history(
         if not isinstance(business_context, dict):
             business_context = {}
         
+        # CRITICAL: Merge uploaded business_info into business_context
+        # This ensures the uploaded plan's business data overrides old KYC data
+        if uploaded_business_info and isinstance(uploaded_business_info, dict):
+            # Merge uploaded business info, giving precedence to uploaded data
+            for key, value in uploaded_business_info.items():
+                if value and value != "" and value != "N/A":
+                    # Normalize keys - handle both formats
+                    normalized_key = key.lower().replace(" ", "_").replace("-", "_")
+                    business_context[normalized_key] = value
+                    # Also keep original key for compatibility
+                    if normalized_key != key:
+                        business_context[key] = value
+            
+            # Ensure critical fields are set from uploaded plan
+            if uploaded_business_info.get("business_name"):
+                business_context["business_name"] = uploaded_business_info["business_name"]
+            if uploaded_business_info.get("industry"):
+                business_context["industry"] = uploaded_business_info["industry"]
+            if uploaded_business_info.get("location"):
+                business_context["location"] = uploaded_business_info["location"]
+            if uploaded_business_info.get("tagline") or uploaded_business_info.get("mission"):
+                business_context["mission"] = uploaded_business_info.get("tagline") or uploaded_business_info.get("mission")
+            if uploaded_business_info.get("legal_structure"):
+                business_context["legal_structure"] = uploaded_business_info["legal_structure"]
+        
         # Store missing questions and uploaded plan mode in business_context JSON
         business_context["uploaded_plan_mode"] = True
         business_context["missing_questions"] = missing_questions
         business_context["found_questions_count"] = saved_count
+        business_context["business_info_uploaded_at"] = datetime.now().isoformat()
         
         # Update session to track that we're in "missing questions mode"
         # Store in business_context JSON since missing_questions column doesn't exist
@@ -225,6 +277,7 @@ async def save_found_info_to_history(
         })
         
         print(f"✅ Session updated with missing questions in business_context: {missing_questions}")
+        print(f"✅ Business context updated with uploaded plan data: {list(uploaded_business_info.keys()) if uploaded_business_info else 'None'}")
         
         return JSONResponse(content={
             "success": True,

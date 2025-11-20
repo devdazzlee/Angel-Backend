@@ -1451,43 +1451,41 @@ async def handle_kyc_completion(session_data, history):
 
 You've defined your entrepreneurial profile and shared valuable insights about your experience, goals, and preferences — an incredible milestone in your entrepreneurial journey.
 
----
-
 ## **🧭 Recap of Your Accomplishments**
 
 {kyc_summary}
 
 Angel now has everything needed to guide you through creating your comprehensive business plan.
 
----
-
 ## **⚙️ What Happens Next: Business Planning Phase**
 
 Your completed entrepreneurial profile will now be used to create a fully personalized business planning experience. Here's what we'll build together:
 
 **Your business plan will include:**
-- ✅ A fully defined mission and vision statement
-- ✅ Market positioning, customer segments, and competitive differentiation
-- ✅ Clear pricing and financial projections
-- ✅ Comprehensive marketing, legal, and operational frameworks
-- ✅ Scalable growth and risk management strategies
+
+✅ A fully defined mission and vision statement
+✅ Market positioning, customer segments, and competitive differentiation
+✅ Clear pricing and financial projections
+✅ Comprehensive marketing, legal, and operational frameworks
+✅ Scalable growth and risk management strategies
 
 **How Angel Will Help:**
-- 📊 **Background Research** - I'll conduct research automatically to provide you with industry insights, competitive analysis, and market data
-- 💡 **Support** - When you're unsure or want deeper guidance on any question
-- ✍️ **Scrapping** - When you have rough ideas that need polishing
-- 📝 **Draft** - When you want me to create complete responses based on what I've learned about your business
-- 🎯 **Proactive Guidance** - I'll provide both supportive encouragement and constructive coaching at every step
 
----
+📊 **Background Research** - I'll conduct research automatically to provide you with industry insights, competitive analysis, and market data
+
+💡 **Support** - When you're unsure or want deeper guidance on any question
+
+✍️ **Scrapping** - When you have rough ideas that need polishing
+
+📝 **Draft** - When you want me to create complete responses based on what I've learned about your business
+
+🎯 **Proactive Guidance** - I'll provide both supportive encouragement and constructive coaching at every step
 
 ## **🎯 Before We Continue**
 
 The Business Planning phase is comprehensive and detailed. This ensures your final business plan is thorough and provides you with a strong starting point for launching your business. The more detailed answers you provide, the better I can help support you to bring your business to life.
 
 **"The best way to predict the future is to create it."** – Peter Drucker
-
----
 
 ## **Ready to Move Forward?**
 
@@ -4761,20 +4759,29 @@ async def generate_dynamic_business_question(
     if history:
         extracted_context = extract_business_context_from_history(history)
     
-    # Merge: KYC-extracted context takes priority, then session business_context
+    # Merge: For uploaded plans, prioritize session business_context; otherwise, KYC-extracted context takes priority
     # NEVER use session title as business name - it's just a venture label, not the actual business name
     business_context = session_data.get("business_context", {}) or {}
     if not isinstance(business_context, dict):
         business_context = {}
     
-    # Prioritize extracted context from KYC over stored business_context
-    industry = extracted_context.get("industry") or business_context.get("industry") or ""
-    business_type = extracted_context.get("business_type") or business_context.get("business_type") or ""
-    location = extracted_context.get("location") or business_context.get("location") or ""
+    # Check if we're in uploaded plan mode - if so, prioritize session business_context
+    uploaded_plan_mode = business_context.get("uploaded_plan_mode", False) if isinstance(business_context, dict) else False
     
-    # For business name: ONLY use extracted from KYC/business plan answers, NEVER use session title
-    # Session title is just a venture label, not the actual business name
-    business_name = extracted_context.get("business_name") or business_context.get("business_name") or ""
+    if uploaded_plan_mode:
+        # For uploaded plans, prioritize session business_context (has uploaded plan data) over extracted from history
+        industry = business_context.get("industry") or extracted_context.get("industry") or ""
+        business_type = business_context.get("business_type") or extracted_context.get("business_type") or ""
+        location = business_context.get("location") or extracted_context.get("location") or ""
+        business_name = business_context.get("business_name") or extracted_context.get("business_name") or ""
+        mission = business_context.get("mission") or business_context.get("tagline") or extracted_context.get("mission") or ""
+    else:
+        # For normal flow, prioritize extracted context from KYC over stored business_context
+        industry = extracted_context.get("industry") or business_context.get("industry") or ""
+        business_type = extracted_context.get("business_type") or business_context.get("business_type") or ""
+        location = extracted_context.get("location") or business_context.get("location") or ""
+        business_name = extracted_context.get("business_name") or business_context.get("business_name") or ""
+        mission = extracted_context.get("mission") or business_context.get("mission") or business_context.get("tagline") or ""
     
     # Get question topic/objective
     question_num = int(question_tag.split(".")[1]) if "." in question_tag else 1
@@ -4789,6 +4796,7 @@ async def generate_dynamic_business_question(
     
     print(f"🎯 Dynamic question context: industry={industry}, business_type={business_type}, location={location}, name={business_name}")
     print(f"🎯 Question number: {question_num}, Using business_name: '{business_name}'")
+    print(f"🎯 Uploaded plan mode: {uploaded_plan_mode}, Source: {'session_context' if uploaded_plan_mode else 'extracted_history'}")
     
     # Get question topic/objective
     question_topics = {
@@ -4856,9 +4864,9 @@ async def generate_dynamic_business_question(
             business_info_summary = f"\n\nBased on what you've shared so far:\n" + "\n".join(f"- {ans}" for ans in recent_answers[-3:])  # Last 3 answers
     
     # Create dynamic question prompt
-    # Use industry name as the primary identifier if available (from KYC)
+    # Use industry name as the primary identifier if available (from KYC or uploaded plan)
     if industry:
-        business_identifier = industry  # Use industry from KYC (e.g., "Chai Stall")
+        business_identifier = industry  # Use industry from KYC/uploaded plan (e.g., "Chai Stall", "Software Development")
     elif business_name and business_name != "your business":
         business_identifier = business_name
     else:
@@ -4868,7 +4876,21 @@ async def generate_dynamic_business_question(
     business_type_context = f" as a {business_type}" if business_type else ""
     location_context = f" in {location}" if location else ""
     
-    question_prompt = f"""Generate a dynamic, tailored business plan question for {business_identifier}{industry_context}{business_type_context}{location_context}.
+    # Add critical context warning for uploaded plans
+    critical_context_warning = ""
+    if uploaded_plan_mode and industry:
+        critical_context_warning = f"""
+⚠️ CRITICAL CONTEXT - This business is in the {industry} INDUSTRY - ALL guidance must be 100% specific to {industry}.
+- The user uploaded a business plan for a {industry} business
+- Use the business information from the uploaded plan, NOT from KYC answers
+- Business Name: {business_name if business_name and business_name != "your business" else "From uploaded plan"}
+- Location: {location if location else "From uploaded plan"}
+- Industry: {industry}
+- ALL questions must be tailored specifically to {industry} businesses
+
+"""
+    
+    question_prompt = f"""{critical_context_warning}Generate a dynamic, tailored business plan question for {business_identifier}{industry_context}{business_type_context}{location_context}.
 
 QUESTION TOPIC: {topic}
 QUESTION TAG: {question_tag}
