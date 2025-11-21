@@ -3,6 +3,7 @@ import os
 import json
 import re
 import random
+import asyncio
 from datetime import datetime
 from functools import lru_cache
 from typing import Optional, Dict, List, Any
@@ -1561,8 +1562,25 @@ async def generate_kyc_summary(session_data, history):
 async def handle_business_plan_completion(session_data, history):
     """Handle the transition from Business Plan completion to Roadmap phase"""
     
-    # Generate comprehensive business plan summary
+    # Generate comprehensive business plan summary FIRST (fast, no web searches)
+    print("📋 Generating Business Plan Summary (fast, immediate response)...")
     business_plan_summary = await generate_business_plan_summary(session_data, history)
+    
+    # Return immediately with summary - generate artifact in background (non-blocking)
+    # This ensures the modal shows instantly without waiting
+    print("⚡ Returning summary immediately - artifact will be generated in background")
+    
+    # Start artifact generation in background (don't await - non-blocking)
+    # The artifact will be saved to session when ready, but we don't wait for it
+    import asyncio
+    try:
+        asyncio.create_task(generate_business_plan_artifact_async(session_data, history))
+        print("🔄 Background artifact generation started (non-blocking)")
+    except Exception as e:
+        print(f"⚠️ Could not start background task: {e}")
+    
+    # Set artifact to None initially - it will be available later when background task completes
+    business_plan_artifact = None
     
     # Create the transition message
     transition_message = f"""🎉 **CONGRATULATIONS! Planning Champion Award** 🎉
@@ -1573,7 +1591,7 @@ You've successfully completed your comprehensive business plan! This is a signif
 
 ## Business Plan Summary Overview
 
-**Note:** This is a high-level summary of your comprehensive Business Plan. Your complete Business Plan Artifact (the full, detailed document similar to the example provided on 10/10) will be generated and available for download once you proceed to the Roadmap phase.
+**Note:** This is a high-level summary of your comprehensive Business Plan. Your complete Business Plan Artifact is being generated in the background and will be available shortly.
 
 {business_plan_summary}
 
@@ -1615,11 +1633,16 @@ What would you like to do?"""
         "immediate_response": None,
         "transition_phase": "PLAN_TO_ROADMAP",
         "business_plan_summary": business_plan_summary,
+        "business_plan_artifact": business_plan_artifact,  # Include the full artifact in the response
         "show_accept_modify": button_detection.get("show_buttons", False),
         "reference_documents": [
             "Business Plan Deep Research Questions V2",
             "Roadmap Deep Research Questions V3"
-        ]
+        ],
+        "patch_session": {
+            # Don't save artifact in patch_session - it's being generated in background
+            # Will be saved when background task completes
+        }
     }
 
 async def generate_business_plan_summary(session_data, history):
@@ -1679,7 +1702,7 @@ async def generate_business_plan_summary(session_data, history):
             model="gpt-4o",
             messages=[{"role": "user", "content": summary_prompt}],
             temperature=0.6,
-            max_tokens=1000
+            max_tokens=800  # Reduced for faster generation
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -2246,22 +2269,46 @@ Do NOT include question numbers, progress percentages, or step counts in your re
             except (ValueError, IndexError):
                 pass
     
-    # Check if Business Plan phase is complete (question 46 for full flow)
+    # CRITICAL: Check if Business Plan phase is complete (question 46) BEFORE AI generation
+    # This must happen early to prevent AI from generating its own completion message
     if session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
         current_tag = session_data.get("asked_q", "")
-        if current_tag and current_tag.startswith("BUSINESS_PLAN."):
-            try:
-                question_num = int(current_tag.split(".")[1])
-                # Check if user just answered the final question (46) with any response
-                if (question_num >= 46 and 
-                    not current_tag.endswith("_ACK") and
-                    len(user_content.strip()) > 0):
-                    
-                    print(f"🎯 User answered final Business Plan question ({question_num}) - triggering roadmap transition immediately")
-                    # Trigger roadmap transition immediately
-                    return await handle_business_plan_completion(session_data, history)
-            except (ValueError, IndexError):
-                pass
+        
+        # Also check the last assistant message to see if it asked question 46
+        last_assistant_tag = None
+        for msg in reversed(history[-5:]):
+            if msg.get('role') == 'assistant':
+                content = msg.get('content', '')
+                tag_match = re.search(r'\[\[Q:(BUSINESS_PLAN\.\d+)\]\]', content)
+                if tag_match:
+                    last_assistant_tag = tag_match.group(1)
+                    break
+        
+        # Check both current_tag and last_assistant_tag to catch question 46
+        tags_to_check = [current_tag]
+        if last_assistant_tag:
+            tags_to_check.append(last_assistant_tag)
+        
+        for tag in tags_to_check:
+            if tag and tag.startswith("BUSINESS_PLAN."):
+                try:
+                    question_num = int(tag.split(".")[1])
+                    # Check if user just answered the final question (46) with any response
+                    # Also check if we're at question 46 or beyond (in case of uploaded plans)
+                    if (question_num >= 46 and 
+                        not tag.endswith("_ACK") and
+                        len(user_content.strip()) > 0 and
+                        user_content.lower().strip() not in ["draft", "support", "scrapping", "scraping", "accept"]):
+                        
+                        print(f"🎯 User answered final Business Plan question ({question_num}) - triggering completion handler IMMEDIATELY (before AI generation)")
+                        print(f"   Current asked_q: {current_tag}, Last assistant tag: {last_assistant_tag}")
+                        # Trigger roadmap transition immediately - this will return the proper transition response
+                        completion_response = await handle_business_plan_completion(session_data, history)
+                        print(f"✅ Completion handler returned transition_phase: {completion_response.get('transition_phase')}")
+                        return completion_response
+                except (ValueError, IndexError) as e:
+                    print(f"⚠️ Error parsing question number from tag {tag}: {e}")
+                    pass
     
     # Accept command should be handled by AI naturally, not manually
     # Let the system prompt in constant.py guide question progression
@@ -2272,6 +2319,17 @@ Do NOT include question numbers, progress percentages, or step counts in your re
     needs_web_search = False
     web_search_query = None
     competitor_research_requested = False
+    
+    # CRITICAL: Prevent roadmap generation from chat input
+    # Roadmap should ONLY be generated via the /transition-decision endpoint (modal Continue button)
+    if session_data and session_data.get("current_phase") == "PLAN_TO_ROADMAP_TRANSITION":
+        if user_content.lower().strip() in ["continue", "approve", "yes", "proceed"]:
+            return {
+                "reply": "Please use the 'Continue' button in the Business Plan Summary modal to proceed to roadmap generation. The modal should be displayed above this chat.",
+                "web_search_status": {"is_searching": False, "query": None},
+                "immediate_response": None,
+                "transition_phase": None
+            }
     
     # Check for WEBSEARCH_QUERY trigger from scrapping command
     if "WEBSEARCH_QUERY:" in user_content:
@@ -2509,14 +2567,20 @@ DO NOT repeat "{asked_q}" - the user has already answered it.
                 # In missing questions mode, next question should be the next missing question
                 next_missing = min(missing_questions)
                 next_question_to_ask = f"{next_missing:02d}"
+                sorted_missing = sorted(missing_questions)
                 missing_questions_instruction = f"""
-MISSING QUESTIONS MODE:
-- The user uploaded a business plan and is only answering MISSING questions
-- You MUST only ask questions from this list: {missing_questions}
-- When moving to the next question, skip to the NEXT MISSING question (not sequential)
-- The next missing question to ask is: {next_missing} (BUSINESS_PLAN.{next_question_to_ask})
-- Do NOT ask questions that are NOT in the missing list - skip them
-- Once all missing questions are answered, proceed normally to roadmap
+MISSING QUESTIONS MODE - CRITICAL INSTRUCTIONS:
+- The user uploaded a business plan with answers for some questions
+- You MUST ONLY ask questions from the missing list: {sorted_missing}
+- The next missing question to ask is: Q{next_missing} (BUSINESS_PLAN.{next_question_to_ask})
+- When user answers a missing question, automatically move to the NEXT missing question (not sequential)
+- Example: If missing questions are [13, 17, 18, 19] and user answers Q13, ask Q17 next (NOT Q14)
+- Do NOT ask questions that are NOT in the missing list - the system will redirect you
+- After ALL missing questions are answered, continue sequentially with remaining questions (Q25, Q26, etc.)
+- Missing questions must be asked in order: {sorted_missing}
+- Once all missing questions are answered, the system will automatically continue with remaining questions
+
+CRITICAL: Always use the tag [[Q:BUSINESS_PLAN.{next_question_to_ask}]] for the next missing question.
 
 """
         
@@ -2705,8 +2769,9 @@ CRITICAL:
     reply_content = ensure_proper_question_formatting(reply_content, session_data)
     reply_content = await personalize_business_question(reply_content, history, session_data)
 
-    # Check if we're in "missing questions mode" and AI is moving to next question
-    # Only auto-advance if AI is generating a new question (has a tag) and we need to skip to next missing
+    # Check if we're in "missing questions mode" and handle question progression correctly
+    # CRITICAL: After answering a missing question, jump to NEXT missing question (not sequential)
+    # After all missing questions are answered, continue sequentially with remaining questions
     business_context = session_data.get("business_context", {}) or {} if session_data else {}
     uploaded_plan_mode = business_context.get("uploaded_plan_mode", False) if isinstance(business_context, dict) else False
     missing_questions = business_context.get("missing_questions", []) if isinstance(business_context, dict) else []
@@ -2716,53 +2781,122 @@ CRITICAL:
         if not isinstance(missing_questions, list):
             missing_questions = []
         
-        # Check if AI generated a tag in the reply
-        tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', reply_content)
-        if tag_match and missing_questions:
-            ai_question_num = int(tag_match.group(1))
-            current_tag = session_data.get("asked_q", "")
-            
-            # If AI is trying to ask a question that's NOT in missing list, redirect to next missing
-            if current_tag and current_tag.startswith("BUSINESS_PLAN."):
-                try:
-                    current_q_num = int(current_tag.split(".")[1])
+        current_tag = session_data.get("asked_q", "")
+        
+        # Check if user just answered a missing question
+        if current_tag and current_tag.startswith("BUSINESS_PLAN."):
+            try:
+                current_q_num = int(current_tag.split(".")[1])
+                
+                # Detect if this is a user answer (not a command)
+                is_answer = (len(user_content.strip()) > 0 and 
+                            not user_content.lower().strip() in ("support", "draft", "scrapping", "scraping", "accept", "modify", "kickstart", "draft more") and
+                            not user_content.lower().startswith(("support", "draft", "scrapping", "scraping", "accept", "modify", "kickstart")))
+                
+                # If user just answered a missing question, remove it from list and jump to next missing
+                if is_answer and current_q_num in missing_questions:
+                    missing_questions = [q for q in missing_questions if q != current_q_num]
+                    print(f"✅ User answered missing question Q{current_q_num} - removed from missing list")
+                    print(f"📋 Remaining missing questions: {missing_questions}")
                     
-                    # If user just answered a missing question, remove it from list
-                    is_answer = (len(user_content.strip()) > 0 and 
-                                not user_content.lower().startswith(("support", "draft", "scrapping", "accept", "modify", "kickstart")))
-                    if is_answer and current_q_num in missing_questions:
-                        missing_questions = [q for q in missing_questions if q != current_q_num]
+                    # Update business_context with updated missing_questions list
+                    business_context["missing_questions"] = missing_questions
+                    business_context["uploaded_plan_mode"] = True
+                    session_data["business_context"] = business_context
                     
-                    # If AI is asking a question not in missing list, redirect to next missing
-                    if ai_question_num not in missing_questions and missing_questions:
+                    # If there are more missing questions, jump to the next one
+                    if missing_questions:
                         next_missing_q = min(missing_questions)
                         next_tag = f"BUSINESS_PLAN.{next_missing_q:02d}"
                         
-                        print(f"🎯 Redirecting from Q{ai_question_num} to next missing question Q{next_missing_q}")
-                        print(f"📋 Remaining missing questions: {missing_questions}")
+                        print(f"🎯 Jumping to next missing question: Q{next_missing_q}")
+                        print(f"📋 Remaining missing questions: {sorted(missing_questions)}")
                         
-                        # Replace tag in reply
-                        reply_content = re.sub(
-                            r'\[\[Q:BUSINESS_PLAN\.\d+\]\]',
-                            f'[[Q:{next_tag}]]',
-                            reply_content,
-                            count=1
-                        )
+                        # Check if AI generated a tag in the reply - if so, replace it
+                        tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', reply_content)
+                        if tag_match:
+                            # Replace AI's tag with next missing question tag
+                            reply_content = re.sub(
+                                r'\[\[Q:BUSINESS_PLAN\.\d+\]\]',
+                                f'[[Q:{next_tag}]]',
+                                reply_content,
+                                count=1
+                            )
+                            print(f"✅ Replaced AI tag with next missing question tag: {next_tag}")
                         
-                        # Update session and business_context
-                        business_context["missing_questions"] = missing_questions
-                        business_context["uploaded_plan_mode"] = True
+                        # Update session to jump to next missing question
+                        if "patch_session" not in locals():
+                            patch_session = {}
                         patch_session["asked_q"] = next_tag
                         patch_session["business_context"] = business_context
                         session_data["asked_q"] = next_tag
-                        session_data["business_context"] = business_context
                         
-                        print(f"✅ Redirected to Q{next_missing_q}")
-                    elif not missing_questions:
-                        # All missing questions answered
-                        print(f"🎉 All missing questions answered! Proceeding normally.")
-                except (ValueError, IndexError) as e:
-                    print(f"⚠️ Error parsing question number: {e}")
+                    else:
+                        # All missing questions answered - continue sequentially
+                        print(f"🎉 All missing questions answered! Continuing with remaining questions sequentially.")
+                        
+                        # Find the highest answered question number from history
+                        from services.chat_service import fetch_chat_history
+                        history_for_max = await fetch_chat_history(session_data.get("session_id", "")) if session_data.get("session_id") else []
+                        max_answered = 0
+                        for msg in history_for_max:
+                            if msg.get("role") == "assistant":
+                                content = msg.get("content", "")
+                                q_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', content)
+                                if q_match:
+                                    q_num = int(q_match.group(1))
+                                    max_answered = max(max_answered, q_num)
+                        
+                        # Next question should be max_answered + 1, but not exceed 46
+                        next_sequential = min(max_answered + 1, 46)
+                        next_tag = f"BUSINESS_PLAN.{next_sequential:02d}"
+                        
+                        print(f"🎯 All missing questions done - continuing sequentially from Q{next_sequential}")
+                        
+                        # Update session to continue sequentially
+                        if "patch_session" not in locals():
+                            patch_session = {}
+                        patch_session["asked_q"] = next_tag
+                        # Clear uploaded_plan_mode since we're done with missing questions
+                        business_context["uploaded_plan_mode"] = False
+                        business_context["missing_questions"] = []
+                        patch_session["business_context"] = business_context
+                        session_data["asked_q"] = next_tag
+                        session_data["business_context"] = business_context
+                
+                # If AI is trying to ask a question that's NOT in missing list (and we still have missing questions)
+                elif missing_questions:
+                    tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', reply_content)
+                    if tag_match:
+                        ai_question_num = int(tag_match.group(1))
+                        
+                        # If AI is asking a question not in missing list, redirect to next missing
+                        if ai_question_num not in missing_questions:
+                            next_missing_q = min(missing_questions)
+                            next_tag = f"BUSINESS_PLAN.{next_missing_q:02d}"
+                            
+                            print(f"🎯 AI tried to ask Q{ai_question_num} (not in missing list) - redirecting to next missing Q{next_missing_q}")
+                            print(f"📋 Remaining missing questions: {sorted(missing_questions)}")
+                            
+                            # Replace tag in reply
+                            reply_content = re.sub(
+                                r'\[\[Q:BUSINESS_PLAN\.\d+\]\]',
+                                f'[[Q:{next_tag}]]',
+                                reply_content,
+                                count=1
+                            )
+                            
+                            # Update session
+                            if "patch_session" not in locals():
+                                patch_session = {}
+                            patch_session["asked_q"] = next_tag
+                            patch_session["business_context"] = business_context
+                            session_data["asked_q"] = next_tag
+                            session_data["business_context"] = business_context
+                            
+                            print(f"✅ Redirected to Q{next_missing_q}")
+            except (ValueError, IndexError) as e:
+                print(f"⚠️ Error parsing question number: {e}")
 
     end_time = time.time()
     response_time = end_time - start_time
@@ -4280,6 +4414,26 @@ async def handle_competitor_research_request(user_input, business_context, histo
             "research_sources": 0
         }
 
+async def generate_business_plan_artifact_async(session_data, conversation_history):
+    """Generate business plan artifact in background (non-blocking)"""
+    try:
+        print("📄 Background: Generating COMPLETE Business Plan Artifact...")
+        artifact = await generate_business_plan_artifact(session_data, conversation_history)
+        artifact_length = len(artifact) if artifact else 0
+        print(f"✅ Background: Business Plan Artifact generated: {artifact_length} characters")
+        
+        # Save artifact to session in background
+        from services.session_service import patch_session
+        session_id = session_data.get("id") or session_data.get("session_id")
+        if session_id and artifact:
+            await patch_session(session_id, {"business_plan_artifact": artifact})
+            print(f"✅ Background: Artifact saved to session {session_id}")
+        
+        return artifact
+    except Exception as e:
+        print(f"❌ Background: Error generating artifact: {str(e)}")
+        return None
+
 async def generate_business_plan_artifact(session_data, conversation_history):
     """Generate comprehensive business plan artifact with deep research"""
     
@@ -4290,61 +4444,615 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     current_year = datetime.now().year
     previous_year = current_year - 1
     
-    print(f"🔍 Conducting deep research for {industry} business in {location}")
+    print(f"🔍 Conducting research for {industry} business in {location}")
     
-    # Multiple research queries for comprehensive analysis
-    market_research = await conduct_web_search(f"market analysis {industry} {location} {previous_year}")
-    competitor_research = await conduct_web_search(f"top competitors {industry} business model analysis {previous_year}")
-    industry_trends = await conduct_web_search(f"{industry} industry trends opportunities {previous_year}")
-    financial_benchmarks = await conduct_web_search(f"{industry} financial benchmarks startup costs {previous_year}")
+    # OPTIMIZED: Use asyncio with timeout to prevent blocking - only do 2 quick searches
+    # If searches timeout, continue without them (artifact will still be comprehensive)
+    async def quick_search(query, timeout=5):
+        try:
+            return await asyncio.wait_for(conduct_web_search(query), timeout=timeout)
+        except asyncio.TimeoutError:
+            print(f"⏱️ Search timeout for: {query[:50]}... (continuing without it)")
+            return None
+        except Exception as e:
+            print(f"⚠️ Search error for {query[:50]}: {str(e)} (continuing without it)")
+            return None
+    
+    # Only do 2 essential searches (market and competitor) with timeout
+    # This prevents long delays while still providing valuable research
+    market_research_task = quick_search(f"market analysis {industry} {location} {previous_year}", timeout=8)
+    competitor_research_task = quick_search(f"top competitors {industry} business model analysis {previous_year}", timeout=8)
+    
+    # Run searches in parallel and wait for both (or timeout)
+    market_research, competitor_research = await asyncio.gather(
+        market_research_task, 
+        competitor_research_task,
+        return_exceptions=True
+    )
+    
+    # Handle exceptions
+    if isinstance(market_research, Exception):
+        print(f"⚠️ Market research failed: {market_research}")
+        market_research = None
+    if isinstance(competitor_research, Exception):
+        print(f"⚠️ Competitor research failed: {competitor_research}")
+        competitor_research = None
+    
+    # Skip optional searches (trends and financial) to speed up generation
+    # These can be added later if needed, but they're causing timeouts
+    industry_trends = None
+    financial_benchmarks = None
+    print(f"⚡ Using optimized research: Market={bool(market_research)}, Competitor={bool(competitor_research)}")
+    
+    # Get full conversation history for comprehensive business plan
+    # Use more history to ensure we capture all business plan answers
+    full_history = conversation_history if len(conversation_history) <= 100 else conversation_history[-100:]
+    print(f"📚 Using {len(full_history)} messages from conversation history for business plan generation")
     
     business_plan_prompt = f"""
-    Generate a comprehensive, detailed business plan based on the following conversation history and extensive research:
+    ⚠️⚠️⚠️ CRITICAL FORMAT REQUIREMENT - READ THIS FIRST ⚠️⚠️⚠️
     
-    **CRITICAL REFERENCE**: This business plan generation MUST reference and align with "Business Plan Deep Research Questions V2" to ensure comprehensive coverage of all critical business planning areas.
+    YOUR OUTPUT MUST START WITH EXACTLY THIS TEXT (NO EXCEPTIONS):
     
-    Session Data: {json.dumps(session_data, indent=2)}
+    ## Scene 1 - Executive Summary & Business Overview
     
-    Deep Research Conducted:
-    Market Analysis: {market_research}
-    Competitor Analysis: {competitor_research}
-    Industry Trends: {industry_trends}
-    Financial Benchmarks: {financial_benchmarks}
+    ### Business Plan Summary Table
     
-    Conversation History: {json.dumps(conversation_history[-20:], indent=2)}
+    | Section | Highlights |
+    |---------|------------|
+    
+    YOU MUST HAVE EXACTLY 8 SCENES WITH THESE EXACT HEADERS:
+    1. ## Scene 1 - Executive Summary & Business Overview
+    2. ## Scene 2 - Company Description & Business Model
+    3. ## Scene 3 - Market Analysis & Research
+    4. ## Scene 4 - Competitive Analysis
+    5. ## Scene 5 - Product/Service Offering
+    6. ## Scene 6 - Marketing & Sales Strategy
+    7. ## Scene 7 - Financial Projections & Funding
+    8. ## Scene 8 - Operations, Risk Management & Implementation Timeline
+    
+    FORBIDDEN - DO NOT USE:
+    ❌ "Executive Summary" (without "Scene 1 -")
+    ❌ "Company Description" (without "Scene 2 -")
+    ❌ Any traditional section headers
+    
+    NOW GENERATE THE BUSINESS PLAN:
+    
+    Generate a COMPREHENSIVE, DETAILED, and PROFESSIONAL business plan document in EXACTLY 8 SCENES with TABLES based on the following conversation history and extensive research.
+    
+    **CRITICAL REQUIREMENTS**:
+    1. This MUST be structured as exactly 8 scenes (Scene 1 through Scene 8) - NO MORE, NO LESS
+    2. Each scene MUST start with at least one table in markdown format
+    3. After each table, provide 2-3 detailed paragraphs expanding on the table content
+    4. Extract ALL information from the conversation history - use ACTUAL data, NOT placeholders
+    5. Reference and align with "Business Plan Deep Research Questions V2" to ensure comprehensive coverage
+    6. Use the user's answers from the conversation history as the foundation
+    7. Enhance with research-driven insights to create a professional, investor-ready document
+    8. Format as a professional business plan with clear scene headers (## Scene X - Title)
+    9. Each scene should be 2-3 pages of content when formatted (tables + detailed paragraphs)
+    10. Total document should be 15-20 pages when formatted
+    
+    **Session Data**:
+    {json.dumps(session_data, indent=2)}
+    
+    **Deep Research Conducted**:
+    Market Analysis: {market_research[:2000] if market_research else "Research pending"}
+    Competitor Analysis: {competitor_research[:2000] if competitor_research else "Research pending"}
+    Industry Trends: {industry_trends[:2000] if industry_trends else "Research pending"}
+    Financial Benchmarks: {financial_benchmarks[:2000] if financial_benchmarks else "Research pending"}
+    
+    **Full Conversation History** (all business plan Q&A):
+    {json.dumps(full_history, indent=2)}
+    
+    **CRITICAL DATA EXTRACTION INSTRUCTIONS**:
+    - Read through the conversation history above carefully
+    - Extract ACTUAL business information from user's answers
+    - Replace ALL placeholders like "[Extract from conversation]" with REAL data from the conversation
+    - If information is not found in the conversation, state "Not yet specified" instead of using placeholders
+    - Use the actual business name: {session_data.get('business_name', 'Your Business')}
+    - Use the actual industry: {session_data.get('industry', 'General Business')}
+    - Use the actual location: {session_data.get('location', 'United States')}
+    - Extract mission statements, value propositions, target markets, revenue models, etc. from actual user answers
+    - DO NOT make up information - only use what's in the conversation history
     
     **Reference Document**: Business Plan Deep Research Questions V2
     
-    Create a professional business plan that is in-depth, holistic, and highly detailed. This should:
-    1. Reference "Business Plan Deep Research Questions V2" to ensure all critical areas are covered
-    2. Blend the user's direct answers with research-driven insights to fill in gaps
-    3. Provide comprehensive coverage of all areas specified in Business Plan Deep Research Questions V2:
+    **MANDATORY FORMAT - 8 SCENES WITH TABLES**:
     
-    1. Executive Summary
-    2. Company Description  
-    3. Market Analysis (with research-backed insights)
-    4. Organization & Management
-    5. Product/Service Offering
-    6. Marketing & Sales Strategy
-    7. Financial Projections
-    8. Funding Requirements
-    9. Risk Analysis
-    10. Implementation Timeline
+    You MUST structure the business plan as 8 distinct scenes, each with tables. Follow this exact format:
     
-    **IMPORTANT**: Ensure the business plan addresses all questions and considerations from "Business Plan Deep Research Questions V2" to provide a truly comprehensive document.
+    ## Scene 1 - Executive Summary & Business Overview
     
-    Include a note at the beginning that this business plan incorporates deep research and market analysis to provide comprehensive insights beyond what was discussed in the questionnaire, and that it follows the structure and depth requirements of Business Plan Deep Research Questions V2.
+    ### Business Plan Summary Table
     
-    Make this a trust-building milestone that demonstrates deep understanding of both the customer and their business opportunity.
+    | Section | Highlights |
+    |---------|------------|
+    | **Mission & Vision** | [Extract actual mission statement and vision from conversation history] |
+    | **Target Market** | [Extract target market details from conversation history] |
+    | **Problem & Solution** | [Extract problem statement and solution from conversation history] |
+    | **Revenue Model** | [Extract revenue model and pricing from conversation history] |
+    | **Marketing & Growth** | [Extract marketing strategy and growth plans from conversation history] |
+    | **Legal & Operations** | [Extract legal structure and operational details from conversation history] |
+    | **Financial Projections** | [Extract key financial projections from conversation history] |
+    | **Risk Management** | [Extract risk analysis and mitigation strategies from conversation history] |
+    
+    [Then provide detailed paragraphs expanding on each section above]
+    
+    ## Scene 2 - Company Description & Business Model
+    
+    ### Company Overview Table
+    
+    | Aspect | Details |
+    |--------|---------|
+    | **Business Name** | [Extract from conversation] |
+    | **Legal Structure** | [Extract from conversation] |
+    | **Industry** | [Extract from conversation] |
+    | **Location** | [Extract from conversation] |
+    | **Business Type** | [Extract from conversation] |
+    | **Founded/Launch Date** | [Extract or estimate from conversation] |
+    | **Mission Statement** | [Extract from conversation] |
+    | **Vision Statement** | [Extract from conversation] |
+    
+    ### Business Model Table
+    
+    | Component | Description |
+    |-----------|-------------|
+    | **Value Proposition** | [Extract from conversation] |
+    | **Revenue Streams** | [Extract from conversation] |
+    | **Pricing Strategy** | [Extract from conversation] |
+    | **Key Partnerships** | [Extract from conversation] |
+    | **Key Resources** | [Extract from conversation] |
+    | **Key Activities** | [Extract from conversation] |
+    | **Customer Segments** | [Extract from conversation] |
+    | **Cost Structure** | [Extract from conversation] |
+    
+    [Then provide detailed paragraphs expanding on each section above]
+    
+    ## Scene 3 - Market Analysis & Research
+    
+    ### Market Research Findings Table
+    
+    | Research Area | Findings | Source Type |
+    |---------------|----------|-------------|
+    | **Market Size** | [Extract from conversation and research] | [Government/Academic/Industry] |
+    | **Market Growth** | [Extract from conversation and research] | [Government/Academic/Industry] |
+    | **Target Demographics** | [Extract from conversation] | User Input |
+    | **Customer Needs** | [Extract from conversation] | User Input |
+    | **Market Trends** | [From research conducted] | Industry Reports |
+    | **Market Opportunity** | [Extract from conversation] | User Input |
+    
+    ### Target Market Segmentation Table
+    
+    | Segment | Description | Size | Growth Rate | Priority |
+    |---------|-------------|------|-------------|----------|
+    | **Primary Segment** | [Extract from conversation] | [Estimate] | [From research] | High |
+    | **Secondary Segment** | [Extract from conversation] | [Estimate] | [From research] | Medium |
+    | **Tertiary Segment** | [Extract from conversation] | [Estimate] | [From research] | Low |
+    
+    [Then provide detailed paragraphs expanding on each section above]
+    
+    ## Scene 4 - Competitive Analysis
+    
+    ### Competitive Landscape Table
+    
+    | Competitor | Strengths | Weaknesses | Market Position | Our Advantage |
+    |------------|-----------|------------|------------------|---------------|
+    | **[Competitor 1]** | [From research] | [From research] | [From research] | [Extract from conversation] |
+    | **[Competitor 2]** | [From research] | [From research] | [From research] | [Extract from conversation] |
+    | **[Competitor 3]** | [From research] | [From research] | [From research] | [Extract from conversation] |
+    
+    ### SWOT Analysis Table
+    
+    | Category | Factor | Impact | Strategy |
+    |----------|--------|--------|---------|
+    | **Strengths** | [Extract from conversation] | High/Medium/Low | [Extract from conversation] |
+    | **Weaknesses** | [Extract from conversation] | High/Medium/Low | [Extract from conversation] |
+    | **Opportunities** | [Extract from conversation] | High/Medium/Low | [Extract from conversation] |
+    | **Threats** | [Extract from conversation] | High/Medium/Low | [Extract from conversation] |
+    
+    [Then provide detailed paragraphs expanding on each section above]
+    
+    ## Scene 5 - Product/Service Offering
+    
+    ### Product/Service Features Table
+    
+    | Feature | Description | Benefit | Priority | Status |
+    |---------|-------------|---------|----------|--------|
+    | **[Feature 1]** | [Extract from conversation] | [Extract from conversation] | High/Medium/Low | Planned/In Development/Launched |
+    | **[Feature 2]** | [Extract from conversation] | [Extract from conversation] | High/Medium/Low | Planned/In Development/Launched |
+    | **[Feature 3]** | [Extract from conversation] | [Extract from conversation] | High/Medium/Low | Planned/In Development/Launched |
+    
+    ### Product Development Roadmap Table
+    
+    | Phase | Timeline | Key Features | Milestones | Resources Needed |
+    |-------|----------|--------------|------------|-----------------|
+    | **Phase 1** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    | **Phase 2** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    | **Phase 3** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    
+    [Then provide detailed paragraphs expanding on each section above]
+    
+    ## Scene 6 - Marketing & Sales Strategy
+    
+    ### Marketing Channels Table
+    
+    | Channel | Strategy | Budget Allocation | Expected ROI | Timeline |
+    |---------|----------|-------------------|--------------|----------|
+    | **[Channel 1]** | [Extract from conversation] | [Extract from conversation] | [Estimate] | [Extract from conversation] |
+    | **[Channel 2]** | [Extract from conversation] | [Extract from conversation] | [Estimate] | [Extract from conversation] |
+    | **[Channel 3]** | [Extract from conversation] | [Extract from conversation] | [Estimate] | [Extract from conversation] |
+    
+    ### Sales Process Table
+    
+    | Stage | Activity | Duration | Conversion Rate | Tools/Resources |
+    |-------|----------|----------|-----------------|-----------------|
+    | **Lead Generation** | [Extract from conversation] | [Extract from conversation] | [Estimate] | [Extract from conversation] |
+    | **Qualification** | [Extract from conversation] | [Extract from conversation] | [Estimate] | [Extract from conversation] |
+    | **Proposal** | [Extract from conversation] | [Extract from conversation] | [Estimate] | [Extract from conversation] |
+    | **Closing** | [Extract from conversation] | [Extract from conversation] | [Estimate] | [Extract from conversation] |
+    
+    [Then provide detailed paragraphs expanding on each section above]
+    
+    ## Scene 7 - Financial Projections & Funding
+    
+    ### Financial Projections Table (3-5 Years)
+    
+    | Year | Revenue | Operating Expenses | Net Profit | Growth Rate | Key Assumptions |
+    |------|---------|---------------------|------------|-------------|----------------|
+    | **Year 1** | [Extract from conversation] | [Extract from conversation] | [Calculate] | [Calculate] | [Extract from conversation] |
+    | **Year 2** | [Extract from conversation] | [Extract from conversation] | [Calculate] | [Calculate] | [Extract from conversation] |
+    | **Year 3** | [Extract from conversation] | [Extract from conversation] | [Calculate] | [Calculate] | [Extract from conversation] |
+    | **Year 4** | [Project] | [Project] | [Calculate] | [Calculate] | [Estimate] |
+    | **Year 5** | [Project] | [Project] | [Calculate] | [Calculate] | [Estimate] |
+    
+    ### Funding Requirements Table
+    
+    | Category | Amount | Use of Funds | Timeline | Funding Source |
+    |----------|--------|--------------|----------|----------------|
+    | **Startup Costs** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    | **Operating Capital** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    | **Marketing & Sales** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    | **Product Development** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    | **Total Funding Needed** | [Calculate] | [Summary] | [Extract from conversation] | [Extract from conversation] |
+    
+    [Then provide detailed paragraphs expanding on each section above]
+    
+    ## Scene 8 - Operations, Risk Management & Implementation Timeline
+    
+    ### Operations Structure Table
+    
+    | Area | Current Status | Requirements | Timeline | Resources Needed |
+    |------|----------------|--------------|----------|------------------|
+    | **Location/Facilities** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    | **Staffing** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    | **Technology/Equipment** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    | **Suppliers/Vendors** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    | **Legal & Compliance** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] |
+    
+    ### Risk Management Table
+    
+    | Risk Category | Risk Description | Likelihood | Impact | Mitigation Strategy | Contingency Plan |
+    |---------------|------------------|------------|--------|---------------------|------------------|
+    | **Market Risk** | [Extract from conversation] | High/Medium/Low | High/Medium/Low | [Extract from conversation] | [Extract from conversation] |
+    | **Operational Risk** | [Extract from conversation] | High/Medium/Low | High/Medium/Low | [Extract from conversation] | [Extract from conversation] |
+    | **Financial Risk** | [Extract from conversation] | High/Medium/Low | High/Medium/Low | [Extract from conversation] | [Extract from conversation] |
+    | **Regulatory Risk** | [Extract from conversation] | High/Medium/Low | High/Medium/Low | [Extract from conversation] | [Extract from conversation] |
+    | **Competitive Risk** | [Extract from conversation] | High/Medium/Low | High/Medium/Low | [Extract from conversation] | [Extract from conversation] |
+    
+    ### Implementation Timeline Table
+    
+    | Phase | Timeline | Key Activities | Milestones | Dependencies | Status |
+    |-------|----------|----------------|------------|--------------|--------|
+    | **Phase 1: Foundation** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | Planned |
+    | **Phase 2: Development** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | Planned |
+    | **Phase 3: Launch** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | Planned |
+    | **Phase 4: Growth** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | Planned |
+    | **Phase 5: Scaling** | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | [Extract from conversation] | Planned |
+    
+    [Then provide detailed paragraphs expanding on each section above]
+    
+    **CRITICAL FORMATTING INSTRUCTIONS - MANDATORY TABLE FORMAT**:
+    
+    ⚠️ **YOU MUST FOLLOW THIS EXACT STRUCTURE - NO EXCEPTIONS**:
+    
+    1. **MANDATORY**: Create EXACTLY 8 scenes (Scene 1 through Scene 8) - NO MORE, NO LESS
+    2. **MANDATORY**: Each scene MUST start with a markdown table (use the exact table structure shown in the template above)
+    3. **MANDATORY**: After each table, provide 2-3 detailed paragraphs expanding on the table content
+    4. **MANDATORY**: Scene titles must be EXACTLY:
+       - "## Scene 1 - Executive Summary & Business Overview"
+       - "## Scene 2 - Company Description & Business Model"
+       - "## Scene 3 - Market Analysis & Research"
+       - "## Scene 4 - Competitive Analysis"
+       - "## Scene 5 - Product/Service Offering"
+       - "## Scene 6 - Marketing & Sales Strategy"
+       - "## Scene 7 - Financial Projections & Funding"
+       - "## Scene 8 - Operations, Risk Management & Implementation Timeline"
+    5. **MANDATORY**: Extract ALL information from the conversation history - replace ALL [Extract from conversation] placeholders with ACTUAL data
+    6. **MANDATORY**: Use actual business name: {session_data.get('business_name', 'Your Business')}
+    7. **MANDATORY**: Use actual industry: {session_data.get('industry', 'General Business')}
+    8. **MANDATORY**: Use actual location: {session_data.get('location', 'United States')}
+    9. **MANDATORY**: All tables must be properly formatted markdown tables with | separators
+    10. **MANDATORY**: DO NOT create traditional sections like "Executive Summary", "Company Description", etc. - ONLY use Scene 1-8 format
+    11. **MANDATORY**: DO NOT create sections beyond Scene 8 - the document MUST end after Scene 8
+    12. **MANDATORY**: Each scene should be 2-3 pages of content when formatted (tables + detailed paragraphs)
+    13. **MANDATORY**: The total document should be 15-20 pages when formatted
+    
+    **OUTPUT FORMAT EXAMPLE**:
+    ```
+    ## Scene 1 - Executive Summary & Business Overview
+    
+    ### Business Plan Summary Table
+    
+    | Section | Highlights |
+    |---------|------------|
+    | **Mission & Vision** | [ACTUAL mission statement from conversation] |
+    | **Target Market** | [ACTUAL target market from conversation] |
+    ...
+    
+    [2-3 detailed paragraphs here]
+    
+    ## Scene 2 - Company Description & Business Model
+    
+    ### Company Overview Table
+    
+    | Aspect | Details |
+    |--------|---------|
+    | **Business Name** | [ACTUAL business name] |
+    ...
+    
+    [2-3 detailed paragraphs here]
+    
+    [Continue for all 8 scenes]
+    ```
+    
+    **DO NOT OUTPUT**:
+    - Traditional section headers like "Executive Summary", "Company Description", etc.
+    - Paragraphs without tables at the start of each scene
+    - More or fewer than 8 scenes
+    - Any content after Scene 8
+    
+    **IMPORTANT**: This must be a COMPLETE, PROFESSIONAL business plan document that could be presented to investors, banks, or partners. It should be comprehensive, well-researched, and demonstrate deep understanding of the business opportunity.
+    
+    **LENGTH REQUIREMENT**: This document MUST be extensive and detailed. Aim for 15,000-25,000 words (approximately 15-20 pages when formatted). Each scene should have substantial content with:
+    - Tables at the start of each scene (as shown in template)
+    - 2-3 detailed paragraphs after each table
+    - Specific examples and data from conversation history
+    - Comprehensive analysis
+    - Professional formatting
+    
+    **CRITICAL**: Do NOT create a brief summary. This is the FULL, COMPLETE business plan artifact in 8-scene table format. Every scene must be thoroughly developed with extensive detail.
+    
+    Generate the complete business plan now in EXACTLY 8 scenes with tables. Make it comprehensive and detailed:
     """
     
-    response = await client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": business_plan_prompt}],
-        temperature=0.6
-    )
+    print(f"📝 Generating comprehensive business plan artifact (this may take 30-60 seconds)...")
+    print(f"📊 Using conversation history with {len(full_history)} messages")
+    print(f"🔍 Research data available: Market={bool(market_research)}, Competitor={bool(competitor_research)}, Trends={bool(industry_trends)}, Financial={bool(financial_benchmarks)}")
     
-    return response.choices[0].message.content
+    try:
+        # Add system message to enforce format - MAXIMUM STRICTNESS
+        system_message = """You are a business plan generator. You MUST output documents in EXACTLY 8 scenes with tables.
+
+⚠️⚠️⚠️ CRITICAL - YOUR OUTPUT WILL BE REJECTED IF IT DOESN'T MATCH THIS EXACT FORMAT ⚠️⚠️⚠️
+
+MANDATORY OUTPUT FORMAT - NO EXCEPTIONS:
+
+Your output MUST start with EXACTLY this text:
+## Scene 1 - Executive Summary & Business Overview
+
+### Business Plan Summary Table
+
+| Section | Highlights |
+|---------|------------|
+
+You MUST have EXACTLY these 8 scene headers (copy them EXACTLY):
+1. ## Scene 1 - Executive Summary & Business Overview
+2. ## Scene 2 - Company Description & Business Model
+3. ## Scene 3 - Market Analysis & Research
+4. ## Scene 4 - Competitive Analysis
+5. ## Scene 5 - Product/Service Offering
+6. ## Scene 6 - Marketing & Sales Strategy
+7. ## Scene 7 - Financial Projections & Funding
+8. ## Scene 8 - Operations, Risk Management & Implementation Timeline
+
+ABSOLUTELY FORBIDDEN - DO NOT USE:
+❌ "Executive Summary" (without "Scene 1 -")
+❌ "Company Description" (without "Scene 2 -")
+❌ "Market Analysis" (without "Scene 3 -")
+❌ Any section header that doesn't start with "## Scene X -"
+
+If your output doesn't start with "## Scene 1 - Executive Summary & Business Overview", it will be REJECTED and you will be asked to regenerate.
+
+Each scene MUST:
+- Start with the exact header format shown above
+- Have at least one markdown table immediately after the header
+- Include 2-3 detailed paragraphs after the table
+
+Generate the business plan NOW starting with "## Scene 1 - Executive Summary & Business Overview"."""
+        
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": business_plan_prompt}
+            ],
+            temperature=0.2,  # Very low temperature for strict format adherence
+            max_tokens=16000  # Ensure we get a comprehensive, full-length document
+        )
+        
+        artifact_content = response.choices[0].message.content
+        
+        # Log first 500 characters to debug format
+        print(f"🔍 First 500 chars of generated artifact: {artifact_content[:500]}")
+        
+        # STRICT VALIDATION - Reject old format completely
+        starts_with_scene_1 = artifact_content.strip().startswith("## Scene 1 - Executive Summary & Business Overview")
+        scene_count = artifact_content.count("## Scene ")
+        has_scene_1 = "## Scene 1" in artifact_content
+        has_scene_8 = "## Scene 8" in artifact_content
+        has_tables = "|" in artifact_content and "---" in artifact_content
+        has_old_format = ("## Executive Summary" in artifact_content or 
+                         ("Executive Summary" in artifact_content and "## Scene 1" not in artifact_content) or
+                         ("Company Description" in artifact_content and "## Scene 2" not in artifact_content))
+        
+        print(f"🔍 Validation: starts_with_scene_1={starts_with_scene_1}, scene_count={scene_count}, has_scene_1={has_scene_1}, has_scene_8={has_scene_8}, has_tables={has_tables}, has_old_format={has_old_format}")
+        
+        # REJECT if it doesn't start with Scene 1 or has old format
+        if not artifact_content or len(artifact_content) < 5000 or not starts_with_scene_1 or scene_count != 8 or not has_scene_1 or not has_scene_8 or has_old_format:
+            print(f"⚠️ Warning: Generated artifact doesn't match required format")
+            print(f"   - Length: {len(artifact_content) if artifact_content else 0} characters")
+            print(f"   - Scene count: {scene_count} (expected 8)")
+            print(f"   - Has tables: {has_tables}")
+            print("🔄 Regenerating with STRICT format enforcement...")
+            # Retry with STRICT format enforcement
+            enhanced_prompt = business_plan_prompt + """
+            
+            ⚠️⚠️⚠️ CRITICAL FORMAT VALIDATION - YOUR OUTPUT WILL BE REJECTED IF IT DOESN'T MATCH ⚠️⚠️⚠️
+            
+            **YOUR OUTPUT MUST START WITH THIS EXACT TEXT**:
+            ## Scene 1 - Executive Summary & Business Overview
+            
+            ### Business Plan Summary Table
+            
+            | Section | Highlights |
+            |---------|------------|
+            
+            **YOU MUST HAVE EXACTLY 8 SCENES**:
+            Scene 1 - Executive Summary & Business Overview
+            Scene 2 - Company Description & Business Model
+            Scene 3 - Market Analysis & Research
+            Scene 4 - Competitive Analysis
+            Scene 5 - Product/Service Offering
+            Scene 6 - Marketing & Sales Strategy
+            Scene 7 - Financial Projections & Funding
+            Scene 8 - Operations, Risk Management & Implementation Timeline
+            
+            **FORBIDDEN - DO NOT INCLUDE**:
+            ❌ "Executive Summary" (without "Scene 1 -")
+            ❌ "Company Description" (without "Scene 2 -")
+            ❌ "Market Analysis" (without "Scene 3 -")
+            ❌ Any section that doesn't start with "## Scene X -"
+            
+            **REQUIRED - YOU MUST INCLUDE**:
+            ✅ Each scene header must be "## Scene X - [Title]"
+            ✅ Each scene must have at least one markdown table immediately after the header
+            ✅ Tables must use | separators
+            ✅ After each table, include 2-3 detailed paragraphs
+            
+            If your output doesn't start with "## Scene 1 - Executive Summary & Business Overview", it will be rejected.
+            Generate the business plan NOW following this EXACT format. Start with Scene 1.
+            """
+            response = await client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": enhanced_prompt}
+                ],
+                temperature=0.1,  # Very low temperature for strict format adherence
+                max_tokens=16000
+            )
+            artifact_content = response.choices[0].message.content
+            
+            # Final validation
+            final_scene_count = artifact_content.count("## Scene ")
+            final_has_scene_1 = "## Scene 1" in artifact_content
+            final_has_scene_8 = "## Scene 8" in artifact_content
+            final_has_tables = "|" in artifact_content and "---" in artifact_content
+            final_has_old_format = ("## Executive Summary" in artifact_content or 
+                                   ("Executive Summary" in artifact_content and "## Scene 1" not in artifact_content))
+            
+            print(f"🔍 Final validation: scene_count={final_scene_count}, has_scene_1={final_has_scene_1}, has_scene_8={final_has_scene_8}, has_tables={final_has_tables}, has_old_format={final_has_old_format}")
+            print(f"🔍 First 500 chars of final artifact: {artifact_content[:500]}")
+            
+            if final_scene_count != 8 or not final_has_scene_1 or not final_has_scene_8 or final_has_old_format:
+                print(f"⚠️ WARNING: Final artifact still doesn't match 8-scene format!")
+                print(f"   - Scene count: {final_scene_count} (expected 8)")
+                print(f"   - Has Scene 1: {final_has_scene_1}")
+                print(f"   - Has Scene 8: {final_has_scene_8}")
+                print(f"   - Has old format: {final_has_old_format}")
+                # Force one more regeneration with even stricter prompt
+                print("🔄 Attempting final regeneration with maximum strictness...")
+                ultra_strict_prompt = """
+                
+                ⚠️⚠️⚠️ CRITICAL - YOUR OUTPUT MUST START WITH EXACTLY THIS TEXT ⚠️⚠️⚠️
+                
+                ## Scene 1 - Executive Summary & Business Overview
+                
+                ### Business Plan Summary Table
+                
+                | Section | Highlights |
+                |---------|------------|
+                | **Mission & Vision** | [ACTUAL DATA FROM CONVERSATION] |
+                
+                DO NOT use "Executive Summary" without "Scene 1 -"
+                DO NOT use "Company Description" without "Scene 2 -"
+                DO NOT use any traditional section headers
+                
+                You MUST have exactly 8 scenes:
+                - Scene 1 - Executive Summary & Business Overview
+                - Scene 2 - Company Description & Business Model
+                - Scene 3 - Market Analysis & Research
+                - Scene 4 - Competitive Analysis
+                - Scene 5 - Product/Service Offering
+                - Scene 6 - Marketing & Sales Strategy
+                - Scene 7 - Financial Projections & Funding
+                - Scene 8 - Operations, Risk Management & Implementation Timeline
+                
+                Start generating NOW with "## Scene 1 - Executive Summary & Business Overview"
+                """
+                final_response = await client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": system_message},
+                        {"role": "user", "content": business_plan_prompt + ultra_strict_prompt}
+                    ],
+                    temperature=0.0,  # Zero temperature for maximum determinism
+                    max_tokens=16000
+                )
+                artifact_content = final_response.choices[0].message.content
+                print(f"🔍 Ultra-strict regeneration: First 500 chars: {artifact_content[:500]}")
+                
+                # Final check - if still wrong, raise error
+                ultra_starts_with_scene_1 = artifact_content.strip().startswith("## Scene 1 - Executive Summary & Business Overview")
+                ultra_has_old = (
+                    "## Executive Summary" in artifact_content or 
+                    ("Executive Summary" in artifact_content and "## Scene 1" not in artifact_content) or
+                    ("## Company Description" in artifact_content and "## Scene 2" not in artifact_content) or
+                    ("## Market Analysis" in artifact_content and "## Scene 3" not in artifact_content)
+                )
+                
+                if not ultra_starts_with_scene_1 or ultra_has_old:
+                    print(f"❌ CRITICAL ERROR: Even ultra-strict regeneration failed!")
+                    print(f"   Output starts with Scene 1: {ultra_starts_with_scene_1}")
+                    print(f"   Has old format: {ultra_has_old}")
+                    raise Exception("AI failed to generate business plan in required 8-scene table format after multiple attempts. The output is in the old format which is COMPLETELY FORBIDDEN. Old format has been removed from the system.")
+            
+            if not final_has_tables:
+                print(f"⚠️ WARNING: Final artifact may not have proper table formatting")
+        
+        # FINAL VALIDATION - Reject old format completely before returning
+        final_starts_with_scene_1 = artifact_content.strip().startswith("## Scene 1 - Executive Summary & Business Overview")
+        final_has_old_format_check = (
+            "## Executive Summary" in artifact_content or 
+            ("Executive Summary" in artifact_content and "## Scene 1" not in artifact_content) or
+            ("## Company Description" in artifact_content and "## Scene 2" not in artifact_content)
+        )
+        
+        if not final_starts_with_scene_1 or final_has_old_format_check:
+            print(f"❌ FINAL REJECTION: Artifact is in old format - COMPLETELY FORBIDDEN")
+            raise Exception("Business plan artifact is in old format which is COMPLETELY FORBIDDEN. Old format has been removed from the system. Only 8-scene table format is supported.")
+        
+        artifact_length = len(artifact_content) if artifact_content else 0
+        print(f"✅ Business Plan Artifact generated: {artifact_length} characters (~{artifact_length // 2000} pages)")
+        
+        if artifact_length < 3000:
+            print(f"⚠️ WARNING: Artifact may be incomplete ({artifact_length} characters)")
+        
+        return artifact_content
+        
+    except Exception as e:
+        print(f"❌ Error generating business plan artifact: {str(e)}")
+        raise Exception(f"Failed to generate business plan artifact: {str(e)}")
 
 async def generate_roadmap_artifact(session_data, business_plan_data):
     """Generate comprehensive roadmap based on business plan"""

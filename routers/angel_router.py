@@ -272,6 +272,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         business_plan_summary = angel_response.get("business_plan_summary", None)
         session_update = angel_response.get("patch_session", None)
         show_accept_modify = angel_response.get("show_accept_modify", False)
+        business_plan_artifact = angel_response.get("business_plan_artifact", None)
     else:
         # Backward compatibility
         assistant_reply = angel_response
@@ -281,9 +282,20 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         business_plan_summary = None
         session_update = None
         show_accept_modify = False
+        business_plan_artifact = None
 
-    # Save assistant reply
-    await save_chat_message(session_id, user_id, "assistant", assistant_reply)
+    # CRITICAL: Don't save assistant reply to chat history if it's a transition
+    # Transitions should show modals, not appear in chat
+    if transition_phase not in ["PLAN_TO_ROADMAP", "KYC_TO_BUSINESS_PLAN", "ROADMAP_GENERATED"]:
+        # Also check if we're in PLAN_TO_ROADMAP_TRANSITION phase - don't save to chat
+        current_phase = session.get("current_phase", "")
+        if current_phase != "PLAN_TO_ROADMAP_TRANSITION":
+            # Save assistant reply to chat history (normal flow)
+            await save_chat_message(session_id, user_id, "assistant", assistant_reply)
+        else:
+            print(f"🚫 Skipping chat history save - in PLAN_TO_ROADMAP_TRANSITION phase (should show modal)")
+    else:
+        print(f"🚫 Skipping chat history save for transition phase: {transition_phase} (will show modal instead)")
 
     # Handle session updates (e.g., from Accept responses)
     if session_update:
@@ -319,16 +331,36 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         }
     
     if transition_phase == "PLAN_TO_ROADMAP":
-        # Update session to transition phase
+        # CRITICAL: Get business plan artifact from angel_response if it was generated
+        business_plan_artifact = angel_response.get("business_plan_artifact", None)
+        patch_session_data = angel_response.get("patch_session", {})
+        
+        # If artifact was generated, save it to the session immediately
+        if business_plan_artifact:
+            print(f"💾 Saving Business Plan Artifact to session ({len(business_plan_artifact)} characters)")
+            session["business_plan_artifact"] = business_plan_artifact
+            session["business_plan_generated_at"] = patch_session_data.get("business_plan_generated_at", datetime.now().isoformat())
+            
+            # Update session in database with artifact
+            await patch_session(session_id, {
+                "current_phase": "PLAN_TO_ROADMAP_TRANSITION",
+                "business_plan_artifact": business_plan_artifact,
+                "business_plan_generated_at": session["business_plan_generated_at"]
+            })
+            print("✅ Business Plan Artifact saved to database")
+        else:
+            # Update session to transition phase
+            await patch_session(session_id, {
+                "current_phase": "PLAN_TO_ROADMAP_TRANSITION"
+            })
+        
         session["current_phase"] = "PLAN_TO_ROADMAP_TRANSITION"
         # Store transition data in session memory (not database)
         session["transition_data"] = {
             "business_plan_summary": business_plan_summary,
+            "business_plan_artifact": business_plan_artifact,  # Include artifact in transition data
             "transition_type": "PLAN_TO_ROADMAP"
         }
-        await patch_session(session_id, {
-            "current_phase": session["current_phase"]
-        })
         
         # Return transition response without normal tag processing
         return {
@@ -347,7 +379,8 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
                 "immediate_response": immediate_response,
                 "transition_phase": transition_phase,
                 "business_plan_summary": business_plan_summary,
-                "transition_data": session["transition_data"]
+                "business_plan_artifact": business_plan_artifact,  # Include artifact in response (may be None if generating in background)
+                "transition_data": session.get("transition_data")
             }
         }
 
@@ -453,6 +486,17 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
                         current_num = message_question_num
                 
                 # CRITICAL: Check for non-sequential progression (skipping questions)
+                # BUT: Allow skipping if we're in missing questions mode (uploaded plan)
+                business_context = session.get("business_context", {}) or {}
+                if not isinstance(business_context, dict):
+                    business_context = {}
+                uploaded_plan_mode = business_context.get("uploaded_plan_mode", False)
+                missing_questions = business_context.get("missing_questions", [])
+                is_missing_question_jump = (uploaded_plan_mode and 
+                                            isinstance(missing_questions, list) and 
+                                            len(missing_questions) > 0 and
+                                            current_num in missing_questions)
+                
                 if prev_phase == current_phase and current_num != prev_num + 1:
                     if current_num < prev_num:
                         print(f"⚠️ WARNING: Backwards question progression detected!")
@@ -466,27 +510,35 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
                         print(f"🔧 Correcting tag from {tag} to {corrected_tag}")
                         tag = corrected_tag
                     elif current_num > prev_num + 1:
-                        print(f"❌ ERROR: Question skipping detected!")
-                        print(f"  Previous: {previous_tag} (question {prev_num})")
-                        print(f"  Current: {tag} (question {current_num})")
-                        print(f"  Skipped questions: {list(range(prev_num + 1, current_num))}")
-                        print(f"  🔧 FORCING sequential progression - correcting to {prev_num + 1}")
-                        
-                        # Force sequential progression - don't allow skipping
-                        corrected_num = prev_num + 1
-                        corrected_tag = f"{current_phase}.{corrected_num:02d}"
-                        print(f"🔧 Correcting tag from {tag} to {corrected_tag}")
-                        tag = corrected_tag
-                        current_num = corrected_num
-                        
-                        # Also correct the tag in the reply content
-                        assistant_reply = re.sub(
-                            r'\[\[Q:[A-Z_]+\.\d+\]\]',
-                            f'[[Q:{corrected_tag}]]',
-                            assistant_reply,
-                            count=1
-                        )
-                        print(f"🔧 Corrected tag in reply content to {corrected_tag}")
+                        # Check if this is a valid jump to a missing question
+                        if is_missing_question_jump:
+                            print(f"✅ ALLOWED: Jumping to missing question Q{current_num}")
+                            print(f"  Previous: {previous_tag} (question {prev_num})")
+                            print(f"  Current: {tag} (question {current_num})")
+                            print(f"  Missing questions: {sorted(missing_questions)}")
+                            print(f"  This is valid - user uploaded plan and we're asking missing questions")
+                        else:
+                            print(f"❌ ERROR: Question skipping detected!")
+                            print(f"  Previous: {previous_tag} (question {prev_num})")
+                            print(f"  Current: {tag} (question {current_num})")
+                            print(f"  Skipped questions: {list(range(prev_num + 1, current_num))}")
+                            print(f"  🔧 FORCING sequential progression - correcting to {prev_num + 1}")
+                            
+                            # Force sequential progression - don't allow skipping (unless missing questions mode)
+                            corrected_num = prev_num + 1
+                            corrected_tag = f"{current_phase}.{corrected_num:02d}"
+                            print(f"🔧 Correcting tag from {tag} to {corrected_tag}")
+                            tag = corrected_tag
+                            current_num = corrected_num
+                            
+                            # Also correct the tag in the reply content
+                            assistant_reply = re.sub(
+                                r'\[\[Q:[A-Z_]+\.\d+\]\]',
+                                f'[[Q:{corrected_tag}]]',
+                                assistant_reply,
+                                count=1
+                            )
+                            print(f"🔧 Corrected tag in reply content to {corrected_tag}")
             except (ValueError, IndexError) as e:
                 print(f"⚠️ Error parsing tag format: {e}")
         
@@ -1138,10 +1190,69 @@ async def get_business_plan_summary(request: Request, session_id: str):
     session = await get_session(session_id, user_id)
     
     history = await fetch_chat_history(session_id)
-    history_trimmed = smart_trim_history(history)
+    
+    # Check if existing artifact is in old format and regenerate if needed
+    existing_artifact = session.get("business_plan_artifact", "")
+    if existing_artifact:
+        # Check if it's in the old format (has traditional sections but no Scene 1-8)
+        has_old_format = (
+            ("## Executive Summary" in existing_artifact or 
+             "Executive Summary" in existing_artifact) and 
+            "## Scene 1" not in existing_artifact
+        )
+        has_new_format = "## Scene 1" in existing_artifact and "## Scene 8" in existing_artifact
+        
+        if has_old_format and not has_new_format:
+            print(f"🔄 Existing artifact is in old format - regenerating in 8-scene table format...")
+            # Regenerate artifact in new format
+            from services.angel_service import generate_business_plan_artifact
+            new_artifact = await generate_business_plan_artifact(session, history)
+            
+            # Validate the new artifact is actually in the correct format
+            new_has_scene_1 = "## Scene 1" in new_artifact
+            new_has_scene_8 = "## Scene 8" in new_artifact
+            new_scene_count = new_artifact.count("## Scene ")
+            new_has_old_format = ("## Executive Summary" in new_artifact or 
+                                 ("Executive Summary" in new_artifact and "## Scene 1" not in new_artifact))
+            
+            print(f"🔍 Validation after regeneration: scene_count={new_scene_count}, has_scene_1={new_has_scene_1}, has_scene_8={new_has_scene_8}, has_old_format={new_has_old_format}")
+            print(f"🔍 First 500 chars: {new_artifact[:500]}")
+            
+            # If still in old format, try one more time with maximum strictness
+            if new_has_old_format or not new_has_scene_1 or not new_has_scene_8 or new_scene_count != 8:
+                print(f"⚠️ Regenerated artifact still in old format - forcing one more regeneration with maximum strictness...")
+                print(f"   Current artifact starts with: {new_artifact[:200]}")
+                # Force regeneration by clearing the artifact first
+                try:
+                    new_artifact = await generate_business_plan_artifact(session, history)
+                except Exception as e:
+                    print(f"❌ Error during regeneration: {e}")
+                    # If regeneration fails, return error instead of old format
+                    raise Exception(f"Failed to generate business plan in new format. Old format is no longer supported. Error: {str(e)}")
+                
+                # Final validation
+                final_has_scene_1 = "## Scene 1" in new_artifact
+                final_has_scene_8 = "## Scene 8" in new_artifact
+                final_scene_count = new_artifact.count("## Scene ")
+                final_has_old_format = ("## Executive Summary" in new_artifact or 
+                                       ("Executive Summary" in new_artifact and "## Scene 1" not in new_artifact))
+                
+                if final_has_old_format or not final_has_scene_1 or not final_has_scene_8 or final_scene_count != 8:
+                    print(f"❌ ERROR: After multiple attempts, artifact still not in correct format!")
+                    print(f"   This is a critical issue - the AI is not following the format instructions.")
+                else:
+                    print(f"✅ Second regeneration successful - artifact now in correct format")
+            
+            session["business_plan_artifact"] = new_artifact
+            await patch_session(session_id, {"business_plan_artifact": new_artifact})
+            print(f"✅ Regenerated artifact saved to database")
+    
+    # Don't trim history - we need the full list of dicts for Q&A extraction
+    # The extraction function will handle trimming internally if needed
     
     try:
-        result = await generate_comprehensive_business_plan_summary(history_trimmed)
+        # Pass session data and full untrimmed history to extract actual business information
+        result = await generate_comprehensive_business_plan_summary(history, session)
         return {
             "success": True,
             "message": "Business plan summary generated successfully",
@@ -1151,7 +1262,7 @@ async def get_business_plan_summary(request: Request, session_id: str):
         return {
             "success": False,
             "message": f"Error generating business plan summary: {str(e)}"
-    }
+        }
 
 @router.get("/sessions/{session_id}/roadmap-plan")
 async def generate_roadmap_plan(session_id: str, request: Request):
@@ -1336,8 +1447,28 @@ async def handle_transition_decision(session_id: str, request: Request, payload:
     
     if decision == "approve":
         history = await fetch_chat_history(session_id)
-        business_plan_artifact = await generate_business_plan_artifact(session, history)
-        session["business_plan_artifact"] = business_plan_artifact
+        # Check if existing artifact is in old format (doesn't have Scene 1-8 structure)
+        existing_artifact = session.get("business_plan_artifact", "")
+        needs_regeneration = False
+        
+        if existing_artifact:
+            # Check if it's in the old format (has traditional sections but no Scene 1-8)
+            has_old_format = (
+                "## Executive Summary" in existing_artifact or 
+                "Executive Summary" in existing_artifact and "## Scene 1" not in existing_artifact
+            )
+            has_new_format = "## Scene 1" in existing_artifact and "## Scene 8" in existing_artifact
+            
+            if has_old_format and not has_new_format:
+                print(f"🔄 Existing artifact is in old format - regenerating in 8-scene table format...")
+                needs_regeneration = True
+        
+        if needs_regeneration or not existing_artifact:
+            business_plan_artifact = await generate_business_plan_artifact(session, history)
+            session["business_plan_artifact"] = business_plan_artifact
+        else:
+            business_plan_artifact = existing_artifact
+            print(f"✅ Using existing artifact (already in correct format)")
         session["business_plan_generated_at"] = datetime.now().isoformat()
         
         # Transition to Roadmap phase

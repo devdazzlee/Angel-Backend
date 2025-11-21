@@ -2,7 +2,7 @@ from openai import AsyncOpenAI
 import os
 import json
 from datetime import datetime
-from services.angel_service import generate_business_plan_artifact, conduct_web_search
+from services.angel_service import generate_business_plan_artifact, conduct_web_search, extract_business_context_from_history
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -294,13 +294,13 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 **Roadmap Steps - Phase 1: Legal Foundation**
 
-| Task | Description | Dependencies | Angel's Role | Status |
-|------|-------------|--------------|-------------|--------|
-| **1.1 Choose Business Structure** | Select appropriate legal structure (LLC, C-Corp, S-Corp, Partnership, or Sole Proprietorship). Consider liability protection, tax implications, and operational flexibility. Evaluate based on industry requirements, funding needs, and growth plans. | None | Provide structure comparison analysis, tax implications guide, document templates | ⬜ |
-| **1.2 Register Business Name** | Register business name with Secretary of State. Check availability via state database. Consider federal trademark (USPTO) for brand protection. Secure matching domain name and social media handles. File DBA if using alternative name. | Business structure selected | Generate registration checklist, provide state-specific links, draft trademark description text | ⬜ |
-| **1.3 Obtain EIN** | Apply for Employer Identification Number through IRS website. Required for business bank accounts, hiring employees, and tax filing. Free application, instant approval in most cases. | Business name registered | Provide IRS.gov EIN application link, generate application checklist | ⬜ |
-| **1.4 Get Business Licenses** | Identify and obtain federal, state, and local licenses/permits specific to your industry and location. Research regulatory requirements, submit applications, schedule inspections if needed. | EIN obtained | Generate compliance checklist, identify required licenses, provide application links | ⬜ |
-| **1.5 File Trademarks** | Protect branding before public marketing. File federal trademarks for business name and key brand elements through USPTO. | Business name registered | Provide USPTO filing links, draft description text, schedule filing reminders | ⬜ |
+| Step Name | Step Description | Timeline | Research Source |
+|-----------|------------------|----------|-----------------|
+| **Choose Business Structure** | Select appropriate legal structure (LLC, C-Corp, S-Corp, Partnership, or Sole Proprietorship). Consider liability protection, tax implications, and operational flexibility. Evaluate based on industry requirements, funding needs, and growth plans. | Week 1-2 | *Government* - SBA.gov business structure guide, IRS.gov tax implications, state business registration sites |
+| **Register Business Name** | Register business name with Secretary of State. Check availability via state database. Consider federal trademark (USPTO) for brand protection. Secure matching domain name and social media handles. File DBA if using alternative name. | Week 2-3 | *Government* - State Secretary of State websites, USPTO.gov trademark database, SBA.gov naming guidelines |
+| **Obtain EIN** | Apply for Employer Identification Number through IRS website. Required for business bank accounts, hiring employees, and tax filing. Free application, instant approval in most cases. | Week 3 | *Government* - IRS.gov EIN application portal, SBA.gov business identification guide |
+| **Get Business Licenses** | Identify and obtain federal, state, and local licenses/permits specific to your industry and location. Research regulatory requirements, submit applications, schedule inspections if needed. | Week 3-6 | *Government* - State licensing boards, federal regulatory agencies, SBA.gov license finder tool |
+| **File Trademarks** | Protect branding before public marketing. File federal trademarks for business name and key brand elements through USPTO. | Week 4-8 | *Government* - USPTO.gov trademark filing system, *Industry* - LegalZoom, Rocket Lawyer trademark guides |
 
 **Service Providers - Legal Formation**:
 | Provider | Type | Local | Description | Research Source |
@@ -315,12 +315,12 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 **Roadmap Steps - Phase 2: Financial Foundation**
 
-| Task | Description | Dependencies | Angel's Role | Status |
-|------|-------------|--------------|-------------|--------|
-| **2.1 Open Business Bank Account** | Select and open dedicated business checking account. Compare traditional banks vs online/fintech options. Consider fees, features, integration capabilities. Gather required documents (EIN, formation docs, ID). | EIN obtained | Generate banking comparison, provide bank selection checklist, document requirements list | ⬜ |
-| **2.2 Set Up Accounting System** | Choose accounting software (cash vs accrual basis). Set up chart of accounts, connect bank feeds, establish bookkeeping processes. Consider hiring bookkeeper or accountant. | Business bank account opened | Provide accounting software comparison, generate setup checklist, bookkeeper recommendations | ⬜ |
-| **2.3 Establish Financial Controls** | Implement expense policies, approval workflows, receipt management. Set up separate business credit card. Create financial tracking and reporting processes. | Accounting system set up | Generate financial control templates, expense policy drafts, tracking spreadsheet | ⬜ |
-| **2.4 Create Financial Projections** | Develop detailed financial projections (revenue, expenses, cash flow) for 12-36 months. Create budget and financial milestones. Plan for seasonal variations. | Financial controls established | Provide financial projection templates, generate forecasting models, budget worksheets | ⬜ |
+| Step Name | Step Description | Timeline | Research Source |
+|-----------|------------------|----------|-----------------|
+| **Open Business Bank Account** | Select and open dedicated business checking account. Compare traditional banks vs online/fintech options. Consider fees, features, integration capabilities. Gather required documents (EIN, formation docs, ID). | Week 4-5 | *Government* - FDIC.gov bank information, SBA.gov banking resources, *Industry* - Bankrate.com comparisons, Forbes banking guides |
+| **Set Up Accounting System** | Choose accounting software (cash vs accrual basis). Set up chart of accounts, connect bank feeds, establish bookkeeping processes. Consider hiring bookkeeper or accountant. | Week 5-6 | *Industry* - Software review sites (G2, Capterra), QuickBooks/Xero documentation, *Academic* - Business school accounting best practices |
+| **Establish Financial Controls** | Implement expense policies, approval workflows, receipt management. Set up separate business credit card. Create financial tracking and reporting processes. | Week 6-7 | *Government* - IRS.gov recordkeeping requirements, *Academic* - Financial management research, *Industry* - Harvard Business Review financial controls |
+| **Create Financial Projections** | Develop detailed financial projections (revenue, expenses, cash flow) for 12-36 months. Create budget and financial milestones. Plan for seasonal variations. | Week 7-8 | *Academic* - Business school financial modeling research, *Industry* - WSJ startup financial planning, Forbes budgeting guides |
 
 **Service Providers - Financial Setup**:
 | Provider | Type | Local | Description | Research Source |
@@ -337,12 +337,12 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 **Roadmap Steps - Phase 3: Operational Foundation**
 
-| Task | Description | Dependencies | Angel's Role | Status |
-|------|-------------|--------------|-------------|--------|
-| **3.1 Establish Supply Chain** | Identify and vet suppliers (local vs international). Negotiate terms, minimum orders, payment terms. Set up logistics and fulfillment processes. Establish backup suppliers for critical items. | Financial systems operational | Provide supplier evaluation checklist, negotiation templates, vendor comparison tools | ⬜ |
-| **3.2 Set Up Operations Infrastructure** | Secure physical location (office, warehouse, retail) if needed. Purchase equipment, technology, and tools. Set up utilities, insurance, and security systems. | Supply chain established | Generate location selection criteria, equipment checklist, vendor recommendations | ⬜ |
-| **3.3 Develop Product/Service** | Finalize product specifications or service delivery processes. Create prototypes or pilot programs. Test with focus groups or beta customers. Iterate based on feedback. | Operations infrastructure ready | Provide product development templates, testing protocols, feedback collection forms | ⬜ |
-| **3.4 Implement Quality Control** | Establish quality standards and testing procedures. Create quality assurance processes. Set up customer feedback loops. Document standard operating procedures. | Product/service developed | Generate quality control checklists, SOP templates, feedback system setup | ⬜ |
+| Step Name | Step Description | Timeline | Research Source |
+|-----------|------------------|----------|-----------------|
+| **Establish Supply Chain** | Identify and vet suppliers (local vs international). Negotiate terms, minimum orders, payment terms. Set up logistics and fulfillment processes. Establish backup suppliers for critical items. | Month 3-4 | *Industry* - Bloomberg supply chain reports, WSJ logistics guides, *Academic* - Supply chain management research, trade association resources |
+| **Set Up Operations Infrastructure** | Secure physical location (office, warehouse, retail) if needed. Purchase equipment, technology, and tools. Set up utilities, insurance, and security systems. | Month 4 | *Government* - OSHA.gov workplace requirements, state business location resources, *Industry* - Commercial real estate publications |
+| **Develop Product/Service** | Finalize product specifications or service delivery processes. Create prototypes or pilot programs. Test with focus groups or beta customers. Iterate based on feedback. | Month 4-5 | *Academic* - Product development research, innovation studies, *Industry* - Harvard Business Review product development, Forbes startup guides |
+| **Implement Quality Control** | Establish quality standards and testing procedures. Create quality assurance processes. Set up customer feedback loops. Document standard operating procedures. | Month 5 | *Government* - Industry-specific quality standards, *Academic* - Quality management research, *Industry* - Industry best practices publications |
 
 **Service Providers - Operations**:
 | Provider | Type | Local | Description | Research Source |
@@ -359,13 +359,13 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 **Roadmap Steps - Phase 4: Market Launch Preparation**
 
-| Task | Description | Dependencies | Angel's Role | Status |
-|------|-------------|--------------|-------------|--------|
-| **4.1 Develop Brand Identity** | Create brand positioning, messaging, visual identity (logo, colors, fonts). Define unique value proposition and brand voice. Develop brand guidelines document. | Product/service ready | Draft brand positioning statement, generate brand guidelines template, provide design resources | ⬜ |
-| **4.2 Build Digital Presence** | Create professional website with SEO optimization. Set up social media profiles across relevant platforms. Implement analytics and tracking (Google Analytics, etc.). | Brand identity established | Generate website content, SEO checklist, social media setup guide, analytics configuration | ⬜ |
-| **4.3 Create Marketing Materials** | Develop marketing collateral (brochures, presentations, business cards). Create product photography and videography. Write copy for various channels. | Digital presence live | Draft marketing copy, generate content calendar, provide design templates | ⬜ |
-| **4.4 Implement Sales Process** | Define sales funnel stages and customer journey. Create CRM system and sales tracking. Develop sales scripts, proposals, and contracts. Train sales team if applicable. | Marketing materials ready | Generate sales scripts, CRM setup guide, proposal templates, training materials | ⬜ |
-| **4.5 Plan Customer Acquisition** | Identify customer acquisition channels (paid ads, content marketing, partnerships). Set budgets and KPIs. Create initial campaigns and test messaging. | Sales process implemented | Generate customer acquisition playbook, ad copy suggestions, campaign templates, KPI tracking | ⬜ |
+| Step Name | Step Description | Timeline | Research Source |
+|-----------|------------------|----------|-----------------|
+| **Develop Brand Identity** | Create brand positioning, messaging, visual identity (logo, colors, fonts). Define unique value proposition and brand voice. Develop brand guidelines document. | Month 5-6 | *Industry* - Harvard Business Review branding guides, Forbes brand strategy, *Academic* - Marketing research on brand positioning |
+| **Build Digital Presence** | Create professional website with SEO optimization. Set up social media profiles across relevant platforms. Implement analytics and tracking (Google Analytics, etc.). | Month 6 | *Industry* - Digital marketing publications, Google marketing resources, *Academic* - Digital marketing research studies |
+| **Create Marketing Materials** | Develop marketing collateral (brochures, presentations, business cards). Create product photography and videography. Write copy for various channels. | Month 6-7 | *Industry* - Marketing industry reports, design best practices, *Academic* - Communication and marketing research |
+| **Implement Sales Process** | Define sales funnel stages and customer journey. Create CRM system and sales tracking. Develop sales scripts, proposals, and contracts. Train sales team if applicable. | Month 7 | *Industry* - Sales methodology publications, CRM vendor resources, *Academic* - Sales process research, business school case studies |
+| **Plan Customer Acquisition** | Identify customer acquisition channels (paid ads, content marketing, partnerships). Set budgets and KPIs. Create initial campaigns and test messaging. | Month 7 | *Industry* - Customer acquisition cost studies, marketing ROI reports, *Academic* - Customer acquisition research, startup growth studies |
 
 **Service Providers - Marketing & Sales**:
 | Provider | Type | Local | Description | Research Source |
@@ -382,13 +382,13 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 **Roadmap Steps - Phase 5: Launch & Growth**
 
-| Task | Description | Dependencies | Angel's Role | Status |
-|------|-------------|--------------|-------------|--------|
-| **5.1 Execute Go-to-Market Launch** | Choose launch strategy (soft launch, hard launch, beta, or phased rollout). Coordinate all marketing channels. Execute launch events and campaigns. Monitor initial customer response. | Marketing & sales ready | Generate launch plan, event checklist, campaign coordination guide, monitoring dashboard | ⬜ |
-| **5.2 Customer Acquisition at Scale** | Ramp up customer acquisition efforts across validated channels. Scale spending based on ROI metrics. Implement referral programs and partnerships. | Launch executed | Provide scaling strategies, ROI analysis templates, referral program setup, partnership outreach | ⬜ |
-| **5.3 Operational Scaling** | Hire key team members as needed. Scale operations to meet demand. Optimize processes for efficiency. Implement automation where possible. | Customer base growing | Generate hiring templates, job descriptions, process optimization guide, automation recommendations | ⬜ |
-| **5.4 Financial Management & Fundraising** | Monitor cash flow closely. Achieve profitability milestones or secure additional funding. Implement financial reporting and forecasting. | Operations scaled | Provide financial dashboard, fundraising templates, investor pitch materials, reporting tools | ⬜ |
-| **5.5 Measure, Learn, Optimize** | Track KPIs and business metrics. Analyze customer feedback and behavior. Optimize product, pricing, and processes. Prepare for next growth phase. | Business operational | Generate KPI tracking dashboard, feedback analysis tools, optimization playbook, growth planning | ⬜ |
+| Step Name | Step Description | Timeline | Research Source |
+|-----------|------------------|----------|-----------------|
+| **Execute Go-to-Market Launch** | Choose launch strategy (soft launch, hard launch, beta, or phased rollout). Coordinate all marketing channels. Execute launch events and campaigns. Monitor initial customer response. | Month 7-8 | *Industry* - Launch strategy case studies, Product Hunt launch guides, *Academic* - Go-to-market research, startup launch studies |
+| **Customer Acquisition at Scale** | Ramp up customer acquisition efforts across validated channels. Scale spending based on ROI metrics. Implement referral programs and partnerships. | Month 8-10 | *Industry* - Scaling strategies from Bloomberg, WSJ growth stories, *Academic* - Growth hacking research, customer acquisition studies |
+| **Operational Scaling** | Hire key team members as needed. Scale operations to meet demand. Optimize processes for efficiency. Implement automation where possible. | Month 9-11 | *Government* - SBA.gov hiring resources, *Industry* - HR best practices, Forbes scaling guides, *Academic* - Operations management research |
+| **Financial Management & Fundraising** | Monitor cash flow closely. Achieve profitability milestones or secure additional funding. Implement financial reporting and forecasting. | Month 10-12 | *Industry* - Funding reports from Crunchbase, WSJ startup funding, *Academic* - Financial management research, fundraising studies |
+| **Measure, Learn, Optimize** | Track KPIs and business metrics. Analyze customer feedback and behavior. Optimize product, pricing, and processes. Prepare for next growth phase. | Month 11-12 | *Academic* - Business analytics research, optimization studies, *Industry* - Harvard Business Review analytics, Forbes optimization guides |
 
 **Service Providers - Launch & Scaling**:
 | Provider | Type | Local | Description | Research Source |
@@ -435,20 +435,19 @@ Your roadmap is complete, researched, and ready for execution. The next phase wi
 *This roadmap is tailored specifically to your business, industry, and location. Every recommendation is designed to help you build the business of your dreams.*
 
 **CRITICAL FORMATTING REQUIREMENTS:**
-- ALL roadmap steps MUST be in markdown table format with columns: Task | Description | Dependencies | Angel's Role | Status
-- Use sequential numbering (1.1, 1.2, 2.1, 2.2, etc.) to show clear sequence of events within each phase
+- ALL roadmap steps MUST be in markdown table format with columns: Step Name | Step Description | Timeline | Research Source
 - Each phase MUST have a table with ALL steps listed in order
 - Do NOT use bullet points or paragraphs for roadmap steps - ONLY use tables
 - Tables must follow this exact format:
-  | Task | Description | Dependencies | Angel's Role | Status |
-  |------|-------------|--------------|-------------|--------|
-  | **1.1 [Task Name]** | [Detailed description] | [Dependencies or "None"] | [What Angel will do to help] | ⬜ |
-  | **1.2 [Task Name]** | [Detailed description] | [Dependencies] | [What Angel will do to help] | ⬜ |
-- Status column should use ⬜ for pending tasks, ✓ for completed tasks, or → SOON for upcoming tasks
-- Bold all task titles and key terms
+  | Step Name | Step Description | Timeline | Research Source |
+  |-----------|------------------|----------|-----------------|
+  | **[Step Name]** | [Detailed description with actionable guidance] | [Specific timeline: Week X, Month X-Y, etc.] | *Government* / *Academic* / *Industry* - [Specific source citations] |
+- Research Source column must cite specific sources using format: *Government* - SBA.gov, IRS.gov, etc. OR *Academic* - University research, journals, etc. OR *Industry* - Bloomberg, WSJ, Forbes, HBR, etc.
+- Timeline must be specific (e.g., "Week 1-2", "Month 3-4", "Week 4-8")
+- Bold all step names and key terms
 - Use a professional but friendly tone
-- Ensure sequence is visually clear with numbered steps in order
 - Each phase should start with a "Goal:" statement explaining the purpose of that phase
+- Ensure all steps include research source citations from the three categories: Government, Academic, or Industry
 """
 
     # Format the roadmap template with research data
@@ -491,7 +490,15 @@ Your roadmap is complete, researched, and ready for execution. The next phase wi
     
     **IMPORTANT**: Ensure the roadmap addresses all questions and considerations from "Roadmap Deep Research Questions V3" to provide a truly comprehensive, actionable launch plan.
     
-    Generate the complete roadmap now, following the template structure and ensuring all phases are detailed with specific steps, timelines, and research source citations.
+    **CRITICAL FORMAT REQUIREMENT**: All roadmap steps MUST use table format with exactly these columns:
+    | Step Name | Step Description | Timeline | Research Source |
+    
+    Research Source column must cite specific sources using format:
+    - *Government* - SBA.gov, IRS.gov, state agencies, etc.
+    - *Academic* - University research, Google Scholar, JSTOR, etc.
+    - *Industry* - Bloomberg, WSJ, Forbes, HBR, etc.
+    
+    Generate the complete roadmap now, following the template structure and ensuring all phases are detailed with specific steps, timelines, and research source citations in the correct table format.
     """
     
     try:
@@ -500,7 +507,7 @@ Your roadmap is complete, researched, and ready for execution. The next phase wi
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert business roadmap advisor. Generate comprehensive, actionable launch roadmaps that reference Roadmap Deep Research Questions V3 and incorporate extensive research from government, academic, and industry sources."
+                    "content": "You are an expert business roadmap advisor. Generate comprehensive, actionable launch roadmaps that reference Roadmap Deep Research Questions V3 and incorporate extensive research from government, academic, and industry sources. CRITICAL: All roadmap steps MUST be in table format with columns: Step Name | Step Description | Timeline | Research Source. Each step must include specific research source citations (Government, Academic, or Industry) with actual source names."
                 },
                 {
                     "role": "user",
@@ -668,70 +675,166 @@ async def generate_motivational_quote():
     import random
     return random.choice(quotes)
 
-async def generate_comprehensive_business_plan_summary(history):
+async def generate_comprehensive_business_plan_summary(history, session=None):
     """Generate a comprehensive business plan summary for the Plan to Roadmap Transition"""
     
-    # Extract session data from conversation history
+    # Extract business context from session data (preferred) or history
     session_data = {}
     conversation_history = []
     
+    # First, try to get business context from session
+    if session:
+        business_context = session.get("business_context", {})
+        session_data['business_name'] = business_context.get("business_name") or session.get("business_name")
+        session_data['industry'] = business_context.get("industry") or session.get("industry")
+        session_data['location'] = business_context.get("location") or session.get("location")
+        session_data['business_type'] = business_context.get("business_type") or session.get("business_type")
+    
+    # Build conversation history and extract BUSINESS_PLAN Q&A pairs
+    business_plan_qa = {}  # Map question numbers to answers
+    conversation_history = []
+    import re
+    
+    # Debug: Check history structure
+    if history and len(history) > 0:
+        sample_msg = history[0] if isinstance(history, list) else None
+        print(f"🔍 DEBUG - History type: {type(history)}, Length: {len(history) if isinstance(history, list) else 'N/A'}")
+        if sample_msg:
+            print(f"🔍 DEBUG - Sample message type: {type(sample_msg)}, Keys: {sample_msg.keys() if isinstance(sample_msg, dict) else 'N/A'}")
+            if isinstance(sample_msg, dict):
+                sample_content = str(sample_msg.get('content', ''))[:200]
+                print(f"🔍 DEBUG - Sample content preview: {sample_content}")
+    
+    # First pass: Extract all BUSINESS_PLAN questions with their tags
+    question_map = {}  # Map question tags to question numbers
+    bp_tag_count = 0
+    
     for msg in history:
-        if isinstance(msg, dict):
-            conversation_history.append(msg)
-            content = msg.get('content', '').lower()
+        if not isinstance(msg, dict):
+            continue
             
-            # Extract key business information - DYNAMIC APPROACH
-            if any(keyword in content for keyword in ['business name', 'company name', 'venture name']):
-                session_data['business_name'] = msg.get('content', '').strip()
-            elif any(keyword in content for keyword in ['industry', 'business type', 'sector']):
-                # Use AI model to dynamically identify industry
-                industry_prompt = f"""
-                Analyze this user input and extract the business industry or sector: "{content}"
-                
-                Return ONLY the industry name in a standardized format, or "General Business" if unclear.
-                
-                Examples:
-                - "Tea Stall" → "Tea Stall"
-                - "AI Development" → "AI Development"
-                - "Food Service" → "Food Service"
-                - "Technology" → "Technology"
-                - "Healthcare" → "Healthcare"
-                
-                Return only the industry name:
-                """
-                
-                try:
-                    response = await client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[{"role": "user", "content": industry_prompt}],
-                        temperature=0.1,
-                        max_tokens=30
-                    )
+        role = msg.get('role', '')
+        content = str(msg.get('content', ''))
+        
+        # Look for BUSINESS_PLAN question tags (support both 1-digit and 2-digit formats)
+        # Pattern: [[Q:BUSINESS_PLAN.01]] or [[Q:BUSINESS_PLAN.1]]
+        tag_matches = re.findall(r'\[\[Q:(BUSINESS_PLAN\.\d{1,2})\]\]', content)
+        
+        if tag_matches and role == 'assistant':
+            bp_tag_count += len(tag_matches)
+            for tag in tag_matches:
+                # Normalize to 2-digit format
+                parts = tag.split('.')
+                if len(parts) == 2:
+                    q_num = int(parts[1])
+                    normalized_tag = f"BUSINESS_PLAN.{q_num:02d}"
+                    question_map[normalized_tag] = q_num
+                    question_map[tag] = q_num  # Also map original format
                     
-                    industry_result = response.choices[0].message.content.strip()
-                    session_data['industry'] = industry_result if industry_result else 'General Business'
-                except Exception as e:
-                    print(f"Industry extraction failed: {e}")
-                    session_data['industry'] = 'General Business'
+                    if q_num not in business_plan_qa:
+                        # Extract question text
+                        question_text = content.replace(f'[[Q:{tag}]]', '').replace(f'[[Q:{normalized_tag}]]', '').strip()
+                        question_text = re.sub(r'\*\*.*?\*\*', '', question_text)
+                        question_text = re.sub(r'^Angel\s*', '', question_text, flags=re.IGNORECASE).strip()
+                        question_text = question_text[:300]  # Limit length
+                        business_plan_qa[q_num] = {
+                            'question': question_text,
+                            'answer': None,
+                            'tag': normalized_tag
+                        }
+    
+    print(f"🔍 DEBUG - Found {bp_tag_count} BUSINESS_PLAN tags in history")
+    
+    # Second pass: Match user answers to questions
+    for i, msg in enumerate(history):
+        if not isinstance(msg, dict):
+            continue
             
-            # Extract location information
-            if any(keyword in content for keyword in ['location', 'city', 'country', 'state', 'region']):
-                if 'united states' in content or 'usa' in content or 'us' in content:
-                    session_data['location'] = 'United States'
-                elif 'canada' in content:
-                    session_data['location'] = 'Canada'
-                elif 'europe' in content:
-                    session_data['location'] = 'Europe'
-                elif 'asia' in content:
-                    session_data['location'] = 'Asia'
-                else:
-                    session_data['location'] = 'International'
-            
-            # Extract business type
-            if any(keyword in content for keyword in ['llc', 'corporation', 'partnership', 'sole proprietorship']):
-                session_data['business_type'] = msg.get('content', '').strip()
-
-    # Set defaults
+        conversation_history.append(msg)
+        role = msg.get('role', '')
+        
+        # If this is a user message, check if previous assistant message had a BUSINESS_PLAN tag
+        if role == 'user' and i > 0:
+            prev_msg = history[i-1] if i < len(history) else None
+            if prev_msg and isinstance(prev_msg, dict) and prev_msg.get('role') == 'assistant':
+                prev_content = str(prev_msg.get('content', ''))
+                # Find BUSINESS_PLAN tag in previous message (support both formats)
+                tag_match = re.search(r'\[\[Q:(BUSINESS_PLAN\.\d{1,2})\]\]', prev_content)
+                if tag_match:
+                    tag = tag_match.group(1)
+                    # Normalize tag
+                    parts = tag.split('.')
+                    if len(parts) == 2:
+                        q_num = int(parts[1])
+                        if q_num in business_plan_qa:
+                            answer = str(msg.get('content', '')).strip()
+                            # Skip command responses and very short answers
+                            if (answer.lower() not in ['accept', 'modify', 'draft', 'support', 'scrapping', 'scraping', 'yes', 'no'] 
+                                and len(answer) > 5 
+                                and business_plan_qa[q_num]['answer'] is None):
+                                business_plan_qa[q_num]['answer'] = answer
+    
+    answered_count = len([qa for qa in business_plan_qa.values() if qa.get('answer')])
+    print(f"📊 Extracted {answered_count} BUSINESS_PLAN Q&A pairs from history")
+    if answered_count > 0:
+        print(f"   Questions with answers: {sorted([q_num for q_num, qa in business_plan_qa.items() if qa.get('answer')])}")
+    else:
+        print(f"   ⚠️ WARNING: No BUSINESS_PLAN Q&A pairs found! History length: {len(history)}")
+        # Debug: Check what's in history
+        bp_messages = [msg for msg in history if isinstance(msg, dict) and 'BUSINESS_PLAN' in str(msg.get('content', ''))]
+        print(f"   Messages containing 'BUSINESS_PLAN': {len(bp_messages)}")
+    
+    # Extract business context from history using the existing extraction function
+    try:
+        extracted_context = extract_business_context_from_history(history)
+        if extracted_context:
+            # Override with extracted context if it's better
+            if extracted_context.get("business_name") and extracted_context.get("business_name").lower() not in ["your business", "business", ""]:
+                session_data['business_name'] = extracted_context.get("business_name")
+            if extracted_context.get("industry") and extracted_context.get("industry").lower() not in ["general business", "business", ""]:
+                session_data['industry'] = extracted_context.get("industry")
+            if extracted_context.get("location") and extracted_context.get("location").lower() not in ["united states", ""]:
+                session_data['location'] = extracted_context.get("location")
+            if extracted_context.get("business_type") and extracted_context.get("business_type").lower() not in ["startup", ""]:
+                session_data['business_type'] = extracted_context.get("business_type")
+    except Exception as e:
+        print(f"Business context extraction failed: {e}")
+    
+    # If session data is still missing, try to extract from history using AI
+    if not session_data.get('business_name') or session_data.get('business_name').lower() in ['your business', 'business', '']:
+        # Use AI to extract business information from history
+        extraction_prompt = f"""
+        Analyze this conversation history and extract the following business information:
+        
+        {json.dumps([msg.get('content', '')[:500] for msg in conversation_history[-50:]], indent=2)}
+        
+        Extract and return ONLY a JSON object with these fields:
+        {{
+            "business_name": "actual business name from conversation",
+            "industry": "actual industry from conversation",
+            "location": "actual location (city, state, country) from conversation",
+            "business_type": "actual business type from conversation",
+            "mission_statement": "actual mission statement if mentioned",
+            "value_proposition": "actual value proposition if mentioned"
+        }}
+        
+        If any field is not found, use null. Return ONLY valid JSON, no other text.
+        """
+        
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": extraction_prompt}],
+                temperature=0.1,
+                max_tokens=500,
+                response_format={"type": "json_object"}
+            )
+            extracted = json.loads(response.choices[0].message.content)
+            session_data.update({k: v for k, v in extracted.items() if v})
+        except Exception as e:
+            print(f"Business info extraction failed: {e}")
+    
+    # Set defaults only if still missing
     session_data.setdefault('business_name', 'Your Business')
     session_data.setdefault('industry', 'General Business')
     session_data.setdefault('location', 'United States')
@@ -895,26 +998,85 @@ This comprehensive business plan provides the foundation for creating a detailed
             "content": (
                 "You are Angel, an AI startup coach specializing in comprehensive business planning. "
                 "Generate a detailed business plan summary based on the user's conversation history. "
-                "Extract key information, decisions, and insights from their responses to create a "
+                "Extract ALL key information, decisions, and insights from their responses to create a "
                 "comprehensive overview that serves as the foundation for roadmap generation. "
-                "Use the provided template structure and fill in all sections with relevant information "
+                "\n\n"
+                "CRITICAL EXTRACTION REQUIREMENTS:\n"
+                "- Extract the ACTUAL business name, industry, location, and business type from the conversation\n"
+                "- Extract the ACTUAL mission statement, value proposition, and target market from user's answers\n"
+                "- Extract ALL financial information: revenue projections, costs, funding needs, break-even timeline\n"
+                "- Extract ALL operational details: staffing, suppliers, facilities, equipment\n"
+                "- Extract ALL marketing strategy: channels, sales process, customer acquisition, pricing\n"
+                "- Extract ALL legal/compliance information: licenses, insurance, IP protection, contracts\n"
+                "- Extract ALL growth plans: milestones, expansion strategy, partnerships\n"
+                "- Extract ALL risk management: risks identified, mitigation strategies, contingency plans\n"
+                "\n"
+                "DO NOT use placeholders like [Not Provided], [Extracted from...], [COMPLETE], or [INCOMPLETE]. "
+                "If information is truly not available, state 'Not yet specified' or 'To be determined'. "
+                "Use the provided template structure and fill in ALL sections with REAL information "
                 "from the conversation history. Be thorough and professional while maintaining a supportive tone."
             )
         },
         {
             "role": "user",
             "content": (
-                "Generate a comprehensive business plan summary based on this conversation history:\n\n"
+                "Generate a comprehensive business plan summary based on this conversation history.\n\n"
+                "**CRITICAL REQUIREMENTS:**\n"
+                "- Extract ACTUAL information from the conversation - DO NOT use placeholders like [Not Provided], [Extracted from...], or [COMPLETE]\n"
+                "- Replace ALL template placeholders with real data from the conversation\n"
+                "- Use the actual business name: " + str(session_data.get('business_name', 'Your Business')) + "\n"
+                "- Use the actual industry: " + str(session_data.get('industry', 'General Business')) + "\n"
+                "- Use the actual location: " + str(session_data.get('location', 'United States')) + "\n"
+                "- Extract mission statement, value proposition, target market, revenue model, and ALL other details from the conversation\n"
+                "- If information is not available, say 'Not yet specified' instead of using placeholders\n\n"
                 "Session Data: " + json.dumps(session_data, indent=2) + "\n\n"
-                "Conversation History: " + json.dumps(conversation_history, indent=2) + "\n\n"
-                "Please fill in the template with relevant information extracted from the conversation:\n\n"
-                + BUSINESS_PLAN_SUMMARY_TEMPLATE + "\n\n"
-                "**Instructions:**\n"
-                "- Extract and synthesize information from the conversation history\n"
-                "- Fill in all template sections with relevant details\n"
-                "- Highlight key decisions and milestones achieved\n"
-                "- Ensure the summary is comprehensive and ready for roadmap generation\n"
-                "- Use markdown formatting for clear presentation"
+                "**EXTRACTED BUSINESS PLAN Q&A PAIRS (USE THESE!):**\n"
+                + json.dumps({f"Q{q_num:02d}": {"question": qa['question'][:300], "answer": qa['answer'][:500] if qa['answer'] else "No answer yet"} 
+                             for q_num, qa in sorted(business_plan_qa.items())}, indent=2) + "\n\n"
+                "**QUESTION-TO-SECTION MAPPING (Use this to know where each answer goes):**\n"
+                "- Q01-Q02: Business name, tagline, mission statement → Executive Summary, Business Overview\n"
+                "- Q03: Problem solved → Value Proposition, Business Overview\n"
+                "- Q04-Q05: Products/services, features → Business Overview, Products/Services\n"
+                "- Q06-Q08: Target market, market size, competitors → Market Research & Analysis\n"
+                "- Q09-Q12: Current solutions, market positioning → Market Research & Analysis, Competitive Analysis\n"
+                "- Q13-Q15: Pricing, revenue model, sales projections → Financial Projections, Revenue Projections\n"
+                "- Q16-Q18: Startup costs, operating expenses, break-even → Financial Projections, Cost Structure\n"
+                "- Q19-Q20: Funding needs, funding sources → Financial Projections, Funding Requirements\n"
+                "- Q21-Q24: Location, facilities, suppliers, staffing → Operations & Logistics\n"
+                "- Q25-Q28: Operational needs, resources → Operations & Logistics\n"
+                "- Q29-Q32: Marketing channels, sales process, customer acquisition → Marketing & Sales Strategy\n"
+                "- Q33-Q35: Brand awareness, partnerships → Marketing & Sales Strategy\n"
+                "- Q36-Q39: Licenses, insurance, IP protection, contracts → Legal & Compliance\n"
+                "- Q40-Q42: Tax compliance, data privacy → Legal & Compliance\n"
+                "- Q43-Q45: Milestones, future offerings, expansion → Growth & Scaling\n"
+                "- Q46: Risks, concerns, final thoughts → Risk Management, Growth & Scaling\n\n"
+                "**CRITICAL: Extract information from the Q&A pairs above and fill in the template below. "
+                "DO NOT use 'Not yet specified' if the information exists in the Q&A pairs. "
+                "For example, if Q02 answer contains a mission statement, extract it and use it. "
+                "If Q06 answer describes the target market, extract it and use it. "
+                "Read each Q&A pair carefully and extract ALL relevant information.\n\n"
+                "**FULL CONVERSATION HISTORY (for additional context if needed):**\n"
+                + json.dumps([{"role": msg.get('role'), "content": msg.get('content', '')[:400]} 
+                             for msg in conversation_history[-100:]], indent=2) + "\n\n"
+                "Please fill in the template with ACTUAL information extracted from the Q&A pairs above:\n\n"
+                + BUSINESS_PLAN_SUMMARY_TEMPLATE.format(**session_data) + "\n\n"
+                "**STEP-BY-STEP EXTRACTION PROCESS:**\n"
+                "1. Read through ALL the Q&A pairs above\n"
+                "2. For each section in the template, identify which Q&A pairs contain relevant information\n"
+                "3. Extract the ACTUAL text from the answers - do not paraphrase unless necessary\n"
+                "4. Fill in the template with the extracted information\n"
+                "5. If a section has multiple related Q&A pairs, combine them into a comprehensive summary\n"
+                "\n"
+                "**EXAMPLES OF WHAT TO EXTRACT:**\n"
+                "- If Q02 answer says 'SwiftPOS Solutions' and 'To provide fast, reliable POS solutions...' → Use 'SwiftPOS Solutions' as business name and 'To provide fast, reliable POS solutions...' as mission statement\n"
+                "- If Q06 answer says 'small to medium retail stores, restaurants, and cafes in Karachi' → Use this EXACT text for Target Market\n"
+                "- If Q13 answer says 'tiered subscription pricing based on features' → Use this EXACT text for Revenue Model\n"
+                "- If Q16 answer says '$15,000-$18,000 for office setup, staff, equipment' → Use this EXACT text for Startup Costs\n"
+                "\n"
+                "**CRITICAL:** The Q&A pairs contain ALL the information you need. Read them carefully and extract EVERY detail. "
+                "DO NOT use 'Not yet specified' if the information exists in any of the Q&A pairs above. "
+                "Only use 'Not yet specified' if you've checked ALL Q&A pairs and the information truly doesn't exist.\n\n"
+                "Now generate the comprehensive business plan summary by filling in the template with information from the Q&A pairs:"
             )
         }
     ]
@@ -923,11 +1085,15 @@ This comprehensive business plan provides the foundation for creating a detailed
         model="gpt-4o",
         messages=messages,
         temperature=0.7,
-        max_tokens=4000
+        max_tokens=8000  # Increased for comprehensive summary with actual data
     )
 
+    summary_content = response.choices[0].message.content
+    
+    # Return both as summary (for backward compatibility) and as full result
     return {
-        "summary": response.choices[0].message.content,
+        "summary": summary_content,  # Main summary content
+        "full_summary": summary_content,  # Alias for clarity
         "session_data": session_data,
         "generated_at": datetime.now().isoformat(),
         "completeness_check": {

@@ -639,7 +639,10 @@ RESPONSE REQUIREMENTS:
 • Include authoritative resources for complex topics
 • When suggesting domain names, recommend checking availability on GoDaddy or similar platforms
 
-At the end of Business Plan:
+At the end of Business Plan (Question 46):
+**CRITICAL**: When asking question 46 (BUSINESS_PLAN.46), DO NOT generate a completion message or summary. Simply ask the question normally. When the user answers question 46, the system will automatically handle the transition to the roadmap phase and show the proper business plan summary modal. Do NOT include messages about "Business Plan button" or "generate your full business plan" - the system handles this automatically.
+
+OLD INSTRUCTIONS (DO NOT USE):
 "✅ Business Plan Questionnaire Complete
 
 [Comprehensive summary of business plan]
