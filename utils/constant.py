@@ -374,9 +374,7 @@ ABSOLUTE RULE: Ask ONLY ONE question per response. NEVER ask multiple questions 
 
 **Question 1:** What is your business name? If you haven't decided yet, what are your top 3-5 name options?
 
-**Question 2:** What is your business tagline or mission statement? How would you describe your business in one compelling sentence?
- What makes your business special and different from competitors?
- How would you explain your business to a friend in one sentence?
+**Question 2:** What is your business tagline or mission statement?
 
 **Question 3:** What problem does your business solve? Who has this problem and how significant is it for them?
  What pain point or need does your business address?
@@ -509,7 +507,6 @@ CRITICAL RULES:
 
 [[Q:BUSINESS_PLAN.20]] What are your estimated startup costs? What one-time expenses will you have?
  What initial investments are required to launch?
- How will you fund these startup costs?
 
 [[Q:BUSINESS_PLAN.21]] What are your estimated monthly operating expenses? Include all recurring costs.
  What ongoing costs will you have each month?

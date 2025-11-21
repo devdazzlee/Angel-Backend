@@ -126,9 +126,9 @@ THOUGHT_STARTERS_BY_TAG = {
         "Does it sound professional and match how you want people to view your business?"
     ],
     "BUSINESS_PLAN.02": [
-        "What values guide the way you'll run your business?",
-        "What's the main purpose behind what you do?",
-        "How will your business make a difference for your customers or community?"
+        "What one sentence captures what your business stands for?",
+        "How would you describe your business in a memorable way?",
+        "What message do you want customers to remember about your business?"
     ],
     "BUSINESS_PLAN.03": [
         "Who are you helping, and how are you helping them?",
@@ -2281,9 +2281,17 @@ Do NOT include question numbers, progress percentages, or step counts in your re
     
     elif session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
         # Look for competitive analysis, market research, or vendor recommendation needs
+        # BUT only trigger if user explicitly asks for research, not for every answer
         business_keywords = ["competitors", "market", "industry", "trends", "pricing", "vendors", "domain", "legal requirements"]
-        if any(keyword in user_content.lower() for keyword in business_keywords):
-            needs_web_search = True
+        # Only search if user explicitly mentions these keywords AND it's not just a normal answer
+        # Check if it's an explicit request (contains question words or explicit research request)
+        is_explicit_request = any(word in user_content.lower() for word in ["find", "research", "search", "look up", "what are", "who are", "tell me about"])
+        if any(keyword in user_content.lower() for keyword in business_keywords) and is_explicit_request:
+            # Also check throttling to prevent excessive searches
+            if should_conduct_web_search():
+                needs_web_search = True
+            else:
+                print(f"⏱️ Skipping web search due to throttling (reducing latency)")
             
             # Extract or generate search query with previous calendar year
             current_year = datetime.now().year
@@ -2823,16 +2831,25 @@ async def handle_draft_command(reply, history, session_data=None):
     location = business_context.get("location", "")
     question_topic = get_question_topic(current_question)
     
-    # Trigger research for data-heavy questions
+    # Trigger research ONLY for data-heavy questions that truly need external data
+    # Skip research for simple questions like mission statement/tagline to reduce latency
     research_topics = ["competitor", "competitive analysis", "startup costs", "operational requirements", 
                        "staffing needs", "target market", "sales projections", "financial planning",
                        "expenses", "pricing", "market", "customer acquisition"]
     
+    # Exclude mission statement/tagline from research - it doesn't need external data
+    skip_research_topics = ["mission statement", "tagline", "business name"]
+    
     research_results = None
-    if any(topic in question_topic.lower() for topic in research_topics):
-        research_query = f"{industry} {question_topic} {location} data statistics 2024"
-        print(f"🔍 Draft command - Conducting research: {research_query}")
-        research_results = await conduct_web_search(research_query)
+    if (any(topic in question_topic.lower() for topic in research_topics) and 
+        not any(skip_topic in question_topic.lower() for skip_topic in skip_research_topics)):
+        # Only conduct research if throttling allows
+        if should_conduct_web_search():
+            research_query = f"{industry} {question_topic} {location} data statistics 2024"
+            print(f"🔍 Draft command - Conducting research: {research_query}")
+            research_results = await conduct_web_search(research_query)
+        else:
+            print(f"⏱️ Draft command - Skipping research due to throttling (reducing latency)")
     
     # Generate draft content based on conversation history, question, and research
     draft_content = await generate_draft_content(history, business_context, current_question, research_results)
@@ -2886,10 +2903,23 @@ def get_current_question_context(history, session_data=None):
     return ""
 
 def get_question_topic(current_question):
-    """Extract the main topic from the current question"""
+    """Extract the main topic from the current question - prioritize topline question, not sub-questions"""
     if not current_question:
         print("🔍 DEBUG - No current question provided to get_question_topic")
         return "business planning"
+    
+    # Check for BUSINESS_PLAN.02 tag first - this is the topline question
+    if '[[Q:BUSINESS_PLAN.02]]' in current_question or 'business_plan.02' in current_question.lower():
+        print("🔍 DEBUG - Detected BUSINESS_PLAN.02 - mission statement/tagline topic")
+        return "mission statement"
+    
+    # Check for mission/tagline keywords - but only if it's the main question, not a sub-question
+    if any(keyword in current_question.lower() for keyword in ['mission statement', 'tagline', 'business tagline']):
+        # Make sure it's not a sub-question by checking if it's the first question in the text
+        question_lower = current_question.lower()
+        if 'what is your business tagline or mission statement' in question_lower:
+            print("🔍 DEBUG - Detected mission statement topic (topline question)")
+            return "mission statement"
     
     if any(keyword in current_question for keyword in ['problem does your business solve', 'who has this problem', 'problem', 'solve', 'pain point', 'need']):
         print("🔍 DEBUG - Detected problem-solution topic")
@@ -2912,9 +2942,6 @@ def get_question_topic(current_question):
     elif any(keyword in current_question for keyword in ['key features and benefits', 'how does it work', 'main components', 'steps involved', 'value or results', 'product', 'service', 'core offering', 'what will you be offering']):
         print("🔍 DEBUG - Detected core product/service topic")
         return "core product or service"
-    elif any(keyword in current_question for keyword in ['mission', 'tagline', 'mission statement', 'business stands for']):
-        print("🔍 DEBUG - Detected mission statement topic")
-        return "mission statement"
     elif any(keyword in current_question for keyword in ['sales', 'projected sales', 'first year', 'sales projections', 'revenue', 'income']):
         print("🔍 DEBUG - Detected sales projections topic")
         return "sales projections"
@@ -2966,14 +2993,27 @@ async def generate_draft_content(history, business_context, current_question="",
     business_type = business_context.get("business_type", "your business type")
     location = business_context.get("location", "your location")
     
-    # Extract previous answers from history for better context
+    # Extract previous answers from history for better context - look at ALL history, not just recent
     previous_answers = []
-    for msg in history[-10:]:
-        if msg.get('role') == 'user' and len(msg.get('content', '')) > 20:
+    key_information = []  # Extract key facts like "sole employee", "no staff", etc.
+    
+    # Look through ALL history to find important previous answers
+    for msg in history:
+        if msg.get('role') == 'user' and len(msg.get('content', '')) > 10:
             content = msg.get('content', '')
             # Skip command words
-            if content.lower() not in ['support', 'draft', 'scrapping', 'scraping', 'accept', 'modify']:
-                previous_answers.append(content[:200])
+            if content.lower() not in ['support', 'draft', 'scrapping', 'scraping', 'accept', 'modify', 'yes', 'no']:
+                # Extract key information about staffing, ownership, etc.
+                content_lower = content.lower()
+                if any(phrase in content_lower for phrase in ['sole employee', 'only me', 'just me', 'no employees', 'no staff', 'working solo', 'i will be the only', 'i am the only']):
+                    key_information.append(f"CRITICAL: User stated they are the sole employee/owner - NO staff will be hired initially")
+                if any(phrase in content_lower for phrase in ['no funding', 'self-funded', 'personal savings', 'no investors']):
+                    key_information.append(f"CRITICAL: User stated funding approach")
+                if len(content.strip()) > 20:  # Only include substantial answers
+                    previous_answers.append(content[:300])  # Increased from 200 to 300
+    
+    # Prioritize recent answers but include key information from anywhere
+    recent_answers = previous_answers[-5:] if len(previous_answers) > 5 else previous_answers
     
     # Use AI to generate a comprehensive, personalized, research-backed draft
     research_section = ""
@@ -3002,7 +3042,14 @@ async def generate_draft_content(history, business_context, current_question="",
     - Location: {location}
     
     Previous Answers and Context:
-    {' | '.join(previous_answers[-3:]) if previous_answers else 'No previous context available'}
+    {' | '.join(recent_answers) if recent_answers else 'No previous context available'}
+    
+    ⚠️ CRITICAL PREVIOUS ANSWERS - MUST RESPECT THESE:
+    {chr(10).join(key_information) if key_information else 'No critical constraints identified'}
+    
+    IMPORTANT: If the user previously stated they are the sole employee/owner with no staff, 
+    your draft MUST reflect this. Do NOT suggest hiring employees or building a team if they 
+    explicitly stated they will work solo. Respect their previous answers completely.
     
     Generate a complete, well-structured draft answer that:
         1. Directly answers the question with specific, data-backed content for a {industry.upper()} business
@@ -3073,8 +3120,34 @@ This data can help you craft a comprehensive answer for your {location} market."
     elif any(keyword in current_question for keyword in ['location', 'space', 'facility', 'equipment', 'infrastructure', 'where will your business be located']):
         return generate_operational_requirements_draft(business_context, history)
     
-    elif any(keyword in current_question for keyword in ['staff', 'hiring', 'team', 'employee', 'operational needs', 'initial staff']):
-        return generate_staffing_needs_draft(business_context, history)
+    elif any(keyword in current_question for keyword in ['staff', 'hiring', 'team', 'employee', 'operational needs', 'initial staff', 'staffing needs']):
+        # Check if user previously stated they are sole employee
+        history_text = " ".join([msg.get('content', '') for msg in history if msg.get('role') == 'user']).lower()
+        if any(phrase in history_text for phrase in ['sole employee', 'only me', 'just me', 'no employees', 'no staff', 'working solo', 'i will be the only', 'i am the only']):
+            return f"""Based on your previous answer that you will be the sole employee and owner, here's a draft for your staffing needs:
+
+**Initial Staffing Structure:**
+Since you've indicated you will be working solo initially, your staffing needs focus on your own skills and capabilities rather than hiring employees.
+
+**Key Considerations:**
+• You will handle all business functions yourself initially (operations, sales, marketing, customer service)
+• Focus on developing or acquiring the skills you need to run the business effectively
+• Consider contractors or freelancers for specialized tasks you can't handle yourself
+• Plan for potential future growth when you might need to hire your first employee
+
+**Skills Development:**
+Identify any skills or expertise you need to develop or acquire to successfully run the business solo. This might include technical skills, business management, marketing, or customer service capabilities.
+
+**Resource Planning:**
+As a sole employee, consider:
+• Time management and workload capacity
+• Tools and systems to maximize your productivity
+• When you might need to bring in contractors or part-time help
+• Long-term plan for when you're ready to hire your first employee
+
+This approach allows you to maintain full control while building the business foundation before expanding your team."""
+        else:
+            return generate_staffing_needs_draft(business_context, history)
     
     elif any(keyword in current_question for keyword in ['supplier', 'vendor', 'partner', 'relationship', 'key partners']):
         return generate_supplier_relationships_draft(business_context, history)
@@ -3221,8 +3294,13 @@ Focus on validating your concept before full development through market research
     elif any(keyword in recent_text for keyword in ['location', 'space', 'facility', 'equipment', 'infrastructure', 'where will your business be located']):
         return "Based on your business needs, here's a draft for your operational requirements: Your business location should be strategically chosen to maximize accessibility for your target customers while considering operational efficiency. Key factors include proximity to suppliers, transportation access, zoning requirements, and cost considerations. Your space and equipment needs should align with your business operations, ensuring you have adequate facilities to serve your customers effectively while maintaining operational efficiency. Focus on factors like zoning, transportation access, costs, and scalability."
     
-    elif any(keyword in recent_text for keyword in ['staff', 'hiring', 'team', 'employee', 'operational needs', 'initial staff']):
-        return "Based on your business goals, here's a draft for your staffing needs: Your short-term operational needs should focus on identifying critical roles required for launch, including key personnel who can drive your core business functions. Consider hiring initial staff who bring essential skills and experience, securing appropriate workspace, and establishing operational processes. Prioritize roles that directly impact customer experience and business operations, ensuring you have the right team in place to execute your business plan effectively. Focus on identifying key positions, required qualifications, and your hiring timeline."
+    elif any(keyword in recent_text for keyword in ['staff', 'hiring', 'team', 'employee', 'operational needs', 'initial staff', 'staffing needs']):
+        # Check if user previously stated they are sole employee
+        history_text = " ".join([msg.get('content', '') for msg in history if msg.get('role') == 'user']).lower()
+        if any(phrase in history_text for phrase in ['sole employee', 'only me', 'just me', 'no employees', 'no staff', 'working solo', 'i will be the only', 'i am the only']):
+            return "Based on your previous answer that you will be the sole employee and owner, here's a draft for your staffing needs: Since you've indicated you will be working solo initially, your staffing needs focus on your own skills and capabilities rather than hiring employees. You will handle all business functions yourself initially (operations, sales, marketing, customer service). Focus on developing or acquiring the skills you need to run the business effectively. Consider contractors or freelancers for specialized tasks you can't handle yourself. Plan for potential future growth when you might need to hire your first employee. Identify any skills or expertise you need to develop or acquire to successfully run the business solo. As a sole employee, consider time management, tools and systems to maximize productivity, when you might need contractors or part-time help, and your long-term plan for when you're ready to hire your first employee."
+        else:
+            return "Based on your business goals, here's a draft for your staffing needs: Your short-term operational needs should focus on identifying critical roles required for launch, including key personnel who can drive your core business functions. Consider hiring initial staff who bring essential skills and experience, securing appropriate workspace, and establishing operational processes. Prioritize roles that directly impact customer experience and business operations, ensuring you have the right team in place to execute your business plan effectively. Focus on identifying key positions, required qualifications, and your hiring timeline."
     
     elif any(keyword in recent_text for keyword in ['supplier', 'vendor', 'partner', 'relationship', 'key partners']):
         return "Based on your business requirements, here's a draft for your supplier and vendor relationships: You'll need to identify key suppliers and vendors who can provide essential products, services, or resources for your business operations. Consider building relationships with reliable partners who offer competitive pricing, quality products, and consistent service. Key partners might include suppliers for raw materials, service providers for essential business functions, and strategic partners who can help you reach your target market or enhance your offerings. Focus on reliability, quality, pricing, and long-term partnership potential."

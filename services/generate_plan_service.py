@@ -290,14 +290,17 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 ### 5. Phase 1: Legal Formation & Compliance (Months 1-2)
 
+**Goal**: Establish the legal, technical, and operational base for your business.
+
 **Roadmap Steps - Phase 1: Legal Foundation**
 
-| Step Name | Step Description | Timeline | Research Source |
-|-----------|------------------|----------|----------------|
-| **Choose Business Structure** | Select appropriate legal structure (LLC, C-Corp, S-Corp, Partnership, or Sole Proprietorship). Consider liability protection, tax implications, and operational flexibility. Evaluate based on industry requirements, funding needs, and growth plans. | 1-2 weeks | **Government**: SBA.gov business structure guide, IRS.gov tax classifications<br>**Academic**: University business school entity selection research<br>**Industry**: Forbes/HBR startup structure analysis |
-| **Register Business Name** | Register business name with Secretary of State. Check availability via state database. Consider federal trademark (USPTO) for brand protection. Secure matching domain name and social media handles. File DBA if using alternative name. | 2-3 weeks | **Government**: State Secretary of State offices, USPTO.gov trademark search<br>**Industry**: WSJ/Bloomberg brand protection strategies |
-| **Obtain EIN** | Apply for Employer Identification Number through IRS website. Required for business bank accounts, hiring employees, and tax filing. Free application, instant approval in most cases. | 1 week | **Government**: IRS.gov EIN application guide and requirements |
-| **Get Business Licenses** | Identify and obtain federal, state, and local licenses/permits specific to your industry and location. Research regulatory requirements, submit applications, schedule inspections if needed. | 3-4 weeks | **Government**: SBA.gov licensing guide, state/local regulatory agencies<br>**Industry**: Industry-specific compliance publications |
+| Task | Description | Dependencies | Angel's Role | Status |
+|------|-------------|--------------|-------------|--------|
+| **1.1 Choose Business Structure** | Select appropriate legal structure (LLC, C-Corp, S-Corp, Partnership, or Sole Proprietorship). Consider liability protection, tax implications, and operational flexibility. Evaluate based on industry requirements, funding needs, and growth plans. | None | Provide structure comparison analysis, tax implications guide, document templates | ⬜ |
+| **1.2 Register Business Name** | Register business name with Secretary of State. Check availability via state database. Consider federal trademark (USPTO) for brand protection. Secure matching domain name and social media handles. File DBA if using alternative name. | Business structure selected | Generate registration checklist, provide state-specific links, draft trademark description text | ⬜ |
+| **1.3 Obtain EIN** | Apply for Employer Identification Number through IRS website. Required for business bank accounts, hiring employees, and tax filing. Free application, instant approval in most cases. | Business name registered | Provide IRS.gov EIN application link, generate application checklist | ⬜ |
+| **1.4 Get Business Licenses** | Identify and obtain federal, state, and local licenses/permits specific to your industry and location. Research regulatory requirements, submit applications, schedule inspections if needed. | EIN obtained | Generate compliance checklist, identify required licenses, provide application links | ⬜ |
+| **1.5 File Trademarks** | Protect branding before public marketing. File federal trademarks for business name and key brand elements through USPTO. | Business name registered | Provide USPTO filing links, draft description text, schedule filing reminders | ⬜ |
 
 **Service Providers - Legal Formation**:
 | Provider | Type | Local | Description | Research Source |
@@ -306,20 +309,18 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 | Local Business Attorney | Legal Professional | Yes | Personalized legal advice, industry expertise | State bar associations, legal directories |
 | SCORE Business Mentor | Free Consultation | Yes | Volunteer business mentors with industry experience | SBA.gov, local SCORE chapters |
 
-**Angel Support Available**: Structure comparison analysis, document drafting assistance, compliance checklist, local attorney connections
-
 ### 6. Phase 2: Financial Planning & Setup (Months 2-3)
+
+**Goal**: Set up your financial systems and funding strategies to support all subsequent operations.
 
 **Roadmap Steps - Phase 2: Financial Foundation**
 
-**Sequential Steps (Execute in Order):**
-
-| Step Name | Step Description | Timeline | Research Source |
-|-----------|------------------|----------|----------------|
-| **Open Business Bank Account** | Select and open dedicated business checking account. Compare traditional banks vs online/fintech options. Consider fees, features, integration capabilities. Gather required documents (EIN, formation docs, ID). | 1-2 weeks | **Government**: FDIC.gov banking guidance for small businesses<br>**Industry**: NerdWallet, Bankrate business banking comparisons<br>**Academic**: Business school research on startup financial management |
-| **Set Up Accounting System** | Choose accounting software (cash vs accrual basis). Set up chart of accounts, connect bank feeds, establish bookkeeping processes. Consider hiring bookkeeper or accountant. | 2-3 weeks | **Government**: IRS.gov accounting method requirements<br>**Industry**: Forbes/HBR accounting software reviews<br>**Academic**: University accounting department best practices |
-| **Establish Financial Controls** | Implement expense policies, approval workflows, receipt management. Set up separate business credit card. Create financial tracking and reporting processes. | 1-2 weeks | **Government**: SBA.gov financial management resources<br>**Academic**: Research on internal controls for startups |
-| **Create Financial Projections** | Develop detailed financial projections (revenue, expenses, cash flow) for 12-36 months. Create budget and financial milestones. Plan for seasonal variations. | 2-3 weeks | **Industry**: VC firms' startup financial modeling guides<br>**Academic**: Business school financial forecasting research |
+| Task | Description | Dependencies | Angel's Role | Status |
+|------|-------------|--------------|-------------|--------|
+| **2.1 Open Business Bank Account** | Select and open dedicated business checking account. Compare traditional banks vs online/fintech options. Consider fees, features, integration capabilities. Gather required documents (EIN, formation docs, ID). | EIN obtained | Generate banking comparison, provide bank selection checklist, document requirements list | ⬜ |
+| **2.2 Set Up Accounting System** | Choose accounting software (cash vs accrual basis). Set up chart of accounts, connect bank feeds, establish bookkeeping processes. Consider hiring bookkeeper or accountant. | Business bank account opened | Provide accounting software comparison, generate setup checklist, bookkeeper recommendations | ⬜ |
+| **2.3 Establish Financial Controls** | Implement expense policies, approval workflows, receipt management. Set up separate business credit card. Create financial tracking and reporting processes. | Accounting system set up | Generate financial control templates, expense policy drafts, tracking spreadsheet | ⬜ |
+| **2.4 Create Financial Projections** | Develop detailed financial projections (revenue, expenses, cash flow) for 12-36 months. Create budget and financial milestones. Plan for seasonal variations. | Financial controls established | Provide financial projection templates, generate forecasting models, budget worksheets | ⬜ |
 
 **Service Providers - Financial Setup**:
 | Provider | Type | Local | Description | Research Source |
@@ -332,16 +333,16 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 ### 7. Phase 3: Product & Operations Development (Months 3-5)
 
+**Goal**: Build your operational infrastructure once legal and financial foundations are secure.
+
 **Roadmap Steps - Phase 3: Operational Foundation**
 
-**Sequential Steps (Execute in Order):**
-
-| Step Name | Step Description | Timeline | Research Source |
-|-----------|------------------|----------|----------------|
-| **Establish Supply Chain** | Identify and vet suppliers (local vs international). Negotiate terms, minimum orders, payment terms. Set up logistics and fulfillment processes. Establish backup suppliers for critical items. | 4-6 weeks | **Government**: Commerce.gov international trade resources<br>**Industry**: Bloomberg supply chain reports, trade publications<br>**Academic**: University supply chain management research |
-| **Set Up Operations Infrastructure** | Secure physical location (office, warehouse, retail) if needed. Purchase equipment, technology, and tools. Set up utilities, insurance, and security systems. | 3-4 weeks | **Government**: SBA.gov location selection guidance<br>**Industry**: Commercial real estate publications<br>**Academic**: Operations management research |
-| **Develop Product/Service** | Finalize product specifications or service delivery processes. Create prototypes or pilot programs. Test with focus groups or beta customers. Iterate based on feedback. | 6-8 weeks | **Academic**: University product development research<br>**Industry**: Harvard Business Review innovation articles |
-| **Implement Quality Control** | Establish quality standards and testing procedures. Create quality assurance processes. Set up customer feedback loops. Document standard operating procedures. | 2-3 weeks | **Government**: ISO standards, industry regulatory requirements<br>**Academic**: Quality management research |
+| Task | Description | Dependencies | Angel's Role | Status |
+|------|-------------|--------------|-------------|--------|
+| **3.1 Establish Supply Chain** | Identify and vet suppliers (local vs international). Negotiate terms, minimum orders, payment terms. Set up logistics and fulfillment processes. Establish backup suppliers for critical items. | Financial systems operational | Provide supplier evaluation checklist, negotiation templates, vendor comparison tools | ⬜ |
+| **3.2 Set Up Operations Infrastructure** | Secure physical location (office, warehouse, retail) if needed. Purchase equipment, technology, and tools. Set up utilities, insurance, and security systems. | Supply chain established | Generate location selection criteria, equipment checklist, vendor recommendations | ⬜ |
+| **3.3 Develop Product/Service** | Finalize product specifications or service delivery processes. Create prototypes or pilot programs. Test with focus groups or beta customers. Iterate based on feedback. | Operations infrastructure ready | Provide product development templates, testing protocols, feedback collection forms | ⬜ |
+| **3.4 Implement Quality Control** | Establish quality standards and testing procedures. Create quality assurance processes. Set up customer feedback loops. Document standard operating procedures. | Product/service developed | Generate quality control checklists, SOP templates, feedback system setup | ⬜ |
 
 **Service Providers - Operations**:
 | Provider | Type | Local | Description | Research Source |
@@ -354,17 +355,17 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 ### 8. Phase 4: Marketing & Sales Strategy (Months 5-7)
 
+**Goal**: Promote your business once all systems are in place and ready to handle customer demand.
+
 **Roadmap Steps - Phase 4: Market Launch Preparation**
 
-**Sequential Steps (Execute in Order):**
-
-| Step Name | Step Description | Timeline | Research Source |
-|-----------|------------------|----------|----------------|
-| **Develop Brand Identity** | Create brand positioning, messaging, visual identity (logo, colors, fonts). Define unique value proposition and brand voice. Develop brand guidelines document. | 3-4 weeks | **Academic**: University marketing research on brand positioning<br>**Industry**: Forbes/HBR branding strategy articles |
-| **Build Digital Presence** | Create professional website with SEO optimization. Set up social media profiles across relevant platforms. Implement analytics and tracking (Google Analytics, etc.). | 4-6 weeks | **Industry**: Digital marketing publications, web design trends<br>**Academic**: Digital marketing research studies |
-| **Create Marketing Materials** | Develop marketing collateral (brochures, presentations, business cards). Create product photography and videography. Write copy for various channels. | 3-4 weeks | **Industry**: Marketing best practices from leading agencies<br>**Academic**: Marketing communications research |
-| **Implement Sales Process** | Define sales funnel stages and customer journey. Create CRM system and sales tracking. Develop sales scripts, proposals, and contracts. Train sales team if applicable. | 2-3 weeks | **Academic**: Sales methodology research<br>**Industry**: Sales enablement publications, CRM software guides |
-| **Plan Customer Acquisition** | Identify customer acquisition channels (paid ads, content marketing, partnerships). Set budgets and KPIs. Create initial campaigns and test messaging. | 3-4 weeks | **Industry**: Digital advertising platforms' best practices<br>**Academic**: Customer acquisition research studies |
+| Task | Description | Dependencies | Angel's Role | Status |
+|------|-------------|--------------|-------------|--------|
+| **4.1 Develop Brand Identity** | Create brand positioning, messaging, visual identity (logo, colors, fonts). Define unique value proposition and brand voice. Develop brand guidelines document. | Product/service ready | Draft brand positioning statement, generate brand guidelines template, provide design resources | ⬜ |
+| **4.2 Build Digital Presence** | Create professional website with SEO optimization. Set up social media profiles across relevant platforms. Implement analytics and tracking (Google Analytics, etc.). | Brand identity established | Generate website content, SEO checklist, social media setup guide, analytics configuration | ⬜ |
+| **4.3 Create Marketing Materials** | Develop marketing collateral (brochures, presentations, business cards). Create product photography and videography. Write copy for various channels. | Digital presence live | Draft marketing copy, generate content calendar, provide design templates | ⬜ |
+| **4.4 Implement Sales Process** | Define sales funnel stages and customer journey. Create CRM system and sales tracking. Develop sales scripts, proposals, and contracts. Train sales team if applicable. | Marketing materials ready | Generate sales scripts, CRM setup guide, proposal templates, training materials | ⬜ |
+| **4.5 Plan Customer Acquisition** | Identify customer acquisition channels (paid ads, content marketing, partnerships). Set budgets and KPIs. Create initial campaigns and test messaging. | Sales process implemented | Generate customer acquisition playbook, ad copy suggestions, campaign templates, KPI tracking | ⬜ |
 
 **Service Providers - Marketing & Sales**:
 | Provider | Type | Local | Description | Research Source |
@@ -377,17 +378,17 @@ This roadmap is not just a checklist—it's your strategic blueprint for buildin
 
 ### 9. Phase 5: Full Launch & Scaling (Months 7-12)
 
+**Goal**: Execute your complete business strategy when all foundational elements are ready.
+
 **Roadmap Steps - Phase 5: Launch & Growth**
 
-**Sequential Steps (Execute in Order):**
-
-| Step Name | Step Description | Timeline | Research Source |
-|-----------|------------------|----------|----------------|
-| **Execute Go-to-Market Launch** | Choose launch strategy (soft launch, hard launch, beta, or phased rollout). Coordinate all marketing channels. Execute launch events and campaigns. Monitor initial customer response. | 4-6 weeks | **Academic**: Product launch research from business schools<br>**Industry**: HBR/WSJ successful launch case studies |
-| **Customer Acquisition at Scale** | Ramp up customer acquisition efforts across validated channels. Scale spending based on ROI metrics. Implement referral programs and partnerships. | 2-3 months | **Industry**: Growth marketing publications, VC growth guides<br>**Academic**: Customer lifetime value research |
-| **Operational Scaling** | Hire key team members as needed. Scale operations to meet demand. Optimize processes for efficiency. Implement automation where possible. | 2-3 months | **Government**: SBA.gov hiring and HR resources<br>**Academic**: Scaling operations research |
-| **Financial Management & Fundraising** | Monitor cash flow closely. Achieve profitability milestones or secure additional funding. Implement financial reporting and forecasting. | Ongoing | **Government**: SEC.gov fundraising regulations<br>**Industry**: VC/Angel investor guidelines<br>**Academic**: Startup finance research |
-| **Measure, Learn, Optimize** | Track KPIs and business metrics. Analyze customer feedback and behavior. Optimize product, pricing, and processes. Prepare for next growth phase. | Ongoing | **Academic**: Business analytics and optimization research<br>**Industry**: Analytics platform best practices |
+| Task | Description | Dependencies | Angel's Role | Status |
+|------|-------------|--------------|-------------|--------|
+| **5.1 Execute Go-to-Market Launch** | Choose launch strategy (soft launch, hard launch, beta, or phased rollout). Coordinate all marketing channels. Execute launch events and campaigns. Monitor initial customer response. | Marketing & sales ready | Generate launch plan, event checklist, campaign coordination guide, monitoring dashboard | ⬜ |
+| **5.2 Customer Acquisition at Scale** | Ramp up customer acquisition efforts across validated channels. Scale spending based on ROI metrics. Implement referral programs and partnerships. | Launch executed | Provide scaling strategies, ROI analysis templates, referral program setup, partnership outreach | ⬜ |
+| **5.3 Operational Scaling** | Hire key team members as needed. Scale operations to meet demand. Optimize processes for efficiency. Implement automation where possible. | Customer base growing | Generate hiring templates, job descriptions, process optimization guide, automation recommendations | ⬜ |
+| **5.4 Financial Management & Fundraising** | Monitor cash flow closely. Achieve profitability milestones or secure additional funding. Implement financial reporting and forecasting. | Operations scaled | Provide financial dashboard, fundraising templates, investor pitch materials, reporting tools | ⬜ |
+| **5.5 Measure, Learn, Optimize** | Track KPIs and business metrics. Analyze customer feedback and behavior. Optimize product, pricing, and processes. Prepare for next growth phase. | Business operational | Generate KPI tracking dashboard, feedback analysis tools, optimization playbook, growth planning | ⬜ |
 
 **Service Providers - Launch & Scaling**:
 | Provider | Type | Local | Description | Research Source |
@@ -434,18 +435,20 @@ Your roadmap is complete, researched, and ready for execution. The next phase wi
 *This roadmap is tailored specifically to your business, industry, and location. Every recommendation is designed to help you build the business of your dreams.*
 
 **CRITICAL FORMATTING REQUIREMENTS:**
-- ALL roadmap steps MUST be in markdown table format with columns: Step Name | Step Description | Timeline | Research Source
-- Use sequential numbering (1, 2, 3, etc.) to show clear sequence of events
+- ALL roadmap steps MUST be in markdown table format with columns: Task | Description | Dependencies | Angel's Role | Status
+- Use sequential numbering (1.1, 1.2, 2.1, 2.2, etc.) to show clear sequence of events within each phase
 - Each phase MUST have a table with ALL steps listed in order
 - Do NOT use bullet points or paragraphs for roadmap steps - ONLY use tables
 - Tables must follow this exact format:
-  | Step Name | Step Description | Timeline | Research Source |
-  |-----------|------------------|----------|----------------|
-  | **Step 1: [Name]** | [Detailed description] | [Timeframe] | [Source citations] |
-  | **Step 2: [Name]** | [Detailed description] | [Timeframe] | [Source citations] |
-- Bold all step titles and key terms
+  | Task | Description | Dependencies | Angel's Role | Status |
+  |------|-------------|--------------|-------------|--------|
+  | **1.1 [Task Name]** | [Detailed description] | [Dependencies or "None"] | [What Angel will do to help] | ⬜ |
+  | **1.2 [Task Name]** | [Detailed description] | [Dependencies] | [What Angel will do to help] | ⬜ |
+- Status column should use ⬜ for pending tasks, ✓ for completed tasks, or → SOON for upcoming tasks
+- Bold all task titles and key terms
 - Use a professional but friendly tone
 - Ensure sequence is visually clear with numbered steps in order
+- Each phase should start with a "Goal:" statement explaining the purpose of that phase
 """
 
     # Format the roadmap template with research data
