@@ -186,13 +186,13 @@ def _calculate_phase_progress(completed_tasks: List[str], phase_name: str) -> Di
     }
 
 def _get_milestone_name(phase: str) -> str:
-    """Get broader milestone name for progress tracking"""
+    """Get broader milestone name for progress tracking - matches frontend getPhaseName"""
     milestone_map = {
-        "legal_formation": "Legal Foundation",
-        "financial_setup": "Financial Systems",
-        "operations_development": "Operations Setup",
-        "marketing_sales": "Marketing & Sales",
-        "launch_scaling": "Launch & Growth"
+        "legal_formation": "Legal Formation & Compliance",
+        "financial_setup": "Financial Planning & Setup",
+        "operations_development": "Product & Operations Development",
+        "marketing_sales": "Marketing & Sales Strategy",
+        "launch_scaling": "Full Launch & Scaling"
     }
     return milestone_map.get(phase, "Implementation")
 
@@ -401,9 +401,11 @@ async def get_current_implementation_task(session_id: str, request: Request):
                     "business_context": session_data
                 },
                 "progress": {
-                    "completed": len(completed_tasks),
+                    "completed": len([t for t in completed_tasks if '_substep_' not in t]),  # Main tasks only
                     "total": 25,
-                    "percent": int((len(completed_tasks) / 25) * 100),
+                    "main_tasks_completed": len([t for t in completed_tasks if '_substep_' not in t]),
+                    "substeps_completed": len([t for t in completed_tasks if '_substep_' in t]),
+                    "percent": min(100, int((len([t for t in completed_tasks if '_substep_' not in t]) / 25) * 100)) if 25 > 0 else 0,
                     "phases_completed": _calculate_phases_completed(completed_tasks),
                     "current_phase": task_result["phase"],
                     "milestone": _get_milestone_name(task_result["phase"]),
@@ -674,6 +676,31 @@ async def complete_implementation_task(
             substep_id = f"{task_id}_substep_{substep_number}"
             if substep_id not in completed_tasks:
                 completed_tasks.append(substep_id)
+            
+            # CRITICAL: Check if all substeps for this task are now completed
+            # If so, automatically mark the main task as completed
+            session_data = {
+                "business_name": session.get("business_name", "Your Business"),
+                "industry": session.get("industry", "General Business"),
+                "location": session.get("location", "United States"),
+                "business_type": session.get("business_type", "Startup")
+            }
+            
+            # Get all substeps for this task
+            substeps = await task_manager._generate_substeps(task_id, session_data)
+            
+            # Check if all substeps are completed
+            all_substeps_done = True
+            for substep in substeps:
+                substep_check_id = f"{task_id}_substep_{substep.get('step_number', 0)}"
+                if substep_check_id not in completed_tasks:
+                    all_substeps_done = False
+                    break
+            
+            # If all substeps are done, mark main task as completed
+            if all_substeps_done and task_id not in completed_tasks:
+                completed_tasks.append(task_id)
+                print(f"✅ Auto-completed main task {task_id} - all substeps done")
         else:
             # Completing the entire task - mark all substeps as completed
             # Get the task details directly for the current task_id (not the next task)
@@ -766,10 +793,24 @@ async def complete_implementation_task(
             "Launch & Growth": _calculate_phase_progress(completed_tasks, "Launch & Growth")
         }
         
+        # Calculate main tasks completed (excluding substeps)
+        main_tasks_completed = len([t for t in completed_tasks if '_substep_' not in t])
+        
+        # Calculate substeps completed (only substeps, not main tasks)
+        substeps_completed = len([t for t in completed_tasks if '_substep_' in t])
+        
+        # Total main tasks
+        total_main_tasks = 25
+        
+        # Calculate percent based on main tasks, capped at 100%
+        main_tasks_percent = min(100, int((main_tasks_completed / total_main_tasks) * 100)) if total_main_tasks > 0 else 0
+        
         updated_progress = {
-            "completed": len(completed_tasks),
-            "total": 25,
-            "percent": int((len(completed_tasks) / 25) * 100),
+            "completed": main_tasks_completed,  # Main tasks completed (for clarity)
+            "total": total_main_tasks,  # Total main tasks (25)
+            "percent": main_tasks_percent,  # Percent based on main tasks, capped at 100%
+            "main_tasks_completed": main_tasks_completed,  # Number of main tasks completed
+            "substeps_completed": substeps_completed,  # Number of substeps completed
             "phases_completed": phases_completed,
             "current_phase": session.get("current_phase", "implementation"),
             "milestone": _get_milestone_name(session.get("current_phase", "implementation")),
