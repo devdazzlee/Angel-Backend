@@ -120,7 +120,7 @@ task_cache = {}
 CACHE_TTL = 300  # 5 minutes cache
 
 def _calculate_phases_completed(completed_tasks: List[str]) -> int:
-    """Calculate number of phases completed based on completed tasks"""
+    """Calculate number of phases completed based on completed tasks and substeps"""
     phase_tasks = {
         "legal_formation": ["business_structure_selection", "business_registration", "tax_id_application", "permits_licenses", "insurance_requirements"],
         "financial_setup": ["business_bank_account", "accounting_system", "budget_planning", "funding_strategy", "financial_tracking"],
@@ -131,12 +131,59 @@ def _calculate_phases_completed(completed_tasks: List[str]) -> int:
     
     phases_completed = 0
     for phase, tasks in phase_tasks.items():
-        # Check if at least 80% of tasks in phase are completed
-        completed_in_phase = sum(1 for task in tasks if task in completed_tasks)
+        # Count completed tasks (both main tasks and tasks with completed substeps)
+        completed_in_phase = 0
+        for task in tasks:
+            # Check if main task is completed
+            if task in completed_tasks:
+                completed_in_phase += 1
+            else:
+                # Check if any substeps are completed for this task
+                # Count substeps: task_substep_1, task_substep_2, etc.
+                substep_count = sum(1 for completed in completed_tasks if completed.startswith(f"{task}_substep_"))
+                # If at least 1 substep is completed, count it as partial progress (0.5 weight)
+                # If 3+ substeps are completed, count it as full task completion
+                if substep_count >= 3:
+                    completed_in_phase += 1
+                elif substep_count > 0:
+                    # Partial progress - count as 0.5
+                    completed_in_phase += 0.5
+        
+        # Check if at least 80% of tasks in phase are completed (accounting for partial progress)
         if completed_in_phase >= len(tasks) * 0.8:
             phases_completed += 1
     
     return phases_completed
+
+def _calculate_phase_progress(completed_tasks: List[str], phase_name: str) -> Dict[str, Any]:
+    """Calculate detailed progress for a specific phase"""
+    phase_tasks_map = {
+        "Legal Foundation": ["business_structure_selection", "business_registration", "tax_id_application", "permits_licenses", "insurance_requirements"],
+        "Financial Systems": ["business_bank_account", "accounting_system", "budget_planning", "funding_strategy", "financial_tracking"],
+        "Operations Setup": ["supply_chain_setup", "equipment_procurement", "operational_processes", "quality_control", "inventory_management"],
+        "Marketing & Sales": ["brand_development", "marketing_strategy", "sales_process", "customer_acquisition", "digital_presence"],
+        "Launch & Growth": ["go_to_market", "team_building", "performance_monitoring", "growth_strategies", "customer_feedback"]
+    }
+    
+    tasks = phase_tasks_map.get(phase_name, [])
+    if not tasks:
+        return {"completed": 0, "total": 0, "percent": 0}
+    
+    completed_count = 0
+    for task in tasks:
+        if task in completed_tasks:
+            completed_count += 1
+        else:
+            # Check substeps
+            substep_count = sum(1 for completed in completed_tasks if completed.startswith(f"{task}_substep_"))
+            if substep_count >= 3:  # Most substeps completed = task done
+                completed_count += 1
+    
+    return {
+        "completed": completed_count,
+        "total": len(tasks),
+        "percent": int((completed_count / len(tasks)) * 100) if tasks else 0
+    }
 
 def _get_milestone_name(phase: str) -> str:
     """Get broader milestone name for progress tracking"""
@@ -148,6 +195,23 @@ def _get_milestone_name(phase: str) -> str:
         "launch_scaling": "Launch & Growth"
     }
     return milestone_map.get(phase, "Implementation")
+
+def _get_phase_from_task_id(task_id: str) -> str:
+    """Determine phase from task_id based on task mapping"""
+    phase_tasks = {
+        "legal_formation": ["business_structure_selection", "business_registration", "tax_id_application", "permits_licenses", "insurance_requirements"],
+        "financial_setup": ["business_bank_account", "accounting_system", "budget_planning", "funding_strategy", "financial_tracking"],
+        "operations_development": ["supply_chain_setup", "equipment_procurement", "operational_processes", "quality_control", "inventory_management"],
+        "marketing_sales": ["brand_development", "marketing_strategy", "sales_process", "customer_acquisition", "digital_presence"],
+        "launch_scaling": ["go_to_market", "team_building", "performance_monitoring", "growth_strategies", "customer_feedback"]
+    }
+    
+    for phase, tasks in phase_tasks.items():
+        if task_id in tasks:
+            return phase
+    
+    # Default fallback
+    return "legal_formation"
 
 @router.get("/sessions/{session_id}/implementation/tasks")
 async def get_current_implementation_task(session_id: str, request: Request):
@@ -236,10 +300,38 @@ async def get_current_implementation_task(session_id: str, request: Request):
         # Also check implementation_tasks table if it exists
         try:
             from db.supabase import supabase
-            task_records = supabase.from_("implementation_tasks").select("task_id").eq("session_id", session_id).eq("completed", True).execute()
+            # Query using completed_at IS NOT NULL
+            # Schema uses task_name (not task_id) and stores substep_number in metadata JSONB
+            task_records = supabase.from_("implementation_tasks").select("task_name, metadata").eq("session_id", session_id).not_.is_("completed_at", "null").execute()
+            
             if task_records.data:
-                completed_task_ids = [record.get("task_id") for record in task_records.data if record.get("task_id")]
-                completed_tasks.extend(completed_task_ids)
+                for record in task_records.data:
+                    task_name = record.get("task_name")
+                    metadata = record.get("metadata", {})
+                    
+                    # Extract task_id and substep_number from metadata
+                    task_id = metadata.get("task_id") if isinstance(metadata, dict) else task_name
+                    substep_number = metadata.get("substep_number") if isinstance(metadata, dict) else None
+                    
+                    # Use task_name as fallback if task_id not in metadata
+                    if not task_id:
+                        task_id = task_name
+                    
+                    if task_id:
+                        if substep_number:
+                            # Add substep ID
+                            substep_id = f"{task_id}_substep_{substep_number}"
+                            if substep_id not in completed_tasks:
+                                completed_tasks.append(substep_id)
+                        else:
+                            # Add main task ID (no substep_number means main task completed)
+                            if task_id not in completed_tasks:
+                                completed_tasks.append(task_id)
+                            
+                            # Also ensure all substeps for this task are marked as completed
+                            # (since main task completion implies all substeps are done)
+                            # We'll add placeholder substep IDs to maintain consistency
+                            # But this is optional - the main task ID is what matters
                 # Remove duplicates
                 completed_tasks = list(set(completed_tasks))
         except Exception as e:
@@ -282,6 +374,15 @@ async def get_current_implementation_task(session_id: str, request: Request):
             if not active_substep_found and substeps:
                 current_substep = substeps[-1].get('step_number', len(substeps))
             
+            # Calculate phase progress for all phases (including substeps)
+            phase_progress_details = {
+                "Legal Foundation": _calculate_phase_progress(completed_tasks, "Legal Foundation"),
+                "Financial Systems": _calculate_phase_progress(completed_tasks, "Financial Systems"),
+                "Operations Setup": _calculate_phase_progress(completed_tasks, "Operations Setup"),
+                "Marketing & Sales": _calculate_phase_progress(completed_tasks, "Marketing & Sales"),
+                "Launch & Growth": _calculate_phase_progress(completed_tasks, "Launch & Growth")
+            }
+            
             response_data = {
                 "success": True,
                 "message": "Current implementation task retrieved",
@@ -305,7 +406,8 @@ async def get_current_implementation_task(session_id: str, request: Request):
                     "percent": int((len(completed_tasks) / 25) * 100),
                     "phases_completed": _calculate_phases_completed(completed_tasks),
                     "current_phase": task_result["phase"],
-                    "milestone": _get_milestone_name(task_result["phase"])
+                    "milestone": _get_milestone_name(task_result["phase"]),
+                    "phase_progress": phase_progress_details  # Include detailed phase progress
                 }
             }
         
@@ -321,87 +423,8 @@ async def get_current_implementation_task(session_id: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Failed to get implementation task: {str(e)}")
     
 
-@router.post("/sessions/{session_id}/implementation/tasks/{task_id}/complete")
-async def complete_implementation_task(
-    session_id: str,
-    task_id: str,
-    request: Request,
-    completion_data: Dict[str, Any]
-):
-    """Mark an implementation task as completed"""
-    
-    user_id = request.state.user["id"]
-    
-    try:
-        # Get session data
-        session = await get_session(session_id, user_id)
-        stored_context = {}
-        if session:
-            stored_context = session.get("business_context") or {}
-            if not isinstance(stored_context, dict):
-                stored_context = {}
-        session_data = {
-            "business_name": stored_context.get("business_name", "Your Business"),
-            "industry": stored_context.get("industry", "Technology"),
-            "location": stored_context.get("location", "Karachi"),
-            "business_type": stored_context.get("business_type", "Startup")
-        }
-        
-        # Validate completion using RAG
-        validation_result = await validate_with_rag(
-            json.dumps(completion_data),
-            session_data,
-            f"implementation_task_{task_id}"
-        )
-        
-        # Generate completion feedback
-        feedback_prompt = f"""
-        Provide feedback on task completion for: {task_id}
-        
-        Task Completion Data: {completion_data}
-        Validation Results: {validation_result.get('validation_results', '')}
-        Business Context: {session_data}
-        
-        Provide feedback including:
-        1. Completion Assessment: How well the task was completed
-        2. Missing Elements: What might be missing
-        3. Recommendations: Suggestions for improvement
-        4. Next Steps: What to do next
-        5. Success Indicators: Signs of successful completion
-        
-        Format as constructive feedback to help the user succeed.
-        """
-        
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": feedback_prompt}],
-            temperature=0.3,
-            max_tokens=1500
-        )
-        
-        feedback = response.choices[0].message.content
-        
-        # Update progress (you'll need to implement this based on your session service)
-        updated_progress = {
-            "completed": 1,  # Increment based on your logic
-            "total": 25,
-            "percent": 4,  # Calculate based on your logic
-            "phases_completed": 0
-        }
-        
-        return {
-            "success": True,
-            "message": "Task completed successfully",
-            "feedback": feedback,
-            "validation_results": validation_result,
-            "progress": updated_progress
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to complete task: {str(e)}")
+# REMOVED: Duplicate endpoint - using the one below at line 614 instead
+# This old endpoint was slow because it called RAG validation
 
 @router.post("/sessions/{session_id}/implementation/help")
 async def get_implementation_help(
@@ -643,6 +666,9 @@ async def complete_implementation_task(
         # Get completed tasks
         completed_tasks = business_context.get("completed_implementation_tasks", []) or []
         
+        # Get task phase - we need this for database save
+        task_phase = None
+        
         # If completing a substep, mark the substep as completed
         if substep_number:
             substep_id = f"{task_id}_substep_{substep_number}"
@@ -650,28 +676,33 @@ async def complete_implementation_task(
                 completed_tasks.append(substep_id)
         else:
             # Completing the entire task - mark all substeps as completed
-            # First, get the task to know how many substeps it has
-            task_result = await task_manager.get_next_implementation_task(
-                {
-                    "business_name": session.get("business_name", "Your Business"),
-                    "industry": session.get("industry", "General Business"),
-                    "location": session.get("location", "United States"),
-                    "business_type": session.get("business_type", "Startup")
-                },
-                completed_tasks
-            )
+            # Get the task details directly for the current task_id (not the next task)
+            session_data = {
+                "business_name": session.get("business_name", "Your Business"),
+                "industry": session.get("industry", "General Business"),
+                "location": session.get("location", "United States"),
+                "business_type": session.get("business_type", "Startup")
+            }
             
-            # If this is the current task, mark all its substeps as completed
-            if task_result.get("task_id") == task_id:
-                substeps = task_result.get("task_details", {}).get("substeps", [])
-                for substep in substeps:
-                    substep_id = f"{task_id}_substep_{substep.get('step_number', 0)}"
-                    if substep_id not in completed_tasks:
-                        completed_tasks.append(substep_id)
+            # Get substeps for this specific task
+            substeps = await task_manager._generate_substeps(task_id, session_data)
+            
+            # Mark all substeps as completed
+            for substep in substeps:
+                substep_id = f"{task_id}_substep_{substep.get('step_number', 0)}"
+                if substep_id not in completed_tasks:
+                    completed_tasks.append(substep_id)
             
             # Mark the main task as completed
             if task_id not in completed_tasks:
                 completed_tasks.append(task_id)
+            
+            # Get phase from task_id
+            task_phase = _get_phase_from_task_id(task_id)
+        
+        # If we don't have phase yet (substep completion), determine it from task_id
+        if not task_phase:
+            task_phase = _get_phase_from_task_id(task_id)
         
         # Update business_context with completed tasks
         business_context["completed_implementation_tasks"] = completed_tasks
@@ -691,54 +722,108 @@ async def complete_implementation_task(
         # Also save to implementation_tasks table if it exists
         try:
             from db.supabase import supabase
-            supabase.from_("implementation_tasks").upsert({
+            # Schema uses task_name (not task_id) and stores substep_number in metadata JSONB
+            # Phase is required (NOT NULL constraint)
+            upsert_data = {
                 "session_id": session_id,
-                "task_id": task_id,
-                "substep_number": substep_number,
-                "completed": True,
+                "task_name": task_id,  # Use task_name column (exists in schema)
+                "phase": task_phase or "legal_formation",  # Required field - use determined phase or default
                 "completed_at": datetime.now().isoformat(),
-                "decision": decision,
-                "notes": notes,
-                "user_id": user_id
-            }).execute()
+                "user_id": user_id,
+                "status": "completed",  # Set status to completed
+                "metadata": {
+                    "task_id": task_id,
+                    "substep_number": substep_number,
+                    "decision": decision,
+                    "notes": notes,
+                    "completed_at": datetime.now().isoformat()
+                }
+            }
+            
+            # Use upsert with conflict resolution on session_id + task_name
+            # Note: If unique constraint doesn't exist, this will just insert
+            supabase.from_("implementation_tasks").upsert(upsert_data).execute()
+            print(f"✅ Saved task completion to implementation_tasks: {task_id} (phase: {task_phase})" + (f" (substep {substep_number})" if substep_number else ""))
         except Exception as e:
             print(f"Note: Could not save to implementation_tasks table: {e}")
+            # This is not critical - business_context is the primary storage
         
-        # Calculate updated progress
+        # CRITICAL: Clear task cache so next task loads correctly
+        cache_key = f"{session_id}_{user_id}"
+        if cache_key in task_cache:
+            del task_cache[cache_key]
+            print(f"🗑️ Cleared task cache for session: {session_id}")
+        
+        # Calculate updated progress with detailed phase information
+        phases_completed = _calculate_phases_completed(completed_tasks)
+        
+        # Calculate progress for each phase (including substeps)
+        phase_progress_details = {
+            "Legal Foundation": _calculate_phase_progress(completed_tasks, "Legal Foundation"),
+            "Financial Systems": _calculate_phase_progress(completed_tasks, "Financial Systems"),
+            "Operations Setup": _calculate_phase_progress(completed_tasks, "Operations Setup"),
+            "Marketing & Sales": _calculate_phase_progress(completed_tasks, "Marketing & Sales"),
+            "Launch & Growth": _calculate_phase_progress(completed_tasks, "Launch & Growth")
+        }
+        
         updated_progress = {
             "completed": len(completed_tasks),
             "total": 25,
             "percent": int((len(completed_tasks) / 25) * 100),
-            "phases_completed": _calculate_phases_completed(completed_tasks),
+            "phases_completed": phases_completed,
             "current_phase": session.get("current_phase", "implementation"),
-            "milestone": _get_milestone_name(session.get("current_phase", "implementation"))
+            "milestone": _get_milestone_name(session.get("current_phase", "implementation")),
+            "phase_progress": phase_progress_details  # Include detailed phase progress for frontend
         }
         
-        # Check if all substeps are completed for this task
-        task_result = await task_manager.get_next_implementation_task(
-            {
-                "business_name": session.get("business_name", "Your Business"),
-                "industry": session.get("industry", "General Business"),
-                "location": session.get("location", "United States"),
-                "business_type": session.get("business_type", "Startup")
-            },
-            completed_tasks
-        )
+        # Get next task info (call once, use result for both checks)
+        session_data = {
+            "business_name": session.get("business_name", "Your Business"),
+            "industry": session.get("industry", "General Business"),
+            "location": session.get("location", "United States"),
+            "business_type": session.get("business_type", "Startup")
+        }
         
+        next_task_info = None
         all_substeps_completed = False
-        if task_result.get("task_id") == task_id:
-            substeps = task_result.get("task_details", {}).get("substeps", [])
-            all_substeps_completed = all(
-                f"{task_id}_substep_{s.get('step_number', 0)}" in completed_tasks
-                for s in substeps
-            )
+        next_substep = None
+        
+        try:
+            # Call get_next_implementation_task once to get next task
+            next_task_result = await task_manager.get_next_implementation_task(session_data, completed_tasks)
+            
+            # Determine if all substeps are completed
+            if substep_number:
+                # If next task is different from current, all substeps are done
+                all_substeps_completed = next_task_result.get("task_id") != task_id
+                
+                # If same task, get current substep number
+                if not all_substeps_completed and next_task_result.get("task_id") == task_id:
+                    current_substep = next_task_result.get("task_details", {}).get("current_substep", 1)
+                    next_substep = current_substep
+            else:
+                # Completing entire task - all substeps are implicitly completed
+                all_substeps_completed = True
+            
+            # Get next task info
+            if next_task_result.get("task_id"):
+                next_task_info = {
+                    "task_id": next_task_result.get("task_id"),
+                    "title": next_task_result.get("task_details", {}).get("title", ""),
+                    "phase": next_task_result.get("phase", "")
+                }
+        except Exception as e:
+            print(f"Note: Could not get next task: {e}")
+            # Fallback: assume all substeps done
+            all_substeps_completed = True
         
         return {
             "success": True,
             "message": "Task completed successfully" if not substep_number else "Substep completed successfully",
             "progress": updated_progress,
             "all_substeps_completed": all_substeps_completed,
-            "next_substep": None if all_substeps_completed else (substep_number + 1 if substep_number else None),
+            "next_substep": next_substep,
+            "next_task": next_task_info,  # Include next task info
             "result": {
                 "task_id": task_id,
                 "substep_number": substep_number,

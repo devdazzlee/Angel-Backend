@@ -73,13 +73,21 @@ async def get_agent_guidance(
         return cached_response
 
     try:
+        # Check if this is during implementation phase startup - skip web searches for speed
+        skip_web_search = payload.get("skip_web_search", False)
+        # Also skip if question is about implementation/roadmap tasks (common during startup)
+        if not skip_web_search:
+            question_lower = normalized_question.lower()
+            implementation_keywords = ["implementation", "roadmap", "task", "start", "begin", "next step"]
+            skip_web_search = any(keyword in question_lower for keyword in implementation_keywords)
+        
         response_payload = None
         if agent_type == "comprehensive":
             # Get guidance from all relevant agents
-            guidance = await get_comprehensive_guidance(normalized_question, business_context, [])
+            guidance = await get_comprehensive_guidance(normalized_question, business_context, [], skip_web_search=skip_web_search)
         else:
             # Get guidance from specific agent
-            guidance = await agents_manager.get_agent_guidance(agent_type, normalized_question, business_context, [])
+            guidance = await agents_manager.get_agent_guidance(agent_type, normalized_question, business_context, [], skip_web_search=skip_web_search)
         
         response_payload = {
             "success": True,

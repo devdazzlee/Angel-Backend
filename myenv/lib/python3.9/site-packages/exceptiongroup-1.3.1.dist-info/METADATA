@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: exceptiongroup
-Version: 1.3.0
+Version: 1.3.1
 Summary: Backport of PEP 654 (exception groups)
 Author-email: Alex Grönholm <alex.gronholm@nextday.fi>
 Requires-Python: >=3.7

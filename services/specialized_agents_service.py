@@ -15,27 +15,50 @@ class SpecializedAgent:
         self.expertise = expertise
         self.research_sources = research_sources
     
-    async def conduct_research(self, query: str, business_context: Dict[str, Any]) -> str:
-        """Conduct research using specialized sources"""
+    async def conduct_research(self, query: str, business_context: Dict[str, Any], skip_web_search: bool = False) -> str:
+        """Conduct research using specialized sources
+        
+        Args:
+            query: Research query
+            business_context: Business context
+            skip_web_search: If True, skip web searches for faster responses (default: False)
+        """
         try:
+            # If web search is disabled, return quick guidance without research
+            if skip_web_search:
+                return "Research skipped for faster response. Use detailed guidance mode for comprehensive research."
+            
             # Combine query with business context for more targeted research
             enhanced_query = f"{query} {business_context.get('industry', '')} {business_context.get('location', '')}"
             
-            # Use multiple research sources
+            # LIMIT: Only use first 1 research source for faster responses during implementation
+            # Users can request detailed research later if needed
+            limited_sources = self.research_sources[:1] if not skip_web_search else []
+            
+            # Use limited research sources with fast mode
             research_results = []
-            for source in self.research_sources:
+            for source in limited_sources:
                 search_query = f"site:{source} {enhanced_query}"
-                result = await conduct_web_search(search_query)
+                result = await conduct_web_search(search_query, fast_mode=True)  # Use fast mode
                 if result and "unable to conduct web research" not in result:
                     research_results.append(f"Source: {source}\n{result}")
+                    # Only use first successful result for speed
+                    break
             
             return "\n\n".join(research_results) if research_results else "No specific research results found."
         except Exception as e:
             print(f"Research error for {self.name}: {e}")
             return "Research temporarily unavailable."
     
-    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict]) -> Dict[str, Any]:
-        """Provide expert guidance based on specialization"""
+    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], skip_web_search: bool = False) -> Dict[str, Any]:
+        """Provide expert guidance based on specialization
+        
+        Args:
+            question: User question or task
+            business_context: Business context
+            conversation_history: Conversation history
+            skip_web_search: If True, skip web searches for faster responses (default: False)
+        """
         raise NotImplementedError("Subclasses must implement provide_expert_guidance")
 
 class LegalComplianceAgent(SpecializedAgent):
@@ -48,12 +71,12 @@ class LegalComplianceAgent(SpecializedAgent):
             research_sources=["sba.gov", "sec.gov", "irs.gov", "law.com", "martindale.com"]
         )
     
-    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict]) -> Dict[str, Any]:
+    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], skip_web_search: bool = False) -> Dict[str, Any]:
         """Provide legal and compliance guidance"""
         
-        # Conduct specialized research
+        # Conduct specialized research (skip during implementation phase startup for speed)
         research_query = f"business formation legal requirements {business_context.get('industry', '')} {business_context.get('location', '')}"
-        research_results = await self.conduct_research(research_query, business_context)
+        research_results = await self.conduct_research(research_query, business_context, skip_web_search=skip_web_search)
         
         # Generate expert guidance
         guidance_prompt = f"""
@@ -113,12 +136,12 @@ class FinancialPlanningAgent(SpecializedAgent):
             research_sources=["forbes.com", "hbr.org", "bloomberg.com", "wsj.com", "cpa.com"]
         )
     
-    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict]) -> Dict[str, Any]:
+    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], skip_web_search: bool = False) -> Dict[str, Any]:
         """Provide financial planning and funding guidance"""
         
-        # Conduct specialized research
+        # Conduct specialized research (skip during implementation phase startup for speed)
         research_query = f"funding strategies financial planning {business_context.get('industry', '')} startup"
-        research_results = await self.conduct_research(research_query, business_context)
+        research_results = await self.conduct_research(research_query, business_context, skip_web_search=skip_web_search)
         
         # Generate expert guidance
         guidance_prompt = f"""
@@ -178,12 +201,12 @@ class ProductOperationsAgent(SpecializedAgent):
             research_sources=["alibaba.com", "amazon.com", "linkedin.com", "clutch.co", "gartner.com"]
         )
     
-    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict]) -> Dict[str, Any]:
+    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], skip_web_search: bool = False) -> Dict[str, Any]:
         """Provide product and operations guidance"""
         
-        # Conduct specialized research
+        # Conduct specialized research (skip during implementation phase startup for speed)
         research_query = f"supply chain operations {business_context.get('industry', '')} equipment procurement"
-        research_results = await self.conduct_research(research_query, business_context)
+        research_results = await self.conduct_research(research_query, business_context, skip_web_search=skip_web_search)
         
         # Generate expert guidance
         guidance_prompt = f"""
@@ -243,12 +266,12 @@ class MarketingCustomerAgent(SpecializedAgent):
             research_sources=["hubspot.com", "marketingland.com", "socialmediaexaminer.com", "adweek.com", "forbes.com"]
         )
     
-    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict]) -> Dict[str, Any]:
+    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], skip_web_search: bool = False) -> Dict[str, Any]:
         """Provide marketing and customer acquisition guidance"""
         
-        # Conduct specialized research
+        # Conduct specialized research (skip during implementation phase startup for speed)
         research_query = f"marketing strategy customer acquisition {business_context.get('industry', '')} digital marketing"
-        research_results = await self.conduct_research(research_query, business_context)
+        research_results = await self.conduct_research(research_query, business_context, skip_web_search=skip_web_search)
         
         # Generate expert guidance
         guidance_prompt = f"""
@@ -308,12 +331,12 @@ class BusinessStrategyAgent(SpecializedAgent):
             research_sources=["hbr.org", "mckinsey.com", "bain.com", "deloitte.com", "pwc.com"]
         )
     
-    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict]) -> Dict[str, Any]:
+    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], skip_web_search: bool = False) -> Dict[str, Any]:
         """Provide business strategy guidance"""
         
-        # Conduct specialized research
+        # Conduct specialized research (skip during implementation phase startup for speed)
         research_query = f"business model strategy market research {business_context.get('industry', '')} competitive analysis"
-        research_results = await self.conduct_research(research_query, business_context)
+        research_results = await self.conduct_research(research_query, business_context, skip_web_search=skip_web_search)
         
         # Generate expert guidance
         guidance_prompt = f"""
@@ -373,12 +396,12 @@ class RoadmapExecutionAgent(SpecializedAgent):
             research_sources=["scaledagileframework.com", "atlassian.com", "monday.com", "asana.com", "trello.com"]
         )
     
-    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict]) -> Dict[str, Any]:
+    async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], skip_web_search: bool = False) -> Dict[str, Any]:
         """Provide roadmap execution and scaling guidance"""
         
-        # Conduct specialized research
+        # Conduct specialized research (skip during implementation phase startup for speed)
         research_query = f"roadmap execution scaling strategies {business_context.get('industry', '')} project management"
-        research_results = await self.conduct_research(research_query, business_context)
+        research_results = await self.conduct_research(research_query, business_context, skip_web_search=skip_web_search)
         
         # Generate expert guidance
         guidance_prompt = f"""
@@ -441,8 +464,16 @@ class SpecializedAgentsManager:
             "execution": RoadmapExecutionAgent()
         }
     
-    async def get_agent_guidance(self, agent_type: str, question: str, business_context: Dict[str, Any], conversation_history: List[Dict]) -> Dict[str, Any]:
-        """Get guidance from a specific agent"""
+    async def get_agent_guidance(self, agent_type: str, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], skip_web_search: bool = False) -> Dict[str, Any]:
+        """Get guidance from a specific agent
+        
+        Args:
+            agent_type: Type of agent to use
+            question: User question or task
+            business_context: Business context
+            conversation_history: Conversation history
+            skip_web_search: If True, skip web searches for faster responses (default: False)
+        """
         
         if agent_type not in self.agents:
             return {
@@ -451,10 +482,18 @@ class SpecializedAgentsManager:
             }
         
         agent = self.agents[agent_type]
-        return await agent.provide_expert_guidance(question, business_context, conversation_history)
+        return await agent.provide_expert_guidance(question, business_context, conversation_history, skip_web_search=skip_web_search)
     
-    async def get_multi_agent_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], relevant_agents: List[str] = None) -> Dict[str, Any]:
-        """Get guidance from multiple relevant agents"""
+    async def get_multi_agent_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], relevant_agents: List[str] = None, skip_web_search: bool = False) -> Dict[str, Any]:
+        """Get guidance from multiple relevant agents
+        
+        Args:
+            question: User question or task
+            business_context: Business context
+            conversation_history: Conversation history
+            relevant_agents: List of agent types to use (if None, auto-detect)
+            skip_web_search: If True, skip web searches for faster responses (default: False)
+        """
         
         if relevant_agents is None:
             # Determine relevant agents based on question content
@@ -465,7 +504,7 @@ class SpecializedAgentsManager:
         for agent_type in relevant_agents:
             if agent_type in self.agents:
                 try:
-                    guidance = await self.get_agent_guidance(agent_type, question, business_context, conversation_history)
+                    guidance = await self.get_agent_guidance(agent_type, question, business_context, conversation_history, skip_web_search=skip_web_search)
                     guidance_results[agent_type] = guidance
                 except Exception as e:
                     guidance_results[agent_type] = {
@@ -555,6 +594,13 @@ async def get_execution_guidance(question: str, business_context: Dict[str, Any]
     """Get execution guidance"""
     return await agents_manager.get_agent_guidance("execution", question, business_context, conversation_history)
 
-async def get_comprehensive_guidance(question: str, business_context: Dict[str, Any], conversation_history: List[Dict]) -> Dict[str, Any]:
-    """Get comprehensive guidance from all relevant agents"""
-    return await agents_manager.get_multi_agent_guidance(question, business_context, conversation_history)
+async def get_comprehensive_guidance(question: str, business_context: Dict[str, Any], conversation_history: List[Dict], skip_web_search: bool = False) -> Dict[str, Any]:
+    """Get comprehensive guidance from all relevant agents
+    
+    Args:
+        question: User question or task
+        business_context: Business context
+        conversation_history: Conversation history
+        skip_web_search: If True, skip web searches for faster responses (default: False)
+    """
+    return await agents_manager.get_multi_agent_guidance(question, business_context, conversation_history, skip_web_search=skip_web_search)

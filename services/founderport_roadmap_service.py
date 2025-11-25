@@ -6,13 +6,15 @@ client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 async def generate_founderport_style_roadmap(session_data, history):
     """
-    Generate a roadmap matching the exact Founderport structure:
+    Generate a roadmap matching the exact Founderport structure with 8 stages:
     - Stage 1: Foundation & Setup
-    - Stage 2: Product Development (Beta Build)
-    - Stage 3: Marketing Readiness
-    - Stage 4: Beta Launch & Feedback
-    - Stage 5: Public Launch
-    - Stage 6: Scaling & Expansion
+    - Stage 2: Financial Planning & Funding
+    - Stage 3: Product Development (Beta Build)
+    - Stage 4: Marketing Readiness
+    - Stage 5: Beta Launch & Feedback
+    - Stage 6: Public Launch
+    - Stage 7: Scaling & Expansion
+    - Stage 8: Long-term Growth & Sustainability
     
     With specific task descriptions like "Form Your California C-Corporation (Founderport, Inc.)"
     """
@@ -29,12 +31,22 @@ async def generate_founderport_style_roadmap(session_data, history):
     state = extract_state_from_location(location)
     
     # Extract all business plan answers for context
-    user_responses = [msg.get('content', '') for msg in history if msg.get('role') == 'user']
-    conversation_text = ' '.join(user_responses[-50:])  # Last 50 responses
+    # Handle both list of dicts and string formats
+    if isinstance(history, str):
+        # If history is a string (from smart_trim_history), extract user messages differently
+        lines = history.split('\n')
+        user_responses = [line.split(':', 1)[1].strip() for line in lines if line.startswith('USER:')]
+        conversation_text = ' '.join(user_responses[-50:])  # Last 50 responses
+    elif isinstance(history, list):
+        # If history is a list of dicts (from fetch_chat_history)
+        user_responses = [msg.get('content', '') for msg in history if isinstance(msg, dict) and msg.get('role') == 'user']
+        conversation_text = ' '.join(user_responses[-50:])  # Last 50 responses
+    else:
+        conversation_text = ''
     
     # Generate roadmap using AI with Founderport structure
     roadmap_prompt = f"""
-    Generate a comprehensive Launch Roadmap for "{business_name}" following the EXACT Founderport structure with 6 stages.
+    Generate a comprehensive Launch Roadmap for "{business_name}" following the EXACT Founderport structure with 8 stages.
     
     **Business Context:**
     - Business Name: {business_name}
@@ -48,7 +60,7 @@ async def generate_founderport_style_roadmap(session_data, history):
     **User's Business Plan Answers:**
     {conversation_text[:3000]}
     
-    Generate a roadmap with these 6 STAGES (not phases):
+    Generate a roadmap with these 8 STAGES (not phases):
     
     ---
     
@@ -66,56 +78,77 @@ async def generate_founderport_style_roadmap(session_data, history):
     | 1.4 Confirm Development Infrastructure | Set up cloud hosting, database, and core tech stack. | None | Generate config checklist | ⏳ |
     | 1.5 Implement NDA & Contract Controls | Ensure contracts and IP clauses are in place. | Legal setup | Store executed agreements securely | ⏳ |
     
-    ### **Stage 2 — Product Development** 
+    ### **Stage 2 — Financial Planning & Funding**
+    **Goal**: Establish financial systems and secure necessary funding for {business_name}.
+    
+    | Task | Description | Dependencies | Angel's Role | Status |
+    |------|-------------|--------------|--------------|--------|
+    | 2.1 Open Business Bank Account | Set up separate business banking for {business_name}. | Legal formation complete | Provide bank comparison, account setup checklist | ⏳ |
+    | 2.2 Set Up Accounting System | Implement accounting software and financial tracking. | Bank account open | Generate accounting setup guide, chart of accounts | ⏳ |
+    | 2.3 Create Financial Projections | Develop budget, cash flow, and revenue forecasts. | Business plan complete | Generate financial model templates | ⏳ |
+    | 2.4 Secure Initial Funding | Execute funding strategy (investors, loans, grants, or bootstrapping). | Financial projections ready | Draft pitch deck, funding source research | ⏳ |
+    | 2.5 Establish Tax Planning | Set up tax structure and quarterly payment system. | Accounting system live | Provide tax planning checklist, estimated tax calculator | ⏳ |
+    
+    ### **Stage 3 — Product Development (Beta Build)**
     **Goal**: Deliver the first functional version of your product/service.
     
     | Task | Description | Dependencies | Angel's Role | Status |
     |------|-------------|--------------|--------------|--------|
-    | 2.1 Develop Core Product/Service | Build MVP or beta version of your offering. | Technical requirements defined | Generate specs & workflow map | ⏳ |
-    | 2.2 Integrate Key Features | Add essential features and functionality. | Core build complete | Provide feature checklist | ⏳ |
-    | 2.3 Test Product Functionality | Conduct thorough testing and quality assurance. | Feature integration done | Generate test scripts | ⏳ |
-    | 2.4 Internal QA & Refinement | Team testing and bug fixes. | Product functional | Monitor feedback, prioritize fixes | ⏳ |
-    | 2.5 Prepare Beta Launch | Recruit beta testers and prepare onboarding. | QA complete | Generate onboarding script, feedback template | 🔜 |
+    | 3.1 Develop Core Product/Service | Build MVP or beta version of your offering. | Technical requirements defined | Generate specs & workflow map | ⏳ |
+    | 3.2 Integrate Key Features | Add essential features and functionality. | Core build complete | Provide feature checklist | ⏳ |
+    | 3.3 Test Product Functionality | Conduct thorough testing and quality assurance. | Feature integration done | Generate test scripts | ⏳ |
+    | 3.4 Internal QA & Refinement | Team testing and bug fixes. | Product functional | Monitor feedback, prioritize fixes | ⏳ |
+    | 3.5 Prepare Beta Launch | Recruit beta testers and prepare onboarding. | QA complete | Generate onboarding script, feedback template | 🔜 |
     
-    ### **Stage 3 — Marketing Readiness**
+    ### **Stage 4 — Marketing Readiness**
     **Goal**: Drive awareness and generate early interest.
     
     | Task | Description | Dependencies | Angel's Role | Status |
     |------|-------------|--------------|--------------|--------|
-    | 3.1 Establish Landing Page | Build website with clear value prop and CTA. | Brand assets ready | Draft copy, CTA text, visuals | ⏳ |
-    | 3.2 Launch Marketing Campaign | Start ads in key markets (adjust for your business). | Landing page live | Suggest ad keywords, headlines | 🔜 |
-    | 3.3 Short-Form Video Content | Create explainer videos for social media. | Brand complete | Generate scripts, posting calendar | 🔜 |
-    | 3.4 Partnership Outreach | Contact potential partners in your industry. | Pitch materials ready | Draft outreach emails, partnership proposals | ⏳ |
+    | 4.1 Establish Landing Page | Build website with clear value prop and CTA. | Brand assets ready | Draft copy, CTA text, visuals | ⏳ |
+    | 4.2 Launch Marketing Campaign | Start ads in key markets (adjust for your business). | Landing page live | Suggest ad keywords, headlines | 🔜 |
+    | 4.3 Short-Form Video Content | Create explainer videos for social media. | Brand complete | Generate scripts, posting calendar | 🔜 |
+    | 4.4 Partnership Outreach | Contact potential partners in your industry. | Pitch materials ready | Draft outreach emails, partnership proposals | ⏳ |
     
-    ### **Stage 4 — Beta Launch & Feedback**
+    ### **Stage 5 — Beta Launch & Feedback**
     **Goal**: Validate product-market fit and refine based on real user feedback.
     
     | Task | Description | Dependencies | Angel's Role | Status |
     |------|-------------|--------------|--------------|--------|
-    | 4.1 Launch Beta Program | Deploy to test users, collect structured feedback. | Product ready | Track sessions & sentiment | 🔜 |
-    | 4.2 Analyze Beta Data | Identify friction points and most-used features. | Feedback collected | Generate insights & recommendations | 🔜 |
-    | 4.3 Implement Refinements | Fix bugs, adjust UX, add missing features. | Analysis complete | Prioritize fixes, assign to team | 🔜 |
-    | 4.4 Prepare Marketing Assets | Create success stories and testimonials. | Positive results | Draft case studies, testimonials | 🔜 |
+    | 5.1 Launch Beta Program | Deploy to test users, collect structured feedback. | Product ready | Track sessions & sentiment | 🔜 |
+    | 5.2 Analyze Beta Data | Identify friction points and most-used features. | Feedback collected | Generate insights & recommendations | 🔜 |
+    | 5.3 Implement Refinements | Fix bugs, adjust UX, add missing features. | Analysis complete | Prioritize fixes, assign to team | 🔜 |
+    | 5.4 Prepare Marketing Assets | Create success stories and testimonials. | Positive results | Draft case studies, testimonials | 🔜 |
     
-    ### **Stage 5 — Public Launch**
+    ### **Stage 6 — Public Launch**
     **Goal**: Release to market and begin revenue generation.
     
     | Task | Description | Dependencies | Angel's Role | Status |
     |------|-------------|--------------|--------------|--------|
-    | 5.1 Launch Publicly | Make product/service available to general public. | Beta approved | Manage launch communications | 🔜 |
-    | 5.2 Activate Marketing Campaigns | Full marketing push across all channels. | Site live | Monitor conversions, optimize campaigns | 🔜 |
-    | 5.3 Build Customer Pipeline | Set up sales processes and customer onboarding. | Marketing active | Create sales templates, onboarding flows | 🔜 |
-    | 5.4 Track KPIs | Monitor CAC, LTV, churn, retention, revenue. | Launch active | Build dashboard templates | 🔜 |
+    | 6.1 Launch Publicly | Make product/service available to general public. | Beta approved | Manage launch communications | 🔜 |
+    | 6.2 Activate Marketing Campaigns | Full marketing push across all channels. | Site live | Monitor conversions, optimize campaigns | 🔜 |
+    | 6.3 Build Customer Pipeline | Set up sales processes and customer onboarding. | Marketing active | Create sales templates, onboarding flows | 🔜 |
+    | 6.4 Track KPIs | Monitor CAC, LTV, churn, retention, revenue. | Launch active | Build dashboard templates | 🔜 |
     
-    ### **Stage 6 — Scaling & Expansion**
+    ### **Stage 7 — Scaling & Expansion**
     **Goal**: Grow the business and expand offerings.
     
     | Task | Description | Dependencies | Angel's Role | Status |
     |------|-------------|--------------|--------------|--------|
-    | 6.1 Expand Product Line | Add new features, products, or services. | Stable core product | Research market needs, feature prioritization | 🔜 |
-    | 6.2 Scale Operations | Hire team, increase capacity, optimize processes. | Revenue growth | Provide hiring templates, org charts | 🔜 |
-    | 6.3 Enter New Markets | Geographic or demographic expansion. | Product-market fit | Localize content, research new markets | 🔜 |
-    | 6.4 Build Strategic Partnerships | Form alliances to accelerate growth. | Market presence | Draft partnership proposals | 🔜 |
+    | 7.1 Expand Product Line | Add new features, products, or services. | Stable core product | Research market needs, feature prioritization | 🔜 |
+    | 7.2 Scale Operations | Hire team, increase capacity, optimize processes. | Revenue growth | Provide hiring templates, org charts | 🔜 |
+    | 7.3 Enter New Markets | Geographic or demographic expansion. | Product-market fit | Localize content, research new markets | 🔜 |
+    | 7.4 Build Strategic Partnerships | Form alliances to accelerate growth. | Market presence | Draft partnership proposals | 🔜 |
+    
+    ### **Stage 8 — Long-term Growth & Sustainability**
+    **Goal**: Ensure sustainable growth and long-term success for {business_name}.
+    
+    | Task | Description | Dependencies | Angel's Role | Status |
+    |------|-------------|--------------|--------------|--------|
+    | 8.1 Optimize Operations | Streamline processes, reduce costs, improve efficiency. | Stable operations | Generate process optimization checklist | 🔜 |
+    | 8.2 Build Company Culture | Establish values, team culture, and employee retention strategies. | Team growing | Draft culture document, retention strategies | 🔜 |
+    | 8.3 Plan for Future Funding | Prepare for Series A/B or additional growth capital. | Revenue milestones met | Generate investor pitch materials | 🔜 |
+    | 8.4 Establish Exit Strategy | Plan for acquisition, IPO, or long-term ownership. | Business mature | Provide exit strategy framework | 🔜 |
     
     ---
     
@@ -124,12 +157,12 @@ async def generate_founderport_style_roadmap(session_data, history):
     2. Make task descriptions SPECIFIC to {business_name}, not generic
     3. Include {location} and {state} in relevant tasks (e.g., "Form Your {state} {legal_structure} ({business_name}, Inc.)")
     4. Use actual business name in task descriptions
-    5. Tailor Stage 2 tasks based on whether it's SaaS/Tech, Service, or Product business
+    5. Tailor Stage 3 tasks based on whether it's SaaS/Tech, Service, or Product business
     6. Use markdown tables with columns: Task | Description | Dependencies | Angel's Role | Status
     7. Status indicators: ✅ (complete), ⏳ (in progress), 🔜 (upcoming)
     8. Make it look EXACTLY like the Founderport roadmap example
     
-    Generate the complete roadmap now with all 6 stages and specific tasks for {business_name}.
+    Generate the complete roadmap now with all 8 stages and specific tasks for {business_name}.
     """
     
     try:
@@ -137,7 +170,7 @@ async def generate_founderport_style_roadmap(session_data, history):
             model="gpt-4o",
             messages=[{"role": "user", "content": roadmap_prompt}],
             temperature=0.3,
-            max_tokens=3500  # Increased for comprehensive 6-stage roadmap
+            max_tokens=4500  # Increased for comprehensive 8-stage roadmap
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -193,17 +226,22 @@ def generate_fallback_roadmap(business_name, founder_name, location, legal_struc
 | 1.2 File Trademarks | Protect your brand name and logo. | Legal formation | USPTO filing assistance | ⏳ |
 | 1.3 Set Up Infrastructure | Establish core business systems and processes. | None | System setup checklist | ⏳ |
 
-## Stage 2 — Product Development
+## Stage 2 — Financial Planning & Funding
 [Additional stages will be generated based on your business plan responses]
 
-**Note:** Your complete roadmap is being generated with full details for all 6 stages.
+## Stage 3 — Product Development
+[Additional stages will be generated based on your business plan responses]
+
+**Note:** Your complete roadmap is being generated with full details for all 8 stages.
 """
 
-async def generate_task_with_service_providers(task_name, business_name, location, industry):
+async def generate_task_with_service_providers(task_name, business_name, location, industry, founder_name=None):
     """Generate a detailed task page with service provider options like the Founderport example"""
     
     # Extract state
     state = extract_state_from_location(location)
+    if founder_name is None:
+        founder_name = 'Founder'
     
     task_prompt = f"""
     Generate a detailed task page for: "{task_name}" for {business_name} located in {location}.

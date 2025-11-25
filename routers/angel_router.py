@@ -1266,12 +1266,88 @@ async def get_business_plan_summary(request: Request, session_id: str):
 
 @router.get("/sessions/{session_id}/roadmap-plan")
 async def generate_roadmap_plan(session_id: str, request: Request):
+    """Get roadmap plan - returns Founderport-style roadmap with 8 stages in table format"""
+    user_id = request.state.user["id"]
+    session = await get_session(session_id, user_id)
     history = await fetch_chat_history(session_id)
     history_trimmed = smart_trim_history(history)
-    roadmap = await generate_full_roadmap_plan(history_trimmed)
+    
+    # Check if roadmap exists in session and is in new format (has "Stage" and tables)
+    roadmap_data = session.get("roadmap_data", {})
+    existing_content = ""
+    
+    if roadmap_data:
+        if isinstance(roadmap_data, dict):
+            existing_content = roadmap_data.get("content", "") or roadmap_data.get("roadmap_content", "")
+        elif isinstance(roadmap_data, str):
+            existing_content = roadmap_data
+    
+    # Check if existing roadmap is in new format (has "Stage" and table format)
+    is_new_format = False
+    if existing_content:
+        # Check for new format: Must have "Stage" keyword and the table header
+        has_stage_keyword = "Stage" in existing_content and ("Stage 1" in existing_content or "Stage 2" in existing_content)
+        has_table_format = "| Task | Description | Dependencies | Angel's Role | Status |" in existing_content
+        has_stage_format = has_stage_keyword and has_table_format
+        
+        # Check for old format: Has "Phase" but not the table format
+        is_old_format = "Phase" in existing_content and not has_table_format
+        
+        if has_stage_format:
+            is_new_format = True
+            print(f"✅ Found roadmap in new 8-stage format - returning existing roadmap")
+        elif is_old_format:
+            print(f"🔄 Found roadmap in old Phase format - regenerating with Founderport-style 8-stage format")
+            is_new_format = False
+        else:
+            # Unclear format or missing tables, regenerate to be safe
+            print(f"⚠️ Roadmap format unclear or missing tables - regenerating with Founderport-style 8-stage format")
+            is_new_format = False
+    
+    # If we have new format roadmap, return it
+    if is_new_format and existing_content:
+        return {
+            "success": True,
+            "result": {
+                "plan": existing_content,
+                "generated_at": roadmap_data.get("metadata", {}).get("generated_at") if isinstance(roadmap_data, dict) else datetime.now().isoformat(),
+                "research_conducted": True,
+                "industry": session.get("business_context", {}).get("industry", "General Business") if isinstance(session.get("business_context"), dict) else "General Business",
+                "location": session.get("business_context", {}).get("location", "United States") if isinstance(session.get("business_context"), dict) else "United States",
+            }
+        }
+    
+    # Otherwise, generate new Founderport-style roadmap with 8 stages
+    from services.founderport_roadmap_service import generate_founderport_style_roadmap
+    
+    print(f"🗺️ Generating new Founderport-style roadmap with 8 stages for session {session_id}")
+    # Pass the original history (list of dicts), not the trimmed string
+    roadmap_content = await generate_founderport_style_roadmap(session, history)
+    
+    # Update session with new roadmap
+    roadmap_payload = {
+        "content": roadmap_content,
+        "structured_steps": [],
+        "tasks": [],
+        "metadata": {
+            "total_tasks": 0,
+            "generated_at": datetime.now().isoformat()
+        }
+    }
+    session["roadmap_data"] = roadmap_payload
+    await patch_session(session_id, {
+        "roadmap_data": roadmap_payload
+    })
+    
     return {
         "success": True,
-        "result": roadmap
+        "result": {
+            "plan": roadmap_content,
+            "generated_at": datetime.now().isoformat(),
+            "research_conducted": True,
+            "industry": session.get("business_context", {}).get("industry", "General Business") if isinstance(session.get("business_context"), dict) else "General Business",
+            "location": session.get("business_context", {}).get("location", "United States") if isinstance(session.get("business_context"), dict) else "United States",
+        }
     }
 
 @router.get("/sessions/{session_id}/enhanced-roadmap")
@@ -1699,6 +1775,13 @@ async def roadmap_to_implementation_transition(session_id: str, request: Request
     
     user_id = request.state.user["id"]
     session = await get_session(session_id, user_id)
+    
+    # CRITICAL: Update session phase to ROADMAP_TO_IMPLEMENTATION_TRANSITION in database
+    session["current_phase"] = "ROADMAP_TO_IMPLEMENTATION_TRANSITION"
+    await patch_session(session_id, {
+        "current_phase": "ROADMAP_TO_IMPLEMENTATION_TRANSITION"
+    })
+    print(f"✅ Updated session {session_id} phase to ROADMAP_TO_IMPLEMENTATION_TRANSITION")
     
     # Generate transition message
     history = await fetch_chat_history(session_id)

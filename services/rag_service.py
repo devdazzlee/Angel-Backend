@@ -51,14 +51,27 @@ class RAGResearchEngine:
         cache_key = build_cache_key(query, business_context, research_depth)
         if cache_key in self.cache:
             cached_entry = self.cache[cache_key]
-            if (datetime.now() - cached_entry["timestamp"]).seconds < self.cache_ttl:
+            # Fix datetime comparison: ensure both are timezone-aware or both are naive
+            cached_timestamp = cached_entry["timestamp"]
+            now = datetime.now()
+            
+            # If cached timestamp is timezone-aware, make now aware too (or vice versa)
+            if cached_timestamp.tzinfo is not None and now.tzinfo is None:
+                # Cached is aware, now is naive - compare as naive
+                cached_timestamp = cached_timestamp.replace(tzinfo=None)
+            elif cached_timestamp.tzinfo is None and now.tzinfo is not None:
+                # Cached is naive, now is aware - make now naive
+                now = now.replace(tzinfo=None)
+            
+            if (now - cached_timestamp).seconds < self.cache_ttl:
                 print(f"📋 Using cached research for: {query[:50]}...")
                 return cached_entry["data"]
 
         persistent_cached = get_cached_entry("rag_research", cache_key)
         if persistent_cached:
             print(f"📦 Using persistent cached research for: {query[:50]}...")
-            self.cache[cache_key] = {"data": persistent_cached, "timestamp": datetime.now()}
+            # Use timezone-naive datetime for consistency
+            self.cache[cache_key] = {"data": persistent_cached, "timestamp": datetime.now().replace(tzinfo=None) if datetime.now().tzinfo else datetime.now()}
             return persistent_cached
         
         # Enhance query with business context
@@ -106,8 +119,10 @@ class RAGResearchEngine:
             "sources_consulted": len([r for r in research_results if not isinstance(r, Exception)])
         }
         
-        # Cache the result
+        # Cache the result - use timezone-naive datetime for consistency
         now = datetime.now()
+        if now.tzinfo is not None:
+            now = now.replace(tzinfo=None)  # Make naive for consistency
         self.cache[cache_key] = {
             'data': result,
             'timestamp': now
@@ -458,11 +473,25 @@ class RAGServiceProviderEngine:
         cache_key = build_cache_key(service_type, business_context, location or "default")
         if cache_key in self.cache:
             cache_entry = self.cache[cache_key]
-            if (datetime.now() - cache_entry['timestamp']).seconds < self.cache_ttl:
+            # Fix datetime comparison: ensure both are timezone-aware or both are naive
+            cached_timestamp = cache_entry['timestamp']
+            now = datetime.now()
+            
+            # If cached timestamp is timezone-aware, make now aware too (or vice versa)
+            if cached_timestamp.tzinfo is not None and now.tzinfo is None:
+                cached_timestamp = cached_timestamp.replace(tzinfo=None)
+            elif cached_timestamp.tzinfo is None and now.tzinfo is not None:
+                now = now.replace(tzinfo=None)
+            
+            if (now - cached_timestamp).seconds < self.cache_ttl:
                 return cache_entry['data']
         persistent_cached = get_cached_entry("provider_research", cache_key)
         if persistent_cached:
-            self.cache[cache_key] = {"data": persistent_cached, "timestamp": datetime.now()}
+            # Use timezone-naive datetime for consistency
+            now = datetime.now()
+            if now.tzinfo is not None:
+                now = now.replace(tzinfo=None)
+            self.cache[cache_key] = {"data": persistent_cached, "timestamp": now}
             return persistent_cached
         
         # Determine relevant sources for the service type
@@ -499,7 +528,10 @@ class RAGServiceProviderEngine:
             "timestamp": datetime.now().isoformat()
         }
         
+        # Use timezone-naive datetime for consistency
         now = datetime.now()
+        if now.tzinfo is not None:
+            now = now.replace(tzinfo=None)
         self.cache[cache_key] = {
             "data": result,
             "timestamp": now

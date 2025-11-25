@@ -37,7 +37,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="/Users/mac/Desktop/Ahmed Work/Angel/Angel-Backend/myenv"
+VIRTUAL_ENV="/Users/mac/Desktop/Ahmed Work/Angel Updated/New/Angel-Backend/myenv"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"

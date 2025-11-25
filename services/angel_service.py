@@ -559,8 +559,13 @@ async def should_show_accept_modify_buttons(ai_response: str, user_last_input: s
         "content_length": len(ai_response)
     }
 
-async def conduct_web_search(query):
-    """Conduct aggressive web search with citations from authoritative sources"""
+async def conduct_web_search(query, fast_mode: bool = False):
+    """Conduct web search with citations from authoritative sources
+    
+    Args:
+        query: Search query
+        fast_mode: If True, use shorter timeout and simpler prompt for faster responses (default: False)
+    """
     try:
         print(f"🔍 Conducting comprehensive web search: {query}")
         
@@ -568,8 +573,16 @@ async def conduct_web_search(query):
         if len(query) > 150:
             query = query[:150] + "..."
         
-        # Enhanced search prompt with source citations
-        search_prompt = f"""Search reputable websites including industry publications, government websites (.gov), 
+        # Simplified prompt for fast mode
+        if fast_mode:
+            search_prompt = f"""Provide a quick, concise answer about: {query}
+
+Include key points and current information (2024-2025). Keep response brief."""
+            timeout = 5.0  # Shorter timeout for fast mode
+            max_tokens = 400  # Shorter response
+        else:
+            # Enhanced search prompt with source citations
+            search_prompt = f"""Search reputable websites including industry publications, government websites (.gov), 
 academic sources (.edu), and authoritative business references for information about: {query}
 
 Provide a comprehensive answer with:
@@ -579,6 +592,8 @@ Provide a comprehensive answer with:
 4. Include quantitative data when available
 
 Format your response with clear sections and citations."""
+            timeout = 10.0  # Longer timeout for thorough research
+            max_tokens = 800  # Increased for comprehensive research
         
         response = await client.chat.completions.create(
             model="gpt-4o",  # Use full model for better research
@@ -587,8 +602,8 @@ Format your response with clear sections and citations."""
                 "content": search_prompt
             }],
             temperature=0.2,  # Lower temperature for factual accuracy
-            max_tokens=800,  # Increased for comprehensive research
-            timeout=10.0  # Longer timeout for thorough research
+            max_tokens=max_tokens,
+            timeout=timeout
         )
         
         # Extract search results from response
@@ -2136,7 +2151,7 @@ Do NOT include question numbers, progress percentages, or step counts in your re
         if current_phase in ["ROADMAP", "PLAN_TO_ROADMAP_TRANSITION", "ROADMAP_TO_IMPLEMENTATION_TRANSITION"]:
             # Return a message indicating the user is in the roadmap phase
             return {
-                "reply": "You're currently in the roadmap phase. Your business plan has been completed and your launch roadmap is ready. Please use the interface to review your roadmap or start implementation.",
+                "reply": "🗺️ **Your Launch Roadmap is Ready!**\n\nYour business plan has been completed and your comprehensive 8-stage launch roadmap has been generated. The roadmap modal should open automatically to display your personalized roadmap with all stages and tasks.\n\nIf the roadmap modal doesn't appear, please refresh the page or click the 'View Roadmap' button if available.",
                 "web_search_status": {"is_searching": False, "query": None},
                 "immediate_response": None,
                 "patch_session": None
@@ -5421,106 +5436,16 @@ When you're ready, we'll show you the first real-world action to take — and we
     }
 
 async def generate_detailed_roadmap(session_data, history):
-    """Generate detailed roadmap with RAG-powered research"""
+    """Generate detailed roadmap using Founderport-style format with proper table structure"""
     
-    # Extract business context from session data and history
-    business_name = session_data.get('business_name', 'Your Business')
-    industry = session_data.get('industry', 'general business')
-    location = session_data.get('location', 'United States')
-    business_type = session_data.get('business_type', 'startup')
+    # Import the Founderport-style roadmap generator
+    from services.founderport_roadmap_service import generate_founderport_style_roadmap
     
-    # Create comprehensive roadmap prompt with RAG research
-    roadmap_prompt = f"""
-    Generate a comprehensive, research-backed launch roadmap for "{business_name}" - a {business_type} in the {industry} industry located in {location}.
+    # Use the Founderport-style roadmap generator which creates proper table format
+    # with Task | Description | Dependencies | Angel's Role | Status columns
+    roadmap_content = await generate_founderport_style_roadmap(session_data, history)
     
-    Use the following business context from the completed business plan:
-    - Business Name: {business_name}
-    - Industry: {industry}
-    - Location: {location}
-    - Business Type: {business_type}
-    
-    Create a detailed roadmap with the following phases. IMPORTANT: Format the response as plain text without any markdown formatting, asterisks, or special characters. Use simple headings and bullet points.
-    
-    Phase 1: Legal Formation & Compliance
-    - Business structure selection (LLC, Corporation, Partnership, etc.)
-    - Business registration and licensing requirements
-    - Tax ID (EIN) application
-    - Required permits and licenses
-    - Insurance requirements
-    - Compliance with local, state, and federal regulations
-    
-    Phase 2: Financial Planning & Setup
-    - Business bank account setup
-    - Accounting system implementation
-    - Budget planning and cash flow management
-    - Funding strategy execution
-    - Financial tracking and reporting systems
-    - Tax planning and preparation
-    
-    Phase 3: Product & Operations Development
-    - Supply chain setup and vendor relationships
-    - Equipment and technology procurement
-    - Operational processes and workflows
-    - Quality control systems
-    - Inventory management
-    - Production or service delivery setup
-    
-    Phase 4: Marketing & Sales Strategy
-    - Brand development and positioning
-    - Marketing strategy implementation
-    - Sales process setup
-    - Customer acquisition channels
-    - Digital presence (website, social media)
-    - Customer relationship management
-    
-    Phase 5: Full Launch & Scaling
-    - Go-to-market strategy execution
-    - Team building and hiring
-    - Performance monitoring and analytics
-    - Growth and scaling strategies
-    - Customer feedback and iteration
-    - Long-term sustainability planning
-    
-    For each phase, provide:
-    - Specific Tasks: Detailed, actionable steps
-    - Timeline: Realistic time estimates
-    - Resources Needed: Required tools, services, and expertise
-    - Success Metrics: How to measure progress
-    - Decision Points: Multiple options where applicable
-    - Local Resources: Service providers and resources specific to {location}
-    - Potential Challenges: Common obstacles and solutions
-    
-    Make the roadmap practical, detailed, and tailored to the specific business context. Include specific examples and actionable recommendations.
-    
-    Format the response as clean, readable text without any markdown syntax, asterisks, or special formatting characters.
-    """
-    
-    try:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": roadmap_prompt}],
-            temperature=0.6,
-            max_tokens=3000
-        )
-        
-        # Clean any remaining markdown formatting from the response
-        roadmap_content = response.choices[0].message.content
-        
-        # Remove markdown formatting
-        import re
-        # Remove headers (## **text**)
-        roadmap_content = re.sub(r'#{1,6}\s*\*+([^*]+)\*+', r'\1', roadmap_content)
-        # Remove bold formatting (**text**)
-        roadmap_content = re.sub(r'\*+([^*]+)\*+', r'\1', roadmap_content)
-        # Remove horizontal rules (---)
-        roadmap_content = re.sub(r'^[-=]{3,}$', '', roadmap_content, flags=re.MULTILINE)
-        # Clean up extra whitespace
-        roadmap_content = re.sub(r'\n{3,}', '\n\n', roadmap_content)
-        
-        return roadmap_content.strip()
-    except Exception as e:
-        print(f"Error generating detailed roadmap: {e}")
-        return "Roadmap generation in progress..."
+    return roadmap_content
 
 async def generate_dynamic_business_question(
     question_tag: str, 

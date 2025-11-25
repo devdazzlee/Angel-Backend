@@ -2,7 +2,7 @@ import json
 import os
 import re
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from db.supabase import supabase
@@ -52,8 +52,11 @@ def get_cached_entry(bucket: str, cache_key: str) -> Optional[Any]:
     expires_at = record.get("expires_at")
     if not expires_at:
         return None
+    # Parse expires_at (timezone-aware from database)
     expires_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    if expires_dt < datetime.utcnow():
+    # Use timezone-aware utcnow() for comparison to avoid timezone mismatch
+    now_utc = datetime.now(timezone.utc)
+    if expires_dt < now_utc:
         supabase.from_("research_cache").delete().eq("bucket", bucket).eq("cache_key", cache_key).execute()
         return None
     return record["data"]
