@@ -55,6 +55,91 @@ MOTIVATIONAL_QUOTES = [
         "quote": "The future depends on what you do today.",
         "author": "Mahatma Gandhi",
         "category": "Action"
+    },
+    {
+        "quote": "Your time is limited, don't waste it living someone else's life.",
+        "author": "Steve Jobs",
+        "category": "Authenticity"
+    },
+    {
+        "quote": "The only way to do great work is to love what you do.",
+        "author": "Steve Jobs",
+        "category": "Passion"
+    },
+    {
+        "quote": "I have not failed. I've just found 10,000 ways that won't work.",
+        "author": "Thomas Edison",
+        "category": "Persistence"
+    },
+    {
+        "quote": "If you are not embarrassed by the first version of your product, you've launched too late.",
+        "author": "Reid Hoffman",
+        "category": "Action"
+    },
+    {
+        "quote": "The biggest risk is not taking any risk. In a world that's changing quickly, the only strategy that is guaranteed to fail is not taking risks.",
+        "author": "Mark Zuckerberg",
+        "category": "Risk"
+    },
+    {
+        "quote": "Ideas are easy. Implementation is hard.",
+        "author": "Guy Kawasaki",
+        "category": "Execution"
+    },
+    {
+        "quote": "Build something 100 people love, not something 1 million people kind of like.",
+        "author": "Brian Chesky",
+        "category": "Focus"
+    },
+    {
+        "quote": "Don't worry about failure; you only have to be right once.",
+        "author": "Drew Houston",
+        "category": "Persistence"
+    },
+    {
+        "quote": "The secret of change is to focus all of your energy not on fighting the old, but on building the new.",
+        "author": "Socrates",
+        "category": "Innovation"
+    },
+    {
+        "quote": "Whether you think you can or you think you can't, you're right.",
+        "author": "Henry Ford",
+        "category": "Mindset"
+    },
+    {
+        "quote": "The best time to plant a tree was 20 years ago. The second best time is now.",
+        "author": "Chinese Proverb",
+        "category": "Action"
+    },
+    {
+        "quote": "It's not about ideas. It's about making ideas happen.",
+        "author": "Scott Belsky",
+        "category": "Execution"
+    },
+    {
+        "quote": "Do not be embarrassed by your failures, learn from them and start again.",
+        "author": "Richard Branson",
+        "category": "Learning"
+    },
+    {
+        "quote": "If you're not a risk taker, you should get the hell out of business.",
+        "author": "Ray Kroc",
+        "category": "Risk"
+    },
+    {
+        "quote": "The only impossible journey is the one you never begin.",
+        "author": "Tony Robbins",
+        "category": "Action"
+    },
+    {
+        "quote": "Success is walking from failure to failure with no loss of enthusiasm.",
+        "author": "Winston Churchill",
+        "category": "Resilience"
+    },
+    {
+        "quote": "An entrepreneur is someone who jumps off a cliff and builds a plane on the way down.",
+        "author": "Reid Hoffman",
+        "category": "Entrepreneurship"
     }
 ]
 
@@ -733,11 +818,24 @@ def validate_business_plan_sequence(reply, session_data=None):
     """Ensure business plan questions follow proper sequence"""
     
     if session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
+        # 🧪 TESTING: Check if we're in testing mode (answered_count doesn't match asked_q)
+        # This happens when using "skip to 44" command
+        asked_q = session_data.get("asked_q", "BUSINESS_PLAN.01")
+        answered_count = session_data.get("answered_count", 0)
+        
+        if "BUSINESS_PLAN." in asked_q:
+            asked_q_num = int(asked_q.split(".")[1])
+            
+            # If asked_q is 44 but answered_count is 43, we're in testing mode - skip validation
+            if asked_q_num >= 44 and answered_count == 43:
+                print(f"🧪 TESTING MODE DETECTED: asked_q={asked_q}, answered_count={answered_count}")
+                print(f"🧪 Skipping sequence validation to allow testing of questions 44-46")
+                return reply
+        
         # Extract current question number from tag
         tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', reply)
         if tag_match:
             current_q_num = int(tag_match.group(1))
-            asked_q = session_data.get("asked_q", "BUSINESS_PLAN.01")
             
             # Check if we're jumping ahead or backwards
             if "BUSINESS_PLAN." in asked_q:
@@ -5330,10 +5428,23 @@ async def handle_roadmap_to_implementation_transition(session_data, history):
     Based on the "Transition Roadmap to Implementation - Descriptive.docx" document
     """
     
-    # Extract business context from session data
-    business_name = session_data.get('business_name', 'Your Business')
-    industry = session_data.get('industry', 'general business')
-    location = session_data.get('location', 'United States')
+    # Extract business context from session data and history
+    extracted_context = {}
+    if history:
+        extracted_context = extract_business_context_from_history(history)
+    
+    # Get business context - prioritize extracted context from history over session data
+    business_context = session_data.get("business_context", {}) or {}
+    if not isinstance(business_context, dict):
+        business_context = {}
+    
+    # Extract business details with proper fallbacks
+    business_name = extracted_context.get('business_name') or business_context.get('business_name') or 'your business'
+    industry = extracted_context.get('industry') or business_context.get('industry') or 'general business'
+    location = extracted_context.get('location') or business_context.get('location') or 'United States'
+    
+    # Get a dynamic motivational quote
+    motivational_quote = pick_motivational_quote()
     
     # Generate roadmap summary
     roadmap_summary = f"""**Your Completed Roadmap Summary:**
@@ -5353,7 +5464,7 @@ async def handle_roadmap_to_implementation_transition(session_data, history):
 
 ---
 
-**{business_name}, that's incredible.** You've completed your full Launch Roadmap. Every milestone — from formation to marketing — checked off. You're now ready to bring {business_name} fully to life.
+**That's incredible.** You've completed your full Launch Roadmap. Every milestone — from formation to marketing — checked off. You're now ready to bring {business_name} fully to life.
 
 ---
 
@@ -5397,7 +5508,7 @@ Just like before, you'll have a visual tracker — so you can watch your real pr
 
 ## **💪 Take a Moment to Recognize Your Journey**
 
-{business_name}, before we dive in, take a second to recognize how far you've come:
+Before we dive in, take a second to recognize how far you've come:
 
 ✅ You started with an idea
 ✅ You've built a comprehensive plan
@@ -5406,15 +5517,21 @@ Just like before, you'll have a visual tracker — so you can watch your real pr
 
 ---
 
+## **💡 Inspirational Quote**
+
+> **"{motivational_quote['quote']}"**
+> 
+> — {motivational_quote['author']}
+
+---
+
 ## **🎯 Ready to Begin Implementation?**
 
 When you're ready, we'll show you the first real-world action to take — and we'll tackle it together.
 
-**"What you've done so far isn't just planning — it's progress. Now let's execute with precision and confidence."**
-
 ---
 
-*This implementation process is tailored specifically to your "{business_name}" business in the {industry} industry, located in {location}. Every recommendation is designed to help you build the business of your dreams.*"""
+*This implementation process is tailored specifically to {business_name} in the {industry} industry, located in {location}. Every recommendation is designed to help you build the business of your dreams.*"""
     
     # Check if we should show Accept/Modify buttons
     button_detection = await should_show_accept_modify_buttons(

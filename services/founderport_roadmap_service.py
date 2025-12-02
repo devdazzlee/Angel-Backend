@@ -9,7 +9,7 @@ async def generate_founderport_style_roadmap(session_data, history):
     Generate a roadmap matching the exact Founderport structure with 8 stages:
     - Stage 1: Foundation & Setup
     - Stage 2: Financial Planning & Funding
-    - Stage 3: Product Development (Beta Build)
+    - Stage 3: Product Development
     - Stage 4: Marketing Readiness
     - Stage 5: Beta Launch & Feedback
     - Stage 6: Public Launch
@@ -89,7 +89,7 @@ async def generate_founderport_style_roadmap(session_data, history):
     | 2.4 Secure Initial Funding | Execute funding strategy (investors, loans, grants, or bootstrapping). | Financial projections ready | Draft pitch deck, funding source research | ⏳ |
     | 2.5 Establish Tax Planning | Set up tax structure and quarterly payment system. | Accounting system live | Provide tax planning checklist, estimated tax calculator | ⏳ |
     
-    ### **Stage 3 — Product Development (Beta Build)**
+    ### **Stage 3 — Product Development**
     **Goal**: Deliver the first functional version of your product/service.
     
     | Task | Description | Dependencies | Angel's Role | Status |

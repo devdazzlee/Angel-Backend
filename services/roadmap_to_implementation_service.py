@@ -8,7 +8,7 @@ from utils.constant import ANGEL_SYSTEM_PROMPT
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Motivational quotes for business implementation
+# Motivational quotes for business implementation - expanded collection from famous entrepreneurs and leaders
 MOTIVATIONAL_QUOTES = [
     {
         "quote": "Success is not final; failure is not fatal: it is the courage to continue that counts.",
@@ -49,6 +49,81 @@ MOTIVATIONAL_QUOTES = [
         "quote": "Your time is limited, don't waste it living someone else's life.",
         "author": "Steve Jobs",
         "category": "Authenticity"
+    },
+    {
+        "quote": "I have not failed. I've just found 10,000 ways that won't work.",
+        "author": "Thomas Edison",
+        "category": "Persistence"
+    },
+    {
+        "quote": "If you are not embarrassed by the first version of your product, you've launched too late.",
+        "author": "Reid Hoffman",
+        "category": "Action"
+    },
+    {
+        "quote": "The biggest risk is not taking any risk. In a world that's changing quickly, the only strategy that is guaranteed to fail is not taking risks.",
+        "author": "Mark Zuckerberg",
+        "category": "Risk"
+    },
+    {
+        "quote": "Ideas are easy. Implementation is hard.",
+        "author": "Guy Kawasaki",
+        "category": "Execution"
+    },
+    {
+        "quote": "Build something 100 people love, not something 1 million people kind of like.",
+        "author": "Brian Chesky",
+        "category": "Focus"
+    },
+    {
+        "quote": "Don't worry about failure; you only have to be right once.",
+        "author": "Drew Houston",
+        "category": "Persistence"
+    },
+    {
+        "quote": "The secret of change is to focus all of your energy not on fighting the old, but on building the new.",
+        "author": "Socrates",
+        "category": "Innovation"
+    },
+    {
+        "quote": "Whether you think you can or you think you can't, you're right.",
+        "author": "Henry Ford",
+        "category": "Mindset"
+    },
+    {
+        "quote": "The best time to plant a tree was 20 years ago. The second best time is now.",
+        "author": "Chinese Proverb",
+        "category": "Action"
+    },
+    {
+        "quote": "It's not about ideas. It's about making ideas happen.",
+        "author": "Scott Belsky",
+        "category": "Execution"
+    },
+    {
+        "quote": "Do not be embarrassed by your failures, learn from them and start again.",
+        "author": "Richard Branson",
+        "category": "Learning"
+    },
+    {
+        "quote": "If you're not a risk taker, you should get the hell out of business.",
+        "author": "Ray Kroc",
+        "category": "Risk"
+    },
+    {
+        "quote": "The only impossible journey is the one you never begin.",
+        "author": "Tony Robbins",
+        "category": "Action"
+    },
+    {
+        "quote": "Success is walking from failure to failure with no loss of enthusiasm.",
+        "author": "Winston Churchill",
+        "category": "Resilience"
+    },
+    {
+        "quote": "An entrepreneur is someone who jumps off a cliff and builds a plane on the way down.",
+        "author": "Reid Hoffman",
+        "category": "Entrepreneurship"
     }
 ]
 

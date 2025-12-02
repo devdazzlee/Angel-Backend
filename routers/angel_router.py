@@ -137,6 +137,12 @@ async def get_sessions(request: Request):
     sessions = await list_sessions(user_id)
     return {"success": True, "message": "Chat sessions fetched", "result": sessions}
 
+@router.get("/sessions/{session_id}")
+async def get_single_session(request: Request, session_id: str):
+    user_id = request.state.user["id"]
+    session = await get_session(session_id, user_id)
+    return {"success": True, "message": "Session fetched", "result": session}
+
 @router.get("/sessions/{session_id}/history")
 async def chat_history(request: Request, session_id: str):
 
@@ -256,6 +262,66 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
 
     # Log the incoming message for debugging
     print(f"📨 POST /chat - Received message: '{payload.content[:200]}...' (length: {len(payload.content)})")
+    
+    # 🧪 TESTING COMMAND: Skip to question 44 in Business Plan phase
+    if payload.content.strip().lower() in ["skip to 44", "jump to 44", "goto 44", "skip 44"]:
+        current_phase = session.get("current_phase", "")
+        if current_phase == "BUSINESS_PLAN":
+            # Update session to question 44
+            update_data = {
+                "asked_q": "BUSINESS_PLAN.44",
+                "answered_count": 43  # 43 questions answered (1-43)
+            }
+            await patch_session(session_id, update_data)
+            
+            # CRITICAL: Update the local session object so subsequent operations use the new state
+            session.update(update_data)
+            
+            # Reload session from database to ensure we have the latest state
+            session = await get_session(session_id, user_id)
+            
+            # Don't save the skip command to history
+            # Get the actual question 44 from the backend
+            # Note: get_angel_reply is already imported at the top of the file
+            
+            # Create a dummy message to trigger question 44
+            dummy_msg = {"role": "user", "content": "Please show me question 44"}
+            angel_response = await get_angel_reply(dummy_msg, history, session)
+            
+            if isinstance(angel_response, dict):
+                assistant_reply = angel_response["reply"]
+            else:
+                assistant_reply = angel_response
+            
+            # Return the actual question 44
+            return {
+                "success": True,
+                "message": "Skipped to question 44",
+                "result": {
+                    "reply": assistant_reply,
+                    "progress": {
+                        "phase": "BUSINESS_PLAN",
+                        "answered": 43,
+                        "total": 46,
+                        "percent": 93
+                    },
+                    "session_id": session_id,
+                    "web_search_status": {"is_searching": False, "query": None},
+                    "immediate_response": None,
+                    "show_accept_modify": False,
+                    "question_number": 44
+                }
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Skip command only works in BUSINESS_PLAN phase",
+                "result": {
+                    "reply": "⚠️ Skip command only works during the Business Plan phase. You're currently in: " + current_phase,
+                    "progress": session.get("progress", {}),
+                    "session_id": session_id
+                }
+            }
     
     # Save user message
     await save_chat_message(session_id, user_id, "user", payload.content)
