@@ -1825,27 +1825,50 @@ async def generate_business_plan_summary(session_data, history):
 def provide_critiquing_feedback(user_msg, session_data, history):
     """
     Provide constructive critique and challenging feedback to push for deeper thinking
+    
+    ROOT CAUSE FIX: Made critique validation much more intelligent
+    - Only triggers on ACTUALLY vague/unrealistic answers
+    - Requires multiple indicators, not just one word
+    - Checks context to avoid false positives
+    - Minimum length requirement increased
     """
-    # Don't critique simple yes/no answers or very short responses to simple questions
-    if not user_msg or len(user_msg.strip()) < 5:
+    # Don't critique simple yes/no answers or short responses
+    if not user_msg or len(user_msg.strip()) < 20:
         return None
     
-    # Check for vague or unrealistic answers only for complex questions
-    vague_indicators = ["maybe", "probably", "i think", "not sure", "don't know", "maybe", "possibly"]
-    if any(indicator in user_msg.lower() for indicator in vague_indicators) and len(user_msg.strip()) > 50:
+    user_msg_lower = user_msg.lower()
+    
+    # Check for GENUINELY vague answers - need multiple indicators AND short length
+    vague_indicators = ["maybe", "i think", "not sure", "don't know", "possibly", "i guess"]
+    vague_count = sum(1 for indicator in vague_indicators if indicator in user_msg_lower)
+    
+    # Only critique if MULTIPLE vague indicators AND answer is still short (< 100 chars)
+    if vague_count >= 2 and len(user_msg.strip()) < 100:
         return {
             "reply": f"I notice some uncertainty in your response. Let me challenge you to think deeper: What specific research have you done to support this? What are the concrete steps you're considering? What potential obstacles do you foresee, and how would you address them?",
             "web_search_status": {"is_searching": False, "query": None, "completed": False}
         }
     
-    # Check for unrealistic assumptions
-    unrealistic_indicators = ["easy", "simple", "quick", "fast", "guaranteed", "definitely will work"]
-    if any(indicator in user_msg.lower() for indicator in unrealistic_indicators) and len(user_msg.strip()) > 50:
+    # Check for GENUINELY unrealistic assumptions - need context, not just keywords
+    # These phrases indicate unrealistic thinking ONLY when used in specific contexts
+    unrealistic_phrases = [
+        "it will be easy",
+        "this is simple",
+        "guaranteed success",
+        "definitely will work",
+        "no competition",
+        "everyone will buy",
+        "instant profit"
+    ]
+    
+    # Only critique if we find ACTUAL unrealistic claims, not just the word "easy" or "simple"
+    if any(phrase in user_msg_lower for phrase in unrealistic_phrases):
         return {
-            "reply": f"While I appreciate your confidence, I want to challenge some assumptions here. What makes you think this will be [easy/simple/quick]? What data or experience supports this timeline? What's your contingency plan if things don't go as expected?",
+            "reply": f"While I appreciate your confidence, I want to challenge some assumptions here. What data or experience supports this outlook? What's your contingency plan if things don't go as expected? What potential obstacles should we consider?",
             "web_search_status": {"is_searching": False, "query": None, "completed": False}
         }
     
+    # No critique needed - answer is substantive
     return None
 
 def validate_question_answer(user_msg, session_data, history):
