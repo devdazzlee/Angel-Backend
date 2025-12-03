@@ -213,7 +213,7 @@ def _get_phase_from_task_id(task_id: str) -> str:
     # Default fallback
     return "legal_formation"
 
-@router.get("/sessions/{session_id}/implementation/tasks")
+@router.get("/sessions/{session_id}/tasks")
 async def get_current_implementation_task(session_id: str, request: Request):
     """Get the current implementation task for a session"""
     
@@ -428,7 +428,7 @@ async def get_current_implementation_task(session_id: str, request: Request):
 # REMOVED: Duplicate endpoint - using the one below at line 614 instead
 # This old endpoint was slow because it called RAG validation
 
-@router.post("/sessions/{session_id}/implementation/help")
+@router.post("/sessions/{session_id}/help")
 async def get_implementation_help(
     session_id: str,
     request: Request,
@@ -505,7 +505,7 @@ async def get_implementation_help(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get help content: {str(e)}")
 
-@router.post("/sessions/{session_id}/implementation/tasks/{task_id}/kickstart")
+@router.post("/sessions/{session_id}/tasks/{task_id}/kickstart")
 async def get_implementation_kickstart(session_id: str, task_id: str, request: Request):
     """Get kickstart plan for implementation task"""
     
@@ -582,7 +582,7 @@ async def get_implementation_kickstart(session_id: str, task_id: str, request: R
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get kickstart plan: {str(e)}")
 
-@router.post("/sessions/{session_id}/implementation/contact")
+@router.post("/sessions/{session_id}/contact")
 async def get_implementation_service_providers(
     session_id: str,
     request: Request,
@@ -636,7 +636,7 @@ async def get_implementation_service_providers(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get service providers: {str(e)}")
 
-@router.post("/sessions/{session_id}/implementation/tasks/{task_id}/complete")
+@router.post("/sessions/{session_id}/tasks/{task_id}/complete")
 async def complete_implementation_task(
     session_id: str,
     task_id: str,
@@ -879,7 +879,7 @@ async def complete_implementation_task(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to complete task: {str(e)}")
 
-@router.post("/sessions/{session_id}/implementation/tasks/{task_id}/upload-document")
+@router.post("/sessions/{session_id}/tasks/{task_id}/upload-document")
 async def upload_implementation_document(
     session_id: str,
     task_id: str,
@@ -926,7 +926,7 @@ async def upload_implementation_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upload document: {str(e)}")
 
-@router.get("/sessions/{session_id}/implementation/progress")
+@router.get("/sessions/{session_id}/progress")
 async def get_implementation_progress(session_id: str, request: Request):
     """Get implementation progress for a session"""
     
