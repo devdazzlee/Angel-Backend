@@ -818,19 +818,8 @@ def validate_business_plan_sequence(reply, session_data=None):
     """Ensure business plan questions follow proper sequence"""
     
     if session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
-        # 🧪 TESTING: Check if we're in testing mode (answered_count doesn't match asked_q)
-        # This happens when using "skip to 44" command
         asked_q = session_data.get("asked_q", "BUSINESS_PLAN.01")
         answered_count = session_data.get("answered_count", 0)
-        
-        if "BUSINESS_PLAN." in asked_q:
-            asked_q_num = int(asked_q.split(".")[1])
-            
-            # If asked_q is 44 but answered_count is 43, we're in testing mode - skip validation
-            if asked_q_num >= 44 and answered_count == 43:
-                print(f"🧪 TESTING MODE DETECTED: asked_q={asked_q}, answered_count={answered_count}")
-                print(f"🧪 Skipping sequence validation to allow testing of questions 44-46")
-                return reply
         
         # Extract current question number from tag
         tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', reply)
@@ -1680,19 +1669,13 @@ async def handle_business_plan_completion(session_data, history):
     business_plan_summary = await generate_business_plan_summary(session_data, history)
     
     # Return immediately with summary - generate artifact in background (non-blocking)
-    # This ensures the modal shows instantly without waiting
-    print("⚡ Returning summary immediately - artifact will be generated in background")
+    # ✅ PROPER ARCHITECTURE: No background generation
+    # Artifact will be generated ON-DEMAND when user clicks "View Full Business Plan"
+    # This eliminates race conditions, polling, and provides reliable user experience
+    # See endpoint: POST /sessions/{session_id}/generate-business-plan-artifact
+    print("✅ Returning summary immediately. Artifact will be generated on-demand.")
     
-    # Start artifact generation in background (don't await - non-blocking)
-    # The artifact will be saved to session when ready, but we don't wait for it
-    import asyncio
-    try:
-        asyncio.create_task(generate_business_plan_artifact_async(session_data, history))
-        print("🔄 Background artifact generation started (non-blocking)")
-    except Exception as e:
-        print(f"⚠️ Could not start background task: {e}")
-    
-    # Set artifact to None initially - it will be available later when background task completes
+    # No artifact in initial response - user will request it when needed
     business_plan_artifact = None
     
     # Create the transition message
