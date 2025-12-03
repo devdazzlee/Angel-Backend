@@ -1,5 +1,6 @@
 # import logging
 # logging.basicConfig(level=logging.DEBUG)
+# Version: 1.0.1 - Fixed implementation router paths (removed duplicate /implementation/)
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
