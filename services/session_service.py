@@ -34,6 +34,19 @@ async def get_session(session_id: str, user_id: str):
     else:
         raise Exception("Session not found")
 
-async def patch_session(session_id: str, updates: dict):
-    response = supabase.from_("chat_sessions").update(updates).eq("id", session_id).execute()
-    return response.data[0]
+async def patch_session(session_id: str, user_id_or_updates, updates: dict = None):
+    """
+    Backwards compatible patch_session that accepts either:
+    - patch_session(session_id, updates) - OLD signature
+    - patch_session(session_id, user_id, updates) - NEW signature
+    """
+    if updates is None:
+        # Old signature: patch_session(session_id, updates)
+        updates = user_id_or_updates
+        response = supabase.from_("chat_sessions").update(updates).eq("id", session_id).execute()
+    else:
+        # New signature: patch_session(session_id, user_id, updates)
+        user_id = user_id_or_updates
+        response = supabase.from_("chat_sessions").update(updates).eq("id", session_id).eq("user_id", user_id).execute()
+    
+    return response.data[0] if response.data else None

@@ -240,7 +240,7 @@ async def sync_progress(request: Request, session_id: str, payload: SyncProgress
         if current_q_progress == (-1, -1) or incoming_q_progress >= current_q_progress:
             updates["asked_q"] = payload.asked_q
 
-    await patch_session(session_id, updates)
+    await patch_session(session_id, user_id, updates)
     session.update(updates)
 
     return {
@@ -716,7 +716,7 @@ async def patch_session_context_from_response(session_id, response_content, tag,
     # Update session with extracted information
     if updates:
         print(f"📝 Extracting session context: {list(updates.keys())}")
-        await patch_session(session_id, updates)
+        await patch_session(session_id, user_id, updates)
         session.update(updates)
 
 @router.post("/sessions/{session_id}/command")
@@ -1006,7 +1006,7 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                     "current_phase": previous_phase
                 }
                 
-                await patch_session(session_id, updates)
+                await patch_session(session_id, user_id, updates)
                 session.update(updates)
                 
                 # Re-fetch updated session

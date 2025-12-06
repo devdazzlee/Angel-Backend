@@ -11,12 +11,12 @@ from gotrue.errors import AuthApiError
 # Routers
 from routers.auth_router import auth_router
 from routers.angel_router import router as angel_router
+from routers.business_context_router import router as business_context_router
 from routers.implementation_router import router as implementation_router
 from routers.roadmap_edit_router import router as roadmap_edit_router
 from routers.roadmap_to_implementation_router import router as roadmap_to_implementation_router
 from routers.provider_router import router as provider_router
 from routers.specialized_agents_router import router as specialized_agents_router
-from routers.implementation_router import router as implementation_router
 from routers.appendices_router import router as appendices_router
 from routers.upload_plan_router import router as upload_plan_router
 
@@ -63,6 +63,7 @@ app.add_middleware(
 # ✅ Routers
 app.include_router(auth_router, prefix="/auth")
 app.include_router(angel_router, prefix="/angel")
+app.include_router(business_context_router, prefix="/business-context")
 app.include_router(implementation_router, prefix="/implementation")
 app.include_router(roadmap_edit_router, prefix="/roadmap")
 app.include_router(roadmap_to_implementation_router, prefix="/roadmap-to-implementation")

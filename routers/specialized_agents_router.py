@@ -138,6 +138,65 @@ async def get_provider_table(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get provider table: {str(e)}")
 
+@router.post("/get-agents")
+async def get_agents_for_task(request: Request):
+    """Get specialized agents relevant to the current task and business context"""
+    
+    try:
+        payload = await request.json()
+        task_context = payload.get("task_context", "")
+        business_context = payload.get("business_context", {})
+        
+        agent_info = agents_manager.get_agent_info()
+        
+        # Convert dictionary to array format expected by frontend
+        agents_array = []
+        for agent_type, info in agent_info.items():
+            # Filter agents based on task context if provided
+            is_relevant = True
+            if task_context:
+                task_lower = task_context.lower()
+                agent_name_lower = info["name"].lower()
+                expertise_lower = info.get("expertise", "").lower()
+                
+                # Check if agent is relevant to task
+                relevant_keywords = {
+                    "legal": ["legal", "law", "compliance", "regulation", "contract"],
+                    "financial": ["financial", "accounting", "tax", "bookkeeping", "finance"],
+                    "marketing": ["marketing", "advertising", "promotion", "brand", "sales"],
+                    "operations": ["operations", "logistics", "supply", "inventory", "process"],
+                    "technology": ["technology", "software", "it", "tech", "digital"]
+                }
+                
+                # Simple relevance check
+                is_relevant = any(
+                    keyword in task_lower and keyword in (agent_name_lower + " " + expertise_lower)
+                    for keywords in relevant_keywords.values()
+                    for keyword in keywords
+                ) or not task_context  # If no task context, show all agents
+            
+            if is_relevant:
+                agents_array.append({
+                    "id": agent_type,
+                    "agent_type": agent_type,
+                    "name": info["name"],
+                    "description": f"Specialized agent for {agent_type.replace('_', ' ')}",
+                    "expertise": info.get("expertise", ""),
+                    "icon": info.get("icon", "Users"),
+                    "color": info.get("color", "bg-gray-100")
+                })
+        
+        return {
+            "success": True,
+            "message": "Available agents retrieved successfully",
+            "result": {
+                "agents": agents_array,
+                "total_agents": len(agents_array)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get agents: {str(e)}")
+
 @router.get("/agents")
 async def get_agents(request: Request):
     """Get information about available specialized agents"""

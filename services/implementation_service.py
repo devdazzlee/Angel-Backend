@@ -5,8 +5,95 @@ import re
 from datetime import datetime
 from typing import Dict, List, Optional
 from utils.constant import ANGEL_SYSTEM_PROMPT
+from supabase import create_client, Client
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Initialize Supabase client for fetching business plan
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(supabase_url, supabase_key) if supabase_url and supabase_key else None
+
+# Helper function to fetch business plan context
+async def fetch_business_plan_context(session_id: str) -> Dict:
+    """Fetch business plan data for context validation"""
+    try:
+        if not supabase:
+            return {}
+            
+        # Fetch business plan from database
+        response = supabase.from_("business_plans").select("*").eq("session_id", session_id).order("created_at", desc=True).limit(1).execute()
+        
+        if response.data and len(response.data) > 0:
+            plan = response.data[0]
+            return {
+                "executive_summary": plan.get("executive_summary", ""),
+                "market_analysis": plan.get("market_analysis", ""),
+                "target_market": plan.get("target_market", ""),
+                "competitive_analysis": plan.get("competitive_analysis", ""),
+                "marketing_strategy": plan.get("marketing_strategy", ""),
+                "financial_projections": plan.get("financial_projections", ""),
+                "full_plan": plan.get("full_plan", "")
+            }
+    except Exception as e:
+        print(f"Error fetching business plan context: {e}")
+    
+    return {}
+
+# Context validation loop
+async def validate_response_context(response: str, task: Dict, business_context: Dict, business_plan: Dict) -> str:
+    """Validate that AI response is contextually accurate and specific to the user's business"""
+    
+    validation_prompt = f"""
+    Review the following AI response and verify it is SPECIFIC and CONTEXTUALLY ACCURATE for this business:
+
+    BUSINESS CONTEXT:
+    - Business Name: {business_context.get('business_name', 'N/A')}
+    - Industry: {business_context.get('industry', 'N/A')}
+    - Location: {business_context.get('location', 'N/A')}
+    - Business Type: {business_context.get('business_type', 'N/A')}
+
+    CURRENT TASK:
+    - Task: {task.get('title', 'N/A')}
+    - Phase: {task.get('phase_name', 'N/A')}
+    - Purpose: {task.get('purpose', 'N/A')}
+
+    BUSINESS PLAN SUMMARY:
+    {business_plan.get('executive_summary', 'No business plan available')[:500]}
+
+    AI RESPONSE TO VALIDATE:
+    {response}
+
+    VALIDATION REQUIREMENTS:
+    1. Check if response mentions the SPECIFIC business name, industry, and location
+    2. Verify advice is tailored to their SPECIFIC industry and business type
+    3. Ensure recommendations are relevant to their LOCATION (local regulations, resources)
+    4. Confirm response aligns with their business plan goals
+    5. Check that it addresses the SPECIFIC task they're working on
+
+    If the response is TOO GENERIC or lacks business-specific context, rewrite it to be MORE SPECIFIC and PERSONALIZED.
+    
+    Return ONLY the validated/improved response (no explanations):
+    """
+    
+    try:
+        validation_response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a context validation expert. Ensure all responses are specific and personalized to the user's business."},
+                {"role": "user", "content": validation_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=1500
+        )
+        
+        validated_response = validation_response.choices[0].message.content
+        print(f"✅ Response validated and enhanced with business context")
+        return validated_response
+        
+    except Exception as e:
+        print(f"Error in context validation: {e}")
+        return response  # Return original if validation fails
 
 # Implementation task structure
 IMPLEMENTATION_TASKS = {
@@ -190,37 +277,56 @@ async def get_next_implementation_task(session_data: Dict, completed_tasks: List
         return await get_implementation_task(all_tasks[0]["id"], session_data)
     return None
 
-async def generate_task_guidance(task: Dict, session_data: Dict) -> str:
-    """Generate personalized guidance for a specific task"""
+async def generate_task_guidance(task: Dict, session_data: Dict, session_id: str = None) -> str:
+    """Generate personalized guidance for a specific task with business plan context and validation"""
     
     business_context = task["business_context"]
     
-    guidance_prompt = f"""
-    Generate comprehensive, personalized guidance for the implementation task: {task['title']}
+    # Fetch business plan for additional context
+    business_plan = {}
+    if session_id:
+        business_plan = await fetch_business_plan_context(session_id)
     
-    Task Details:
+    business_plan_context = ""
+    if business_plan.get("executive_summary"):
+        business_plan_context = f"""
+    
+    BUSINESS PLAN CONTEXT:
+    {business_plan.get('executive_summary', '')[:500]}
+    
+    Target Market: {business_plan.get('target_market', 'Not specified')[:200]}
+    """
+    
+    guidance_prompt = f"""
+    Generate comprehensive, personalized guidance for {business_context['business_name']} - a {business_context['business_type']} in the {business_context['industry']} industry, located in {business_context['location']}.
+    
+    CURRENT IMPLEMENTATION TASK:
     - Title: {task['title']}
     - Description: {task['description']}
     - Purpose: {task['purpose']}
+    - Phase: {task.get('phase_name', 'Implementation')}
     - Options: {', '.join(task['options'])}
     - Angel Actions: {', '.join(task['angel_actions'])}
     - Estimated Time: {task['estimated_time']}
     - Priority: {task['priority']}
+    {business_plan_context}
     
-    Business Context:
-    - Business Name: {business_context['business_name']}
-    - Industry: {business_context['industry']}
-    - Location: {business_context['location']}
-    - Business Type: {business_context['business_type']}
+    CRITICAL REQUIREMENTS:
+    1. ALL guidance MUST be SPECIFIC to {business_context['business_name']}
+    2. ALL recommendations MUST be relevant to {business_context['location']} (local laws, regulations, resources)
+    3. ALL advice MUST be tailored to the {business_context['industry']} industry
+    4. Reference their business plan context when relevant
+    5. Include location-specific service providers, legal requirements, and resources
     
     Provide:
-    1. Detailed explanation of why this task is critical
-    2. Step-by-step guidance for completion
-    3. Specific recommendations based on their business context
-    4. Common pitfalls to avoid
-    5. Success metrics for this task
+    1. Why this task is critical FOR THEIR SPECIFIC BUSINESS
+    2. Step-by-step guidance tailored to THEIR INDUSTRY and LOCATION
+    3. Specific recommendations based on THEIR BUSINESS CONTEXT
+    4. Common pitfalls to avoid IN THEIR INDUSTRY and LOCATION
+    5. Success metrics for THEIR SPECIFIC BUSINESS
+    6. Local resources and contacts in {business_context['location']}
     
-    Make it actionable, specific, and tailored to their business.
+    Make every sentence specific to their business, industry, and location. Avoid generic advice.
     """
     
     try:
@@ -231,9 +337,21 @@ async def generate_task_guidance(task: Dict, session_data: Dict) -> str:
                 {"role": "user", "content": guidance_prompt}
             ],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=1500
         )
-        return response.choices[0].message.content
+        
+        initial_response = response.choices[0].message.content
+        
+        # Validate and enhance response with business context
+        validated_response = await validate_response_context(
+            initial_response,
+            task,
+            business_context,
+            business_plan
+        )
+        
+        return validated_response
+        
     except Exception as e:
         print(f"Error generating task guidance: {e}")
         return "Guidance generation in progress..."
@@ -318,35 +436,54 @@ async def generate_service_providers(task: Dict, session_data: Dict) -> List[Dic
     
     return providers
 
-async def generate_kickstart_plan(task: Dict, session_data: Dict) -> Dict:
-    """Generate a detailed kickstart plan for a specific task"""
+async def generate_kickstart_plan(task: Dict, session_data: Dict, session_id: str = None) -> Dict:
+    """Generate a detailed kickstart plan for a specific task with business plan context and validation"""
     
     business_context = task["business_context"]
     
-    kickstart_prompt = f"""
-    Generate a detailed kickstart plan for the implementation task: {task['title']}
+    # Fetch business plan for additional context
+    business_plan = {}
+    if session_id:
+        business_plan = await fetch_business_plan_context(session_id)
     
-    Task Details:
+    business_plan_context = ""
+    if business_plan.get("executive_summary"):
+        business_plan_context = f"""
+    
+    BUSINESS PLAN CONTEXT:
+    {business_plan.get('executive_summary', '')[:500]}
+    
+    Marketing Strategy: {business_plan.get('marketing_strategy', 'Not specified')[:200]}
+    """
+    
+    kickstart_prompt = f"""
+    Generate a detailed kickstart plan for {business_context['business_name']} - a {business_context['business_type']} in the {business_context['industry']} industry, located in {business_context['location']}.
+    
+    CURRENT IMPLEMENTATION TASK:
     - Title: {task['title']}
     - Description: {task['description']}
     - Purpose: {task['purpose']}
+    - Phase: {task.get('phase_name', 'Implementation')}
     - Options: {', '.join(task['options'])}
     - Angel Actions: {', '.join(task['angel_actions'])}
+    {business_plan_context}
     
-    Business Context:
-    - Business Name: {business_context['business_name']}
-    - Industry: {business_context['industry']}
-    - Location: {business_context['location']}
-    - Business Type: {business_context['business_type']}
+    CRITICAL REQUIREMENTS:
+    1. ALL action steps MUST be SPECIFIC to {business_context['business_name']} and their {business_context['industry']} industry
+    2. ALL resources MUST be relevant to {business_context['location']}
+    3. Include SPECIFIC local contacts, services, and resources in {business_context['location']}
+    4. Reference their business plan goals and align with their strategy
+    5. Provide industry-specific tools and platforms for {business_context['industry']}
     
     Create a detailed mini-plan that includes:
-    1. Sub-tasks with specific actions Angel can perform
-    2. Templates and documents Angel can create
-    3. Research Angel can conduct
-    4. Timeline and milestones
-    5. Success criteria
+    1. Sub-tasks with specific actions Angel can perform FOR THIS SPECIFIC BUSINESS
+    2. Templates and documents Angel can create TAILORED to their industry
+    3. Research Angel can conduct SPECIFIC to their location and industry
+    4. Timeline and milestones REALISTIC for their business type
+    5. Success criteria MEASURABLE for their specific goals
+    6. Local service providers and contacts in {business_context['location']}
     
-    Format as a structured plan with actionable steps.
+    Make EVERY recommendation specific to their business name, industry, and location. No generic advice.
     """
     
     try:
@@ -360,8 +497,18 @@ async def generate_kickstart_plan(task: Dict, session_data: Dict) -> Dict:
             max_tokens=1500
         )
         
+        plan_content = response.choices[0].message.content
+        
+        # Validate and enhance response with business context
+        validated_plan = await validate_response_context(
+            plan_content,
+            task,
+            business_context,
+            business_plan
+        )
+        
         return {
-            "plan": response.choices[0].message.content,
+            "plan": validated_plan,
             "sub_tasks": task["angel_actions"],
             "estimated_time": task["estimated_time"],
             "priority": task["priority"]

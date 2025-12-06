@@ -4275,11 +4275,12 @@ def extract_business_context_from_history(history):
     # NO MORE HARDCODED OVERRIDES - Let AI naturally detect business type from conversation
     # Removed plumbing-specific override logic - system now works for ALL business types dynamically
     
-    # First pass: Identify KYC questions to prioritize their answers
+    # First pass: Identify KYC and Business Plan questions to prioritize their answers
     kyc_question_indices = {}
     for i, msg in enumerate(history):
         if msg["role"] == "assistant":
             content = msg["content"]
+            # KYC questions
             if "[[Q:KYC.11]]" in content:  # Industry question
                 kyc_question_indices["industry"] = i
                 print(f"🔍 DEBUG - Found KYC.11 (industry question) at index {i}")
@@ -4289,6 +4290,10 @@ def extract_business_context_from_history(history):
             elif "[[Q:KYC.10]]" in content:  # Location question
                 kyc_question_indices["location"] = i
                 print(f"🔍 DEBUG - Found KYC.10 (location question) at index {i}")
+            # Business Plan Question 1 - Business Name (HIGHEST PRIORITY)
+            elif "[[Q:BUSINESS_PLAN.01]]" in content or "[[Q:BP.01]]" in content:
+                kyc_question_indices["business_name"] = i
+                print(f"🔍 DEBUG - Found BP.01 (business name question) at index {i}")
     
     # Extract from all messages (not just recent ones)
     for i, msg in enumerate(history):
@@ -4298,10 +4303,23 @@ def extract_business_context_from_history(history):
             
             print(f"🔍 DEBUG - Message {i}: {content[:100]}...")
             
-            # Check if this is a response to a KYC question (HIGHEST PRIORITY - weight 100)
+            # Check if this is a response to a KYC or BP question (HIGHEST PRIORITY - weight 100)
+            is_bp_name_answer = "business_name" in kyc_question_indices and i == kyc_question_indices["business_name"] + 1
             is_kyc_industry_answer = "industry" in kyc_question_indices and i == kyc_question_indices["industry"] + 1
             is_kyc_business_type_answer = "business_type" in kyc_question_indices and i == kyc_question_indices["business_type"] + 1
             is_kyc_location_answer = "location" in kyc_question_indices and i == kyc_question_indices["location"] + 1
+            
+            # Extract business name from BP.01 answer (HIGHEST PRIORITY - weight 100)
+            if is_bp_name_answer and len(content.strip()) > 2:
+                # Use the user's exact answer as business name
+                business_name_answer = content.strip()
+                # Remove common command words if present
+                command_words = ["support", "draft", "scrapping", "accept", "modify"]
+                is_command = any(cmd in business_name_answer.lower() for cmd in command_words)
+                if not is_command:
+                    business_context["business_name"] = business_name_answer
+                    context_weights["business_name"] = 100
+                    print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: BP.01 business name answer (EXACT): '{business_name_answer}' (weight 100)")
             
             # Extract industry from KYC.11 answer - Use user's EXACT answer
             if is_kyc_industry_answer and len(content.strip()) > 2:
