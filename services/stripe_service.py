@@ -241,3 +241,9 @@ async def handle_subscription_deleted(subscription):
         logger.error(f"Error handling subscription deleted: {e}")
         raise
 
+
+
+
+
+
+
