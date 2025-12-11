@@ -48,6 +48,7 @@ origins = [
     "https://angle-ai-zsdt.vercel.app",
     "https://angle-ai.vercel.app",
     "https://founderport.ai",
+    "https://founderport.ai/",
     "http://localhost:3000",
     "http://localhost",
     "http://localhost:8080",
