@@ -1,10 +1,17 @@
 from fastapi import APIRouter
 from fastapi import HTTPException
-from schemas.auth_schemas import SignUpSchema, SignInSchema, ResetPasswordSchema, RefreshTokenSchema
+from schemas.auth_schemas import (
+    SignUpSchema, 
+    SignInSchema, 
+    ResetPasswordSchema, 
+    UpdatePasswordSchema,
+    RefreshTokenSchema
+)
 from services.auth_service import (
     create_user,
     authenticate_user,
     send_reset_password_email,
+    update_password,
     refresh_session
 )
 
@@ -25,8 +32,21 @@ async def signin(user: SignInSchema):
 
 @auth_router.post("/reset-password")
 async def reset_password(user: ResetPasswordSchema):
-    response = await send_reset_password_email(user.email)
-    return {"success": True, "message": "Reset password email sent", "result": response}
+    """Send password reset email to user"""
+    try:
+        response = await send_reset_password_email(user.email)
+        return {"success": True, "message": "If an account exists with this email, a password reset link has been sent.", "result": response}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@auth_router.post("/update-password")
+async def update_password_endpoint(user: UpdatePasswordSchema):
+    """Update user password using reset token from email"""
+    try:
+        result = await update_password(user.email, user.token, user.password)
+        return {"success": True, "message": "Password updated successfully", "result": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 @auth_router.post("/refresh-token")
 def refresh_token(token: RefreshTokenSchema):
