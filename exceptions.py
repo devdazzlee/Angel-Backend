@@ -26,12 +26,11 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     print(f"📦 Status Code: {exc.status_code}")
     print(f"📝 Detail: {exc.detail}")
 
+    # Return FastAPI standard format with detail field
     return JSONResponse(
         status_code=exc.status_code,
         content={
-            "success": False,
-            "error": "HTTP Exception",
-            "message": exc.detail,
+            "detail": exc.detail,
         },
     )
 

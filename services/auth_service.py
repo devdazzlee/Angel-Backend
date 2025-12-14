@@ -100,51 +100,60 @@ async def send_reset_password_email(email: str):
     Returns email address if successful.
     """
     try:
-        # Check if user exists first to avoid revealing email existence
-        # But we'll still send email even if user doesn't exist (security best practice)
+        # Check if user exists first
+        if not _check_user_exists(email):
+            logger.warning(f"Password reset requested for non-existent email: {email}")
+            raise ValueError("This account is not available. Please check your email address.")
+        
+        # User exists, send reset email
+        # Ensure redirect URL includes the full path
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+        # Remove trailing slash if present
+        frontend_url = frontend_url.rstrip('/')
+        redirect_url = f"{frontend_url}/reset-password"
+        
         supabase.auth.reset_password_for_email(
             email,
             {
-                "redirect_to": f"{os.getenv('FRONTEND_URL', 'http://localhost:5173')}/reset-password"
+                "redirect_to": redirect_url
             }
         )
         logger.info(f"Password reset email sent to {email}")
-        return {"email": email, "message": "If an account exists with this email, a password reset link has been sent."}
+        return {"email": email, "message": "A password reset link has been sent to your email."}
+    except ValueError as e:
+        # Re-raise ValueError (user doesn't exist)
+        raise e
     except AuthApiError as exc:
         logger.error(f"Failed to send reset password email to {email}: {exc.message}")
-        # Don't reveal if email exists - return success anyway (security best practice)
-        return {"email": email, "message": "If an account exists with this email, a password reset link has been sent."}
+        raise ValueError("Failed to send reset password email. Please try again later.") from exc
     except Exception as e:
         logger.error(f"Unexpected error sending reset password email: {e}")
         raise ValueError("Failed to send reset password email. Please try again later.") from e
 
 
-async def update_password(email: str, token: str, new_password: str):
+async def update_password(token: str, new_password: str):
     """
     Update user password using the reset token from email.
-    Uses admin API to update password directly.
-    Note: Token validation should happen on frontend (Supabase client handles this).
-    Backend verifies email exists and updates password via admin API.
+    Extracts email from token and updates password via admin API.
     """
     try:
-        # Verify user exists by email
+        # Get user from token to extract email
+        user_response = supabase.auth.get_user(token)
+        
+        if not user_response or not user_response.user:
+            raise ValueError("Invalid or expired reset token. Please request a new password reset link.")
+        
+        user = user_response.user
+        email = user.email
+        
+        if not email:
+            raise ValueError("Unable to extract email from token. Please request a new password reset link.")
+        
+        # Verify user exists
         if not _check_user_exists(email):
             raise ValueError("User not found. Please check your email address.")
         
-        # Get user by email using admin API
-        users_response = supabase.auth.admin.list_users()
-        user = None
-        if hasattr(users_response, 'users') and users_response.users:
-            for u in users_response.users:
-                if u.email and u.email.lower() == email.lower():
-                    user = u
-                    break
-        
-        if not user:
-            raise ValueError("User not found. Please check your email address.")
-        
         # Update password using admin API
-        # Note: Token validation happens on frontend before this call
         update_response = supabase.auth.admin.update_user_by_id(
             user.id,
             {"password": new_password}
@@ -168,7 +177,7 @@ async def update_password(email: str, token: str, new_password: str):
     except AuthApiError as exc:
         logger.error(f"Failed to update password: {exc.message}")
         error_lower = exc.message.lower()
-        if "expired" in error_lower or "invalid" in error_lower:
+        if "expired" in error_lower or "invalid" in error_lower or "token" in error_lower:
             raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from exc
         raise ValueError(f"Failed to update password: {exc.message}") from exc
     except Exception as e:

@@ -27,7 +27,6 @@ class ResetPasswordSchema(BaseModel):
 
 class UpdatePasswordSchema(BaseModel):
     token: str = Field(..., description="Password reset token or code from email link")
-    email: EmailStr = Field(..., description="User email address")
     password: str = Field(..., min_length=6, description="New password")
     confirm_password: str = Field(..., min_length=6, description="Confirm new password")
 

@@ -35,7 +35,7 @@ async def reset_password(user: ResetPasswordSchema):
     """Send password reset email to user"""
     try:
         response = await send_reset_password_email(user.email)
-        return {"success": True, "message": "If an account exists with this email, a password reset link has been sent.", "result": response}
+        return {"success": True, "message": response.get("message", "A password reset link has been sent to your email."), "result": response}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -43,7 +43,7 @@ async def reset_password(user: ResetPasswordSchema):
 async def update_password_endpoint(user: UpdatePasswordSchema):
     """Update user password using reset token from email"""
     try:
-        result = await update_password(user.email, user.token, user.password)
+        result = await update_password(user.token, user.password)
         return {"success": True, "message": "Password updated successfully", "result": result}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
