@@ -1,249 +1,179 @@
 import stripe
 import logging
+import os
 from db.supabase import supabase
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
-async def handle_stripe_webhook(event):
-    """
-    Handle Stripe webhook events.
-    
-    Supported events:
-    - checkout.session.completed: When a customer completes a checkout
-    - payment_intent.succeeded: When a payment is successful
-    - payment_intent.payment_failed: When a payment fails
-    - customer.subscription.created: When a subscription is created
-    - customer.subscription.updated: When a subscription is updated
-    - customer.subscription.deleted: When a subscription is deleted
-    """
-    event_type = event.get("type")
-    data = event.get("data", {})
-    object_data = data.get("object", {})
-    
-    logger.info(f"Processing Stripe webhook event: {event_type}")
-    
-    try:
-        if event_type == "checkout.session.completed":
-            return await handle_checkout_completed(object_data)
-        
-        elif event_type == "payment_intent.succeeded":
-            return await handle_payment_succeeded(object_data)
-        
-        elif event_type == "payment_intent.payment_failed":
-            return await handle_payment_failed(object_data)
-        
-        elif event_type == "customer.subscription.created":
-            return await handle_subscription_created(object_data)
-        
-        elif event_type == "customer.subscription.updated":
-            return await handle_subscription_updated(object_data)
-        
-        elif event_type == "customer.subscription.deleted":
-            return await handle_subscription_deleted(object_data)
-        
-        else:
-            logger.info(f"Unhandled event type: {event_type}")
-            return {
-                "status": "unhandled",
-                "event_type": event_type,
-                "message": f"Event type {event_type} is not handled"
-            }
-    
-    except Exception as e:
-        logger.error(f"Error handling webhook event {event_type}: {e}")
-        raise
 
-async def handle_checkout_completed(session):
-    """
-    Handle checkout.session.completed event.
-    This is triggered when a customer successfully completes a checkout session.
-    """
-    try:
-        customer_id = session.get("customer")
-        customer_email = session.get("customer_email")
-        amount_total = session.get("amount_total", 0) / 100  # Convert from cents
-        currency = session.get("currency", "usd")
-        payment_status = session.get("payment_status")
-        session_id = session.get("id")
-        metadata = session.get("metadata", {})
-        
-        # Extract user/session info from metadata if provided
-        user_id = metadata.get("user_id")
-        session_id_custom = metadata.get("session_id")
-        
-        logger.info(f"Checkout completed - Session: {session_id}, Customer: {customer_email}, Amount: {amount_total} {currency}")
-        
-        # Store payment record in database
-        payment_data = {
-            "stripe_session_id": session_id,
-            "stripe_customer_id": customer_id,
-            "customer_email": customer_email,
-            "amount": amount_total,
-            "currency": currency,
-            "payment_status": payment_status,
-            "user_id": user_id,
-            "custom_session_id": session_id_custom,
-            "metadata": metadata,
-            "created_at": datetime.utcnow().isoformat(),
+async def create_checkout_session(
+    user_id: str,
+    user_email: str,
+    success_url: str,
+    cancel_url: str,
+    product_name: str = "Angel AI Premium",
+    amount: int = 4999,
+    price_id: str = None
+):
+    """Create a Stripe checkout session for one-time payment."""
+    
+    line_items = [{"price": price_id, "quantity": 1}] if price_id else [{
+        "price_data": {
+            "currency": "usd",
+            "product_data": {
+                "name": product_name,
+                "description": "One-time payment for premium access to Angel AI"
+            },
+            "unit_amount": amount
+        },
+        "quantity": 1
+    }]
+    
+    session = stripe.checkout.Session.create(
+        payment_method_types=["card"],
+        mode="payment",
+        success_url=f"{success_url}?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=cancel_url,
+        customer_email=user_email,
+        line_items=line_items,
+        metadata={"user_id": user_id, "product": product_name},
+        payment_intent_data={"metadata": {"user_id": user_id, "product": product_name}}
+    )
+    
+    logger.info(f"Created checkout session {session.id} for user {user_id}")
+    return session
+
+
+async def check_user_payment_status(user_id: str) -> bool:
+    """Check if user has made a successful payment."""
+    result = supabase.table("user_payments").select("id").eq(
+        "user_id", user_id
+    ).eq(
+        "payment_status", "paid"
+    ).limit(1).execute()
+    
+    return len(result.data) > 0
+
+
+async def get_user_payments(user_id: str) -> list:
+    """Get all payments for a user."""
+    result = supabase.table("user_payments").select("*").eq(
+        "user_id", user_id
+    ).order("created_at", desc=True).execute()
+    
+    return result.data
+
+
+async def grant_premium_access(user_id: str, payment_data: dict):
+    """Grant premium access to user after successful payment."""
+    payment_record = {
+        "user_id": user_id,
+        "stripe_session_id": payment_data["stripe_session_id"],
+        "stripe_customer_id": payment_data["stripe_customer_id"],
+        "stripe_payment_intent_id": payment_data["stripe_payment_intent_id"],
+        "customer_email": payment_data["customer_email"],
+        "amount": payment_data["amount"],
+        "currency": payment_data["currency"],
+        "payment_status": "paid",
+        "product_name": payment_data["product_name"],
+        "has_premium_access": True,
+        "paid_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat()
+    }
+    
+    result = supabase.table("user_payments").upsert(
+        payment_record,
+        on_conflict="user_id"
+    ).execute()
+    
+    logger.info(f"Granted premium access to user {user_id}")
+    return result.data
+
+
+async def handle_stripe_webhook(event: dict):
+    """Handle Stripe webhook events."""
+    event_type = event["type"]
+    object_data = event["data"]["object"]
+    
+    logger.info(f"Processing Stripe webhook: {event_type}")
+    
+    handlers = {
+        "checkout.session.completed": handle_checkout_completed,
+        "payment_intent.succeeded": handle_payment_succeeded,
+        "payment_intent.payment_failed": handle_payment_failed
+    }
+    
+    handler = handlers.get(event_type)
+    if handler:
+        return await handler(object_data)
+    
+    logger.info(f"Unhandled event type: {event_type}")
+    return {"status": "unhandled", "event_type": event_type}
+
+
+async def handle_checkout_completed(session: dict):
+    """Handle checkout.session.completed - grants premium access."""
+    user_id = session["metadata"]["user_id"]
+    
+    payment_data = {
+        "stripe_session_id": session["id"],
+        "stripe_customer_id": session.get("customer"),
+        "stripe_payment_intent_id": session.get("payment_intent"),
+        "customer_email": session.get("customer_email") or session.get("customer_details", {}).get("email"),
+        "amount": session["amount_total"] / 100,
+        "currency": session.get("currency", "usd"),
+        "product_name": session["metadata"].get("product", "Angel AI Premium")
+    }
+    
+    await grant_premium_access(user_id, payment_data)
+    
+    return {
+        "status": "success",
+        "event": "checkout.session.completed",
+        "user_id": user_id,
+        "premium_granted": True
+    }
+
+
+async def handle_payment_succeeded(payment_intent: dict):
+    """Handle payment_intent.succeeded - confirms payment."""
+    user_id = payment_intent["metadata"].get("user_id")
+    
+    if user_id:
+        supabase.table("user_payments").update({
+            "payment_status": "paid",
+            "stripe_payment_intent_id": payment_intent["id"],
+            "has_premium_access": True,
             "updated_at": datetime.utcnow().isoformat()
-        }
-        
-        # Insert into payments table (create table if it doesn't exist)
-        try:
-            result = supabase.table("payments").insert(payment_data).execute()
-            logger.info(f"Payment record created: {result.data}")
-        except Exception as db_error:
-            logger.error(f"Database error storing payment: {db_error}")
-            # Continue even if DB insert fails - webhook should still return success
-        
-        return {
-            "status": "success",
-            "event": "checkout.session.completed",
-            "session_id": session_id,
-            "customer_email": customer_email,
-            "amount": amount_total,
-            "currency": currency,
-            "message": "Checkout completed successfully"
-        }
+        }).eq("user_id", user_id).execute()
     
-    except Exception as e:
-        logger.error(f"Error handling checkout completed: {e}")
-        raise
+    return {
+        "status": "success",
+        "event": "payment_intent.succeeded",
+        "user_id": user_id
+    }
 
-async def handle_payment_succeeded(payment_intent):
-    """
-    Handle payment_intent.succeeded event.
-    """
-    try:
-        payment_id = payment_intent.get("id")
-        amount = payment_intent.get("amount", 0) / 100
-        currency = payment_intent.get("currency", "usd")
-        customer_id = payment_intent.get("customer")
-        
-        logger.info(f"Payment succeeded - Payment ID: {payment_id}, Amount: {amount} {currency}")
-        
-        # Update payment status if record exists
-        try:
-            supabase.table("payments").update({
-                "payment_status": "paid",
-                "stripe_payment_intent_id": payment_id,
-                "updated_at": datetime.utcnow().isoformat()
-            }).eq("stripe_customer_id", customer_id).execute()
-        except Exception as db_error:
-            logger.error(f"Database error updating payment: {db_error}")
-        
-        return {
-            "status": "success",
-            "event": "payment_intent.succeeded",
-            "payment_id": payment_id,
-            "amount": amount,
-            "currency": currency
-        }
+
+async def handle_payment_failed(payment_intent: dict):
+    """Handle payment_intent.payment_failed."""
+    user_id = payment_intent["metadata"].get("user_id")
     
-    except Exception as e:
-        logger.error(f"Error handling payment succeeded: {e}")
-        raise
-
-async def handle_payment_failed(payment_intent):
-    """
-    Handle payment_intent.payment_failed event.
-    """
-    try:
-        payment_id = payment_intent.get("id")
-        amount = payment_intent.get("amount", 0) / 100
-        currency = payment_intent.get("currency", "usd")
-        customer_id = payment_intent.get("customer")
-        
-        logger.warning(f"Payment failed - Payment ID: {payment_id}, Amount: {amount} {currency}")
-        
-        # Update payment status if record exists
-        try:
-            supabase.table("payments").update({
-                "payment_status": "failed",
-                "stripe_payment_intent_id": payment_id,
-                "updated_at": datetime.utcnow().isoformat()
-            }).eq("stripe_customer_id", customer_id).execute()
-        except Exception as db_error:
-            logger.error(f"Database error updating payment: {db_error}")
-        
-        return {
-            "status": "success",
-            "event": "payment_intent.payment_failed",
-            "payment_id": payment_id,
-            "message": "Payment failure recorded"
-        }
+    if user_id:
+        supabase.table("user_payments").update({
+            "payment_status": "failed",
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq("user_id", user_id).execute()
     
-    except Exception as e:
-        logger.error(f"Error handling payment failed: {e}")
-        raise
-
-async def handle_subscription_created(subscription):
-    """
-    Handle customer.subscription.created event.
-    """
-    try:
-        subscription_id = subscription.get("id")
-        customer_id = subscription.get("customer")
-        status = subscription.get("status")
-        
-        logger.info(f"Subscription created - Subscription ID: {subscription_id}, Status: {status}")
-        
-        return {
-            "status": "success",
-            "event": "customer.subscription.created",
-            "subscription_id": subscription_id,
-            "customer_id": customer_id,
-            "status": status
-        }
+    logger.warning(f"Payment failed for user {user_id}")
     
-    except Exception as e:
-        logger.error(f"Error handling subscription created: {e}")
-        raise
-
-async def handle_subscription_updated(subscription):
-    """
-    Handle customer.subscription.updated event.
-    """
-    try:
-        subscription_id = subscription.get("id")
-        status = subscription.get("status")
-        
-        logger.info(f"Subscription updated - Subscription ID: {subscription_id}, Status: {status}")
-        
-        return {
-            "status": "success",
-            "event": "customer.subscription.updated",
-            "subscription_id": subscription_id,
-            "status": status
-        }
-    
-    except Exception as e:
-        logger.error(f"Error handling subscription updated: {e}")
-        raise
-
-async def handle_subscription_deleted(subscription):
-    """
-    Handle customer.subscription.deleted event.
-    """
-    try:
-        subscription_id = subscription.get("id")
-        
-        logger.info(f"Subscription deleted - Subscription ID: {subscription_id}")
-        
-        return {
-            "status": "success",
-            "event": "customer.subscription.deleted",
-            "subscription_id": subscription_id
-        }
-    
-    except Exception as e:
-        logger.error(f"Error handling subscription deleted: {e}")
-        raise
-
-
-
-
-
-
-
+    return {
+        "status": "success", 
+        "event": "payment_intent.payment_failed",
+        "user_id": user_id
+    }
