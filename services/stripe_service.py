@@ -50,20 +50,29 @@ async def create_subscription_checkout_session(
 
 
 async def check_user_subscription_status(user_id: str) -> bool:
-    """Check if user has an active subscription."""
-    result = supabase.table("user_subscriptions").select("id").eq(
+    """Check if user has an active subscription (active or trialing)."""
+    # Check for active or trialing subscriptions
+    result = supabase.table("user_subscriptions").select("id, subscription_status").eq(
         "user_id", user_id
-    ).eq(
-        "subscription_status", "active"
+    ).in_(
+        "subscription_status", ["active", "trialing"]
     ).limit(1).execute()
     
-    return len(result.data) > 0
+    has_active = len(result.data) > 0
+    if result.data:
+        logger.info(f"User {user_id} subscription status: {result.data[0].get('subscription_status')}, has_active: {has_active}")
+    else:
+        logger.info(f"User {user_id} has no active/trialing subscription")
+    
+    return has_active
 
 
 async def get_user_subscription(user_id: str) -> dict:
-    """Get user's active subscription."""
+    """Get user's active subscription (active or trialing)."""
     result = supabase.table("user_subscriptions").select("*").eq(
         "user_id", user_id
+    ).in_(
+        "subscription_status", ["active", "trialing"]
     ).order("created_at", desc=True).limit(1).execute()
     
     return result.data[0] if result.data else None

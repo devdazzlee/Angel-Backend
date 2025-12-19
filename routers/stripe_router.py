@@ -64,8 +64,14 @@ async def check_subscription_status(
     """Check if user has an active subscription."""
     user = http_request.state.user
     user_id = user["id"]
+    user_email = user.get("email", "unknown")
+    
+    logger.info(f"Checking subscription status for user {user_id} ({user_email})")
+    
     has_active = await check_user_subscription_status(user_id)
     subscription = await get_user_subscription(user_id) if has_active else None
+    
+    logger.info(f"Subscription check result for user {user_id}: has_active={has_active}, subscription={subscription}")
     
     return {
         "success": True,
