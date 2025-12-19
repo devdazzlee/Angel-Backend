@@ -2138,41 +2138,6 @@ async def get_angel_reply(user_msg, history, session_data=None):
     current_phase = session_data.get("current_phase", "KYC") if session_data else "KYC"
     asked_q = session_data.get("asked_q", "KYC.01") if session_data else "KYC.01"
     
-    # TEST FEATURE: Jump from BUSINESS_PLAN.02 to BUSINESS_PLAN.44 (for testing only)
-    if session_data and user_msg and user_msg.get("content"):
-        user_content = user_msg.get("content", "").strip().lower()
-        current_asked_q = session_data.get("asked_q", "")
-        
-        # Check if user is on question 2 and wants to test jump to question 44
-        if (current_asked_q == "BUSINESS_PLAN.02" and 
-            current_phase == "BUSINESS_PLAN" and
-            user_content in ["test jump", "jump to 44", "skip to 44", "test skip", "goto 44"]):
-            
-            print(f"🧪 TEST MODE: Jumping from {current_asked_q} to BUSINESS_PLAN.44")
-            
-            # Update session to question 44
-            from services.session_service import patch_session
-            session_id = session_data.get("id")
-            user_id = session_data.get("user_id")
-            
-            if session_id and user_id:
-                await patch_session(session_id, user_id, {
-                    "asked_q": "BUSINESS_PLAN.44",
-                    "answered_count": 43  # Set to 43 since we're jumping to 44
-                })
-                
-                session_data["asked_q"] = "BUSINESS_PLAN.44"
-                session_data["answered_count"] = 43
-            
-            # Return the question 44 content
-            return {
-                "reply": "🧪 **TEST MODE ACTIVATED** - Jumped to Question 44\n\nWhat is your biggest concern or fear about launching this business, and how do you plan to address it?",
-                "web_search_status": {"is_searching": False, "query": None},
-                "immediate_response": None,
-                "transition_phase": None,
-                "tag": "BUSINESS_PLAN.44"
-            }
-    
     # DISABLED: Critiquing feedback was too aggressive and causing false positives
     # Words like "faster" in "scale faster" were triggering unrealistic assumptions check
     # if user_msg and user_msg.get("content"):
