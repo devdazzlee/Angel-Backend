@@ -62,3 +62,4 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 GRANT EXECUTE ON FUNCTION check_active_subscription(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION check_active_subscription(UUID) TO service_role;
 
+

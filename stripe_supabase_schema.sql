@@ -80,3 +80,4 @@ WHERE table_name = 'user_payments'
 ORDER BY ordinal_position;
 
 
+

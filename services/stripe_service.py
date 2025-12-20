@@ -68,11 +68,9 @@ async def check_user_subscription_status(user_id: str) -> bool:
 
 
 async def get_user_subscription(user_id: str) -> dict:
-    """Get user's active subscription (active or trialing)."""
+    """Get user's subscription (any status)."""
     result = supabase.table("user_subscriptions").select("*").eq(
         "user_id", user_id
-    ).in_(
-        "subscription_status", ["active", "trialing"]
     ).order("created_at", desc=True).limit(1).execute()
     
     return result.data[0] if result.data else None
