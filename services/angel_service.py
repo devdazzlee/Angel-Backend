@@ -1507,25 +1507,47 @@ def inject_missing_tag(reply, session_data=None):
         # This is a command response, don't inject a tag - stay on current question
         return reply
     
+    # Check if this is a guidance/reminder message (e.g., "I understand you'd like to move forward")
+    # These should get the CURRENT question tag, not the next one
+    guidance_indicators = [
+        "I understand you'd like to move forward",
+        "it's important that we complete each question",
+        "We're currently on",
+        "Let's continue with the current question",
+        "Please provide an answer to the current question"
+    ]
+    
+    is_guidance_message = any(indicator in reply for indicator in guidance_indicators)
+    
     # Determine the question number to inject
-    # When AI asks a new question without a tag, inject the NEXT question number
     current_phase = "KYC"  # Default
     question_num = "01"    # Default
+    current_asked_q = "KYC.01"  # Default
     
     if session_data:
         current_phase = session_data.get("current_phase", "KYC")
-        asked_q = session_data.get("asked_q", "KYC.01")
-        if "." in asked_q:
-            phase, num = asked_q.split(".")
+        current_asked_q = session_data.get("asked_q", "KYC.01")
+        if "." in current_asked_q:
+            phase, num = current_asked_q.split(".")
             current_phase = phase
-            # INCREMENT to get the NEXT question number (since user just answered current question)
-            try:
-                next_num = int(num) + 1
-                question_num = f"{next_num:02d}"  # Format as 01, 02, 03, etc.
-            except (ValueError, TypeError):
-                question_num = num  # Fallback to current if parsing fails
+            if is_guidance_message:
+                # For guidance messages, use CURRENT question (don't increment)
+                question_num = num
+            else:
+                # For new questions, INCREMENT to get the NEXT question number
+                try:
+                    next_num = int(num) + 1
+                    question_num = f"{next_num:02d}"  # Format as 01, 02, 03, etc.
+                except (ValueError, TypeError):
+                    question_num = num  # Fallback to current if parsing fails
     
-    # If this looks like a question (contains ?), inject a tag
+    # If this is a guidance message without a question, inject CURRENT question tag at the end
+    if is_guidance_message and "?" not in reply:
+        tag = f"[[Q:{current_asked_q}]]"
+        # Add tag at the end of the reply
+        return f"{reply}\n\n{tag}"
+    
+    # If this looks like a question (contains ?), inject a tag with NEXT question number
     if "?" in reply and len(reply.strip()) > 10:
         tag = f"[[Q:{current_phase}.{question_num}]]"
         # Insert tag at the beginning of the first sentence that contains a question
@@ -1890,6 +1912,7 @@ def validate_question_answer(user_msg, session_data, history):
         
         # Block these commands in KYC phase
         if any(user_msg_lower.startswith(cmd) for cmd in blocked_commands):
+            # CRITICAL: Include the current question tag so the system knows what question to display
             return {
                 "reply": f"""I understand you'd like to use helper tools, but during the KYC phase, it's important that you provide direct answers to help me understand your background and goals.
 
@@ -1897,7 +1920,9 @@ Please provide a direct answer to the current question. This will help me person
 
 The helper tools (Draft, Support, Scrapping, Kickstart, Contact) will be available in the Business Planning phase where they can be more helpful for complex business questions.
 
-For now, please share your thoughts directly about the current question.""",
+For now, please share your thoughts directly about the current question.
+
+[[Q:{asked_q}]]""",
                 "web_search_status": {"is_searching": False, "query": None, "completed": False}
             }
     else:
@@ -1914,42 +1939,9 @@ For now, please share your thoughts directly about the current question.""",
         if any(user_msg_lower.startswith(cmd) for cmd in allowed_commands):
             return None
     
-    # Check for attempts to skip or manipulate the conversation
-    skip_indicators = [
-        "skip", "next", "move on", "continue", "go to next", "next question",
-        "i don't want to answer", "i'll answer later", "not now", "maybe later",
-        "i'm done", "finished", "complete", "that's enough", "no more questions"
-    ]
-    
-    if any(indicator in user_msg_lower for indicator in skip_indicators):
-        # Get the current question context
-        current_question_num = "1"
-        if "." in asked_q:
-            try:
-                current_question_num = asked_q.split(".")[1]
-            except:
-                pass
-        
-        # Create phase-specific message
-        if current_phase == "KYC":
-            help_message = """Please provide a direct answer to the current question. This will help me personalize your experience and provide the most relevant guidance for your specific situation."""
-        else:
-            help_message = """If you're unsure about how to answer, you can use:
-- **Support** - for guided help with the question
-- **Draft** - for me to help create an answer based on what you've shared so far"""
-        
-        return {
-            "reply": f"""I understand you'd like to move forward, but it's important that we complete each question to ensure I can provide you with the best possible guidance.
-
-We're currently on question {current_question_num} of the {current_phase} phase. Each question is designed to help me understand your specific situation and provide personalized advice.
-
-Please provide an answer to the current question so we can continue building your comprehensive business plan together. Your detailed responses will help me tailor the guidance specifically for your needs.
-
-{help_message}
-
-Let's continue with the current question.""",
-            "web_search_status": {"is_searching": False, "query": None, "completed": False}
-        }
+    # REMOVED: Skip detection validation - let the AI model handle this naturally through its prompts
+    # The AI model is trained to handle skip attempts and guide users appropriately
+    # Hardcoded validation was blocking valid answers that happened to contain words like "next"
     
     # Check if user is asking clarifying questions about the current question (these are allowed)
     clarifying_questions = [
@@ -2063,6 +2055,7 @@ def validate_session_state(session_data, history):
 - **Draft** - for me to help create an answer based on what you've shared so far
 - **Scrapping** - to refine and polish your existing text"""
         
+        # CRITICAL: Include the current question tag so the system knows what question to display
         return {
             "reply": f"""I notice there might be a discrepancy in our conversation history. To ensure I can provide you with the most accurate and personalized guidance, we need to make sure we've properly addressed all questions.
 
@@ -2072,7 +2065,9 @@ Your detailed responses are essential for creating a tailored business strategy 
 
 {help_message}
 
-Let's continue with the current question.""",
+Let's continue with the current question.
+
+[[Q:{asked_q}]]""",
             "web_search_status": {"is_searching": False, "query": None, "completed": False}
         }
     
@@ -2118,20 +2113,21 @@ async def get_angel_reply(user_msg, history, session_data=None):
     
     # KYC completion check removed - now triggered immediately after final answer
     
-    # Validate that user is not trying to skip questions
-    validation_result = validate_question_answer(user_msg, session_data, history)
-    if validation_result:
-        return validation_result
+    # DISABLED: Question validation - let the AI model handle skip attempts and flow naturally
+    # The AI model is trained to guide users appropriately without hardcoded validation blocking
+    # validation_result = validate_question_answer(user_msg, session_data, history)
+    # if validation_result:
+    #     return validation_result
     
     # Debug logging for session state
     if session_data:
         print(f"🔍 DEBUG - Session State: phase={session_data.get('current_phase')}, asked_q={session_data.get('asked_q')}, answered_count={session_data.get('answered_count')}")
     
-    # Validate session state integrity
-    session_validation = validate_session_state(session_data, history)
-    if session_validation:
-        print(f"🔍 DEBUG - Session validation triggered: {session_validation.get('reply', '')[:100]}...")
-        return session_validation
+    # DISABLED: Session state validation - let the AI model handle flow naturally
+    # session_validation = validate_session_state(session_data, history)
+    # if session_validation:
+    #     print(f"🔍 DEBUG - Session validation triggered: {session_validation.get('reply', '')[:100]}...")
+    #     return session_validation
     
     # Define formatting instruction at the top to avoid UnboundLocalError
     # Get current phase and question info for Business Plan numbering
