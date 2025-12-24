@@ -2287,6 +2287,8 @@ Do NOT include question numbers, progress percentages, or step counts in your re
         r'start.*question (\d+)',
         r'jump.*question (\d+)',
         r'begin.*question (\d+)',
+        r'skip.*question (\d+)',  # Added for skip functionality
+        r'skip to (\d+)',  # Added for skip functionality (simpler pattern)
     ]
     
     for pattern in patterns:
@@ -2338,8 +2340,8 @@ Do NOT include question numbers, progress percentages, or step counts in your re
             # Update session to start from this question
             target_tag = f"BUSINESS_PLAN.{target_question_num:02d}"
             session_data["asked_q"] = target_tag
-            print(f"🎯 Starting from question {target_question_num} based on uploaded plan analysis")
-            print(f"📋 Missing questions to answer: {missing_questions}")
+            print(f"🎯 Jump/Skip detected: Starting from question {target_question_num}")
+            print(f"📋 Missing questions to answer: {missing_questions if missing_questions else 'None (direct skip for testing)'}")
             
             # Generate dynamic question for missing information
             reply_content = await generate_dynamic_business_question(
