@@ -1,19 +1,30 @@
 from fastapi import APIRouter
 from fastapi import HTTPException
+import logging
+
+logger = logging.getLogger(__name__)
 from schemas.auth_schemas import (
     SignUpSchema, 
     SignInSchema, 
     ResetPasswordSchema, 
     UpdatePasswordSchema,
-    RefreshTokenSchema
+    RefreshTokenSchema,
+    AcceptTermsSchema,
+    AcceptPrivacySchema
 )
 from services.auth_service import (
     create_user,
     authenticate_user,
     send_reset_password_email,
     update_password,
-    refresh_session
+    refresh_session,
+    accept_terms,
+    accept_privacy,
+    send_confirmation_email_after_acceptance,
+    check_acceptance_status
 )
+from middlewares.auth import verify_auth_token
+from fastapi import Depends, Request
 
 auth_router = APIRouter()
 
@@ -78,3 +89,83 @@ def refresh_token(token: RefreshTokenSchema):
                     "message": error_message
                 }
             )
+
+@auth_router.post("/accept-terms")
+async def accept_terms_endpoint(
+    request: Request,
+    data: AcceptTermsSchema,
+    _: None = Depends(verify_auth_token)
+):
+    """Accept Terms and Conditions. Returns True if both Terms and Privacy are now accepted."""
+    try:
+        user_id = request.state.user["id"]
+        both_accepted = await accept_terms(user_id, data.name, data.date)
+        
+        # If both are now accepted, send confirmation email
+        if both_accepted:
+            try:
+                await send_confirmation_email_after_acceptance(user_id)
+            except Exception as email_error:
+                logger.warning(f"Failed to send confirmation email after acceptance: {email_error}")
+                # Don't fail the request if email fails
+        
+        return {
+            "success": True,
+            "message": "Terms and Conditions accepted",
+            "result": {
+                "terms_accepted": True,
+                "both_accepted": both_accepted
+            }
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to accept terms: {str(exc)}") from exc
+
+@auth_router.post("/accept-privacy")
+async def accept_privacy_endpoint(
+    request: Request,
+    data: AcceptPrivacySchema,
+    _: None = Depends(verify_auth_token)
+):
+    """Accept Privacy Policy. Returns True if both Terms and Privacy are now accepted."""
+    try:
+        user_id = request.state.user["id"]
+        both_accepted = await accept_privacy(user_id, data.name, data.date)
+        
+        # If both are now accepted, send confirmation email
+        if both_accepted:
+            try:
+                await send_confirmation_email_after_acceptance(user_id)
+            except Exception as email_error:
+                logger.warning(f"Failed to send confirmation email after acceptance: {email_error}")
+                # Don't fail the request if email fails
+        
+        return {
+            "success": True,
+            "message": "Privacy Policy accepted",
+            "result": {
+                "privacy_accepted": True,
+                "both_accepted": both_accepted
+            }
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to accept privacy: {str(exc)}") from exc
+
+@auth_router.get("/acceptance-status")
+async def get_acceptance_status(
+    request: Request,
+    _: None = Depends(verify_auth_token)
+):
+    """Check if user has accepted both Terms and Privacy Policy."""
+    try:
+        user_id = request.state.user["id"]
+        status = await check_acceptance_status(user_id)
+        return {
+            "success": True,
+            "result": status
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to check acceptance status: {str(exc)}") from exc

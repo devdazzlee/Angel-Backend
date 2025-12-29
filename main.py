@@ -50,6 +50,7 @@ origins = [
     "https://founderport.ai",
     "https://founderport.ai/",
     "http://localhost:3000",
+    "http://localhost:3001",
     "http://localhost",
     "http://localhost:8080",
     "https://founder-ai-hkh6fgd8abangza5.canadacentral-01.azurewebsites.net",

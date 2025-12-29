@@ -28,7 +28,7 @@ class CreateSubscriptionRequest(BaseModel):
     price_id: Optional[str] = None
     success_url: str
     cancel_url: str
-    amount: Optional[int] = 4999
+    amount: Optional[int] = 2000
 
 
 @router.post("/create-subscription")
@@ -101,6 +101,7 @@ async def cancel_subscription(
     """Cancel user's subscription at period end."""
     user = http_request.state.user
     user_id = user["id"]
+    user_email = user.get("email")
     subscription = await get_user_subscription(user_id)
     
     if not subscription:
@@ -114,11 +115,22 @@ async def cancel_subscription(
     # Update database with cancel_at_period_end flag
     from db.supabase import supabase
     from datetime import datetime
+    from services.email_service import send_subscription_cancellation_email
     
     update_result = supabase.table("user_subscriptions").update({
         "cancel_at_period_end": True,
         "updated_at": datetime.utcnow().isoformat()
     }).eq("user_id", user_id).execute()
+    
+    # Send cancellation email
+    try:
+        if user_email and subscription.get("current_period_end"):
+            await send_subscription_cancellation_email(
+                user_email=user_email,
+                subscription_end_date=subscription["current_period_end"]
+            )
+    except Exception as e:
+        logger.error(f"Failed to send cancellation email: {str(e)}")
     
     logger.info(f"Subscription canceled at period end for user {user_id}")
     

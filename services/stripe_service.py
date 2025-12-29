@@ -4,6 +4,15 @@ import os
 from db.supabase import supabase
 from datetime import datetime
 from dotenv import load_dotenv
+from services.email_service import (
+    send_subscription_confirmation_email,
+    send_subscription_renewal_receipt_email,
+    send_subscription_expiring_email,
+    send_subscription_expired_email,
+    send_billing_problem_email,
+    send_subscription_cancellation_email,
+    get_payment_method_last4
+)
 
 load_dotenv()
 
@@ -17,7 +26,7 @@ async def create_subscription_checkout_session(
     success_url: str,
     cancel_url: str,
     price_id: str = None,
-    amount: int = 4999
+    amount: int = 2000
 ):
     """Create a Stripe checkout session for monthly subscription."""
     
@@ -140,6 +149,38 @@ async def handle_checkout_completed(session: dict):
         subscription = stripe.Subscription.retrieve(subscription_id)
         await process_subscription(subscription, user_id)
         
+        # Send subscription confirmation email
+        try:
+            # Get user email
+            user_response = supabase.auth.admin.get_user_by_id(user_id)
+            if user_response and user_response.user and user_response.user.email:
+                user_email = user_response.user.email
+                
+                # Get subscription details
+                items = subscription.get("items", {}).get("data", [])
+                price = items[0].get("price") if items else {}
+                amount = (price.get("unit_amount", 0) / 100) if price else 0
+                currency = price.get("currency", "usd") if price else "usd"
+                
+                # Get payment method last4
+                customer_id = subscription.get("customer")
+                last4 = await get_payment_method_last4(customer_id) if customer_id else None
+                
+                # Format dates
+                period_start = datetime.fromtimestamp(subscription["current_period_start"]).isoformat()
+                period_end = datetime.fromtimestamp(subscription["current_period_end"]).isoformat()
+                
+                await send_subscription_confirmation_email(
+                    user_email=user_email,
+                    amount=amount,
+                    currency=currency,
+                    subscription_start_date=period_start,
+                    subscription_end_date=period_end,
+                    last4=last4
+                )
+        except Exception as e:
+            logger.error(f"Failed to send subscription confirmation email: {str(e)}")
+        
         return {
             "status": "success",
         "event": "checkout.session.completed",
@@ -167,6 +208,22 @@ async def handle_subscription_updated(subscription: dict):
     if user_id:
         await process_subscription(subscription, user_id)
         
+        # Check if subscription is expiring (cancel_at_period_end is True)
+        if subscription.get("cancel_at_period_end", False):
+            try:
+                user_response = supabase.auth.admin.get_user_by_id(user_id)
+                if user_response and user_response.user and user_response.user.email:
+                    user_email = user_response.user.email
+                    period_end = datetime.fromtimestamp(subscription.get("current_period_end", 0)).isoformat() if subscription.get("current_period_end") else None
+                    
+                    if period_end:
+                        await send_subscription_expiring_email(
+                            user_email=user_email,
+                            subscription_end_date=period_end
+                        )
+            except Exception as e:
+                logger.error(f"Failed to send subscription expiring email: {str(e)}")
+        
         return {
             "status": "success",
             "event": "customer.subscription.updated",
@@ -188,6 +245,21 @@ async def handle_subscription_deleted(subscription: dict):
             "cancel_at_period_end": False
         }
         await create_or_update_subscription(user_id, subscription_data)
+        
+        # Send subscription expired email
+        try:
+            user_response = supabase.auth.admin.get_user_by_id(user_id)
+            if user_response and user_response.user and user_response.user.email:
+                user_email = user_response.user.email
+                period_end = datetime.fromtimestamp(subscription.get("current_period_end", 0)).isoformat() if subscription.get("current_period_end") else None
+                
+                if period_end:
+                    await send_subscription_expired_email(
+                        user_email=user_email,
+                        subscription_end_date=period_end
+                    )
+        except Exception as e:
+            logger.error(f"Failed to send subscription expired email: {str(e)}")
     
     logger.info(f"Subscription canceled: {subscription['id']}")
     
@@ -207,6 +279,42 @@ async def handle_invoice_payment_succeeded(invoice: dict):
         user_id = subscription["metadata"].get("user_id")
         if user_id:
             await process_subscription(subscription, user_id)
+            
+            # Send renewal receipt email (only if not the first payment)
+            try:
+                # Check if this is a renewal (not initial subscription)
+                # If subscription was created more than 1 day ago, it's a renewal
+                subscription_created = datetime.fromtimestamp(subscription.get("created", 0))
+                days_since_creation = (datetime.now() - subscription_created).days
+                
+                if days_since_creation > 1:  # This is a renewal
+                    # Get user email
+                    user_response = supabase.auth.admin.get_user_by_id(user_id)
+                    if user_response and user_response.user and user_response.user.email:
+                        user_email = user_response.user.email
+                        
+                        # Get invoice details
+                        amount = (invoice.get("amount_paid", 0) / 100) if invoice.get("amount_paid") else 0
+                        currency = invoice.get("currency", "usd")
+                        
+                        # Get payment method last4
+                        customer_id = subscription.get("customer")
+                        last4 = await get_payment_method_last4(customer_id) if customer_id else None
+                        
+                        # Format dates
+                        period_start = datetime.fromtimestamp(subscription["current_period_start"]).isoformat()
+                        period_end = datetime.fromtimestamp(subscription["current_period_end"]).isoformat()
+                        
+                        await send_subscription_renewal_receipt_email(
+                            user_email=user_email,
+                            amount=amount,
+                            currency=currency,
+                            subscription_start_date=period_start,
+                            subscription_end_date=period_end,
+                            last4=last4
+                        )
+            except Exception as e:
+                logger.error(f"Failed to send renewal receipt email: {str(e)}")
     
     logger.info(f"Invoice payment succeeded: {invoice['id']}")
     
@@ -234,6 +342,24 @@ async def handle_invoice_payment_failed(invoice: dict):
                 "cancel_at_period_end": False
             }
             await create_or_update_subscription(user_id, subscription_data)
+            
+            # Send billing problem email
+            try:
+                user_response = supabase.auth.admin.get_user_by_id(user_id)
+                if user_response and user_response.user and user_response.user.email:
+                    user_email = user_response.user.email
+                    amount = (invoice.get("amount_due", 0) / 100) if invoice.get("amount_due") else 0
+                    currency = invoice.get("currency", "usd")
+                    invoice_url = invoice.get("hosted_invoice_url")
+                    
+                    await send_billing_problem_email(
+                        user_email=user_email,
+                        amount=amount,
+                        currency=currency,
+                        invoice_url=invoice_url
+                    )
+            except Exception as e:
+                logger.error(f"Failed to send billing problem email: {str(e)}")
     
     logger.warning(f"Invoice payment failed: {invoice['id']}")
     

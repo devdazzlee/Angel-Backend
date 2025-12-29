@@ -39,3 +39,13 @@ class UpdatePasswordSchema(BaseModel):
 
 class RefreshTokenSchema(BaseModel):
     refresh_token: str
+
+
+class AcceptTermsSchema(BaseModel):
+    name: str = Field(..., min_length=1, description="User's full name for acceptance record")
+    date: str = Field(..., description="Acceptance date in YYYY-MM-DD format")
+
+
+class AcceptPrivacySchema(BaseModel):
+    name: str = Field(..., min_length=1, description="User's full name for acceptance record")
+    date: str = Field(..., description="Acceptance date in YYYY-MM-DD format")
