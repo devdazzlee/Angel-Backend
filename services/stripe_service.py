@@ -26,7 +26,7 @@ async def create_subscription_checkout_session(
     success_url: str,
     cancel_url: str,
     price_id: str = None,
-    amount: int = 2000
+    amount: int = 2000  # $20/month in cents
 ):
     """Create a Stripe checkout session for monthly subscription."""
     
@@ -34,11 +34,11 @@ async def create_subscription_checkout_session(
         "price_data": {
             "currency": "usd",
             "product_data": {
-                "name": "Angel AI Premium",
-                "description": "Monthly subscription for premium access to Angel AI"
+                "name": "Founderport Premium",
+                "description": "Monthly subscription for Founderport - Roadmapping and Implementation phases"
             },
             "recurring": {"interval": "month"},
-            "unit_amount": amount
+            "unit_amount": amount  # $20/month
         },
         "quantity": 1
     }]

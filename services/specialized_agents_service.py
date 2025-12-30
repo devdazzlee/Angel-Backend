@@ -74,8 +74,17 @@ class LegalComplianceAgent(SpecializedAgent):
     async def provide_expert_guidance(self, question: str, business_context: Dict[str, Any], conversation_history: List[Dict], skip_web_search: bool = False) -> Dict[str, Any]:
         """Provide legal and compliance guidance"""
         
+        # Extract both business location and offering location for comprehensive legal considerations
+        business_location = business_context.get('location', 'United States')
+        offering_location = business_context.get('offering_location', '')
+        
+        # Build research query considering both locations
+        location_context = business_location
+        if offering_location and offering_location.lower() not in ['local', business_location.lower()]:
+            location_context = f"{business_location} (business location) and {offering_location} (offering availability)"
+        
         # Conduct specialized research (skip during implementation phase startup for speed)
-        research_query = f"business formation legal requirements {business_context.get('industry', '')} {business_context.get('location', '')}"
+        research_query = f"business formation legal requirements {business_context.get('industry', '')} {location_context}"
         research_results = await self.conduct_research(research_query, business_context, skip_web_search=skip_web_search)
         
         # Generate expert guidance
@@ -84,8 +93,14 @@ class LegalComplianceAgent(SpecializedAgent):
         
         Business Context:
         - Industry: {business_context.get('industry', 'General Business')}
-        - Location: {business_context.get('location', 'United States')}
+        - Business Location (where business resides): {business_location}
+        - Business Offering Location (where products/services available): {offering_location if offering_location else 'Same as business location'}
         - Business Type: {business_context.get('business_type', 'Startup')}
+        
+        CRITICAL LEGAL CONSIDERATIONS:
+        You MUST factor in BOTH locations for legal/regulatory compliance:
+        1. Business Location ({business_location}): Determines business formation requirements, state/local taxes, business registration, and local licensing
+        2. Offering Location ({offering_location if offering_location else business_location}): Determines sales tax obligations, interstate commerce regulations, international trade compliance (if Global), and multi-jurisdictional licensing requirements
         
         Research Results:
         {research_results}
@@ -93,12 +108,13 @@ class LegalComplianceAgent(SpecializedAgent):
         Question/Task: {question}
         
         Provide comprehensive legal guidance including:
-        1. Required business structure options (LLC, Corporation, Partnership, etc.)
-        2. Licensing and permit requirements
-        3. Compliance obligations
-        4. Risk mitigation strategies
-        5. Timeline and costs
-        6. Local service provider recommendations
+        1. Required business structure options (LLC, Corporation, Partnership, etc.) - based on business location
+        2. Licensing and permit requirements - consider both business location AND offering location jurisdictions
+        3. Compliance obligations - address multi-jurisdictional requirements if offering location differs from business location
+        4. Tax obligations - sales tax, income tax, and nexus requirements for both locations
+        5. Risk mitigation strategies - account for regulatory differences between locations
+        6. Timeline and costs - factor in compliance costs for all relevant jurisdictions
+        7. Service provider recommendations - prioritize providers familiar with both locations if different
         
         Format your response as structured guidance with clear action items.
         """

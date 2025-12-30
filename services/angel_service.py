@@ -242,9 +242,9 @@ THOUGHT_STARTERS_BY_TAG = {
         "Which parts of your business would be hardest for a competitor to copy?"
     ],
     "BUSINESS_PLAN.08": [
-        "Is your idea still being planned, tested, or already ready to sell?",
-        "What have you done so far to move it forward?",
-        "What feedback have you received, and what did you learn from it?"
+        "Where will you sell your services?",
+        "What channels or platforms will you use to reach customers?",
+        "How will your sales location affect your regulatory requirements, marketing strategy, and operations?"
     ],
     "BUSINESS_PLAN.09": [
         "What kind of people or businesses will buy from you?",
@@ -1137,47 +1137,58 @@ def identify_support_areas(session_data, history):
     
     return support_areas
 
+def compact_educational_content(reply):
+    """Compact educational content with labels and bullet points"""
+    if not reply:
+        return reply
+    
+    # Remove "Areas Where You May Need Additional Support" section completely
+    reply = re.sub(r'\n\n\*\*🎯 Areas Where You May Need Additional Support:\*\*\n.*?Consider using \'Support\'.*?\n', '', reply, flags=re.DOTALL)
+    reply = re.sub(r'\n\n🎯 Areas Where You May Need Additional Support:.*?Consider using \'Support\'.*?\n', '', reply, flags=re.DOTALL)
+    reply = re.sub(r'Based on your responses, I\'ve identified these areas where you might benefit from deeper guidance:.*?Consider using \'Support\'.*?\n', '', reply, flags=re.DOTALL)
+    
+    # Compact spacing between educational paragraphs (reduce excessive spacing)
+    # Replace 3+ newlines with 2, but preserve spacing around Thought Starter and Quick Tip
+    lines = reply.split('\n')
+    compacted_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip().lower()
+        
+        # Preserve Thought Starter and Quick Tip sections with proper spacing
+        if 'thought starter' in stripped or 'quick tip' in stripped or 'pro tip' in stripped:
+            # Ensure blank line before Thought Starter/Quick Tip if not present
+            if compacted_lines and compacted_lines[-1].strip():
+                compacted_lines.append('')
+            compacted_lines.append(line)
+            i += 1
+            continue
+        
+        # Skip excessive blank lines (more than 1 consecutive blank line)
+        if not line.strip():
+            if compacted_lines and not compacted_lines[-1].strip():
+                i += 1
+                continue
+        
+        compacted_lines.append(line)
+        i += 1
+    
+    reply = '\n'.join(compacted_lines)
+    
+    # Clean up remaining excessive spacing (3+ newlines to 2)
+    reply = re.sub(r'\n{3,}', '\n\n', reply)
+    
+    return reply
+
 def add_proactive_support_guidance(reply, session_data, history):
     """Add proactive support guidance based on identified areas needing help"""
     
-    # Don't add support guidance in KYC phase
-    if session_data and session_data.get("current_phase") == "KYC":
-        return reply
+    # REMOVED: "Areas Where You May Need Additional Support" section per user request
+    # Only preserve Thought Starter and Quick Tip sections
     
-    # Only add support guidance if not already present in the reply
-    tip_patterns = [
-        "💡 Quick Tip:",
-        "💡 **Quick Tip**:",
-        "💡 **Pro Tip**:",
-        "💡 Quick tip:",
-        "💡 **Quick tip**:",
-        "💡 **Pro tip**:",
-        "Quick Tip:",
-        "**Quick Tip**:",
-        "**Pro Tip**:",
-        "Quick tip:",
-        "**Quick tip**:",
-        "**Pro tip**:",
-        "🎯 Areas Where You May Need Additional Support:"
-    ]
-    
-    has_existing_guidance = any(pattern in reply for pattern in tip_patterns)
-    
-    if has_existing_guidance:
-        return reply
-    
-    support_areas = identify_support_areas(session_data, history)
-    
-    if support_areas and len(support_areas) > 0:
-        support_guidance = "\n\n**🎯 Areas Where You May Need Additional Support:**\n"
-        support_guidance += "Based on your responses, I've identified these areas where you might benefit from deeper guidance:\n\n"
-        
-        for area in support_areas:
-            support_guidance += f"• **{area}** - Consider using 'Support' for detailed guidance in this area\n"
-        
-        support_guidance += "\n💡 **Pro Tip:** Use 'Support' followed by any of these areas for comprehensive guidance and strategic questions to help you think through these topics more thoroughly."
-        
-        reply += support_guidance
+    # Remove any existing "Areas Where You May Need Additional Support" content
+    reply = compact_educational_content(reply)
     
     return reply
 
@@ -1198,8 +1209,8 @@ def ensure_proper_question_formatting(reply, session_data=None):
     for pattern, replacement in formatting_patterns:
         reply = re.sub(pattern, replacement, reply)
     
-    # Ensure proper spacing between sections
-    reply = re.sub(r'\n{3,}', '\n\n', reply)
+    # Compact educational content (remove "Areas Where You May Need Additional Support", reduce spacing)
+    reply = compact_educational_content(reply)
     
     reply = apply_business_plan_thought_starter(reply, session_data)
     
@@ -1632,7 +1643,7 @@ Once you're ready, we'll begin the Business Planning phase where we'll dive deep
         "transition_phase": "KYC_TO_BUSINESS_PLAN",
         "patch_session": {
             "current_phase": "BUSINESS_PLAN_INTRO",  # Intermediate phase before actual questions
-            "asked_q": "KYC.19_ACK",  # Keep on KYC until user confirms ready
+            "asked_q": "KYC.20_ACK",  # Keep on KYC until user confirms ready
             "answered_count": session_data.get("answered_count", 0)
         },
         "show_accept_modify": button_detection.get("show_buttons", False),
@@ -2663,10 +2674,10 @@ DO NOT repeat "{asked_q}" - the user has already answered it.
         if "." in asked_q:
             try:
                 current_num = int(asked_q.split(".")[1])
-                # Prevent going beyond KYC.19 (last KYC question)
-                if current_phase == "KYC" and current_num >= 19:
-                    # Don't increment beyond 19 for KYC
-                    next_question_num = "19"
+                # Prevent going beyond KYC.20 (last KYC question)
+                if current_phase == "KYC" and current_num >= 20:
+                    # Don't increment beyond 20 for KYC
+                    next_question_num = "20"
                 else:
                     next_question_num = f"{current_num + 1:02d}"
             except (ValueError, IndexError):
@@ -3205,9 +3216,9 @@ def get_question_topic(current_question):
     elif any(keyword in current_question for keyword in ['intellectual property', 'patents', 'trademarks', 'copyrights', 'proprietary technology', 'unique processes', 'formulas', 'legal protections']):
         print("🔍 DEBUG - Detected intellectual property topic")
         return "intellectual property"
-    elif any(keyword in current_question for keyword in ['product development timeline', 'working prototype', 'mvp', 'milestones', 'launch', 'validate your concept', 'full development']):
-        print("🔍 DEBUG - Detected product development topic")
-        return "product development"
+    elif any(keyword in current_question for keyword in ['where will you sell', 'sales location', 'sales channels', 'where will you sell your services', 'distribution channels', 'sales platforms']):
+        print("🔍 DEBUG - Detected sales location topic")
+        return "sales location"
     else:
         print("🔍 DEBUG - No specific topic detected, using default business planning")
         return "business planning"
@@ -3372,8 +3383,47 @@ This data can help you craft a comprehensive answer for your {location} market."
         return generate_operational_requirements_draft(business_context, history)
     
     elif any(keyword in current_question for keyword in ['staff', 'hiring', 'team', 'employee', 'operational needs', 'initial staff', 'staffing needs']):
-        # Check if user previously stated they are sole employee
+        # Check if user previously mentioned specific staff (like secretary, assistant, etc.)
         history_text = " ".join([msg.get('content', '') for msg in history if msg.get('role') == 'user']).lower()
+        
+        # Extract previously mentioned staff from history
+        mentioned_staff = []
+        staff_keywords = ['secretary', 'assistant', 'receptionist', 'office manager', 'bookkeeper', 'accountant', 'staff', 'employee', 'worker', 'help']
+        
+        import re
+        for msg in history:
+            if msg.get('role') == 'user':
+                content = msg.get('content', '')
+                content_lower = content.lower()
+                
+                # Look for patterns like "1 office secretary", "1 secretary", "a secretary", "secretary", etc.
+                for keyword in staff_keywords:
+                    # Pattern to match: (number)? (office )? (a/an )? keyword (s)?
+                    # Use word boundaries to avoid partial matches
+                    pattern = r'\b(\d+)?\s*(?:office\s+)?(?:a\s+|an\s+)?' + re.escape(keyword) + r's?\b'
+                    matches = re.finditer(pattern, content_lower)
+                    for match in matches:
+                        full_match = match.group(0)  # The full matched string
+                        number = match.group(1)  # The number group (if present)
+                        
+                        # Extract the full phrase including "office" if present
+                        if number:
+                            # Has a number, include it
+                            staff_mention = f"{number} {full_match.replace(number, '').strip()}"
+                        else:
+                            # No number, use the full match
+                            staff_mention = full_match.strip()
+                        
+                        # Clean up the mention (remove extra spaces, normalize)
+                        staff_mention = re.sub(r'\s+', ' ', staff_mention).strip()
+                        
+                        # Add to list if not already present
+                        if staff_mention and staff_mention not in mentioned_staff:
+                            mentioned_staff.append(staff_mention)
+                            print(f"🔍 DEBUG - Found staff mention in history: '{staff_mention}'")
+                        break  # Only process first match per keyword per message
+        
+        # Check if user previously stated they are sole employee
         if any(phrase in history_text for phrase in ['sole employee', 'only me', 'just me', 'no employees', 'no staff', 'working solo', 'i will be the only', 'i am the only']):
             return f"""Based on your previous answer that you will be the sole employee and owner, here's a draft for your staffing needs:
 
@@ -3397,6 +3447,34 @@ As a sole employee, consider:
 • Long-term plan for when you're ready to hire your first employee
 
 This approach allows you to maintain full control while building the business foundation before expanding your team."""
+        elif mentioned_staff:
+            # User previously mentioned specific staff - reference it
+            staff_list = list(set(mentioned_staff))  # Remove duplicates
+            staff_summary = ", ".join(staff_list[:3])  # Limit to first 3 mentions
+            return f"""Based on your previous answers where you mentioned {staff_summary}, here's a draft for your staffing needs:
+
+**Initial Staffing Structure:**
+You've previously indicated your staffing needs include {staff_summary}. This is a great starting point for your business operations.
+
+**Key Considerations:**
+• {staff_summary} will help support your core business functions
+• Consider the specific roles and responsibilities for each position
+• Think about the qualifications and skills needed for these roles
+• Plan for how these staff members will integrate into your operations
+
+**Operational Integration:**
+• How will {staff_summary} support your daily operations?
+• What systems and processes will you need to manage this team effectively?
+• Consider training needs and onboarding processes
+• Plan for supervision and performance management
+
+**Resource Planning:**
+• Budget for salaries, benefits, and training
+• Workspace requirements for your team
+• Tools and equipment needed for each role
+• Consider part-time vs. full-time arrangements based on your needs
+
+This staffing structure will help you build a strong foundation for your business operations."""
         else:
             return generate_staffing_needs_draft(business_context, history)
     
@@ -3503,18 +3581,24 @@ We believe that every customer deserves solutions that are tailored to their spe
     elif any(keyword in current_question for keyword in ['intellectual property', 'patents', 'trademarks', 'copyrights', 'proprietary technology', 'unique processes', 'formulas', 'legal protections']):
         return generate_intellectual_property_draft(business_context, history)
     
-    elif any(keyword in current_question for keyword in ['product development timeline', 'working prototype', 'mvp', 'milestones', 'launch', 'validate your concept', 'full development']):
+    elif any(keyword in current_question for keyword in ['where will you sell', 'sales location', 'sales channels', 'where will you sell your services', 'distribution channels', 'sales platforms']):
         business_name = business_context.get("business_name", "your business")
         industry = business_context.get("industry", "your industry")
         business_type = business_context.get("business_type", "your business type")
+        sales_location = business_context.get("sales_location", "")
         
-        return f"""Based on your business goals, here's a draft for your product development timeline:
+        return f"""Based on your business goals, here's a draft for where you will sell your services:
 
-**Development Phases:**
-• Phase 1: Concept validation and market research
-• Phase 2: Prototype development and initial testing
-• Phase 3: MVP creation and user feedback
-• Phase 4: Full product development and launch
+**Sales Channels:**
+• Online platforms: Website, e-commerce, social media, online marketplaces
+• Physical locations: Office, retail space, client sites, pop-up locations
+• Hybrid approach: Combination of online and in-person sales
+
+**Regulatory Considerations:**
+• Licensing requirements based on sales location (local, state, federal)
+• Tax obligations for different sales channels
+• Compliance with online sales regulations if applicable
+• Permits needed for physical locations
 
 **Key Milestones:**
 • Complete market research and validation
@@ -3565,8 +3649,8 @@ Focus on validating your concept before full development through market research
     elif any(keyword in recent_text for keyword in ['intellectual property', 'patents', 'trademarks', 'copyrights', 'proprietary technology', 'unique processes', 'formulas', 'legal protections']):
         return "Based on your business needs, here's a draft for your intellectual property strategy: Your business may have intellectual property assets including [patents/trademarks/copyrights] that protect your [unique processes/formulas/technology]. Consider what legal protections are important for your business, including patent applications for innovative processes, trademark registration for your brand, and copyright protection for original content. Focus on identifying your proprietary assets, understanding the legal requirements for protection, and developing a strategy to safeguard your competitive advantages."
     
-    elif any(keyword in recent_text for keyword in ['product development timeline', 'working prototype', 'mvp', 'milestones', 'launch', 'validate your concept', 'full development']):
-        return "Based on your business goals, here's a draft for your product development timeline: Your development timeline should include key milestones such as [prototype development], [MVP creation], [testing and validation], and [full product launch]. Consider what working prototype or MVP you currently have and what milestones you need to reach before launch. Focus on creating a realistic timeline that accounts for development phases, testing periods, and validation steps. Think about how you'll validate your concept before full development and what resources you'll need at each stage."
+    elif any(keyword in recent_text for keyword in ['where will you sell', 'sales location', 'sales channels', 'where will you sell your services', 'distribution channels', 'sales platforms']):
+        return "Based on your business goals, here's a draft for where you will sell your services: Consider the channels and platforms where your target customers are most likely to find and purchase your services. Think about online platforms (website, e-commerce, social media), physical locations (office, retail space, client sites), or hybrid approaches. Consider how your sales location affects regulatory requirements (licensing, permits, tax obligations), marketing strategy (local vs. online marketing, SEO, advertising), and operations (logistics, delivery, customer service). Also consider competitive analysis - where do your competitors sell, and how can you differentiate your sales approach?"
     
     elif any(keyword in recent_text for keyword in ['mission', 'tagline', 'mission statement', 'business stands for']):
         return "Based on your business vision, here's a draft mission statement: [Business name] aims to [core purpose] by [key approach] to [target outcome]. Consider what your business stands for and how you would describe it in one compelling sentence. Think about your core values, purpose, and what makes you unique. Focus on creating a clear, inspiring statement that guides your business decisions and resonates with your target audience."
@@ -4279,15 +4363,18 @@ def extract_business_context_from_history(history):
         if msg["role"] == "assistant":
             content = msg["content"]
             # KYC questions
-            if "[[Q:KYC.11]]" in content:  # Industry question
+            if "[[Q:KYC.12]]" in content:  # Industry question (renumbered from KYC.11)
                 kyc_question_indices["industry"] = i
-                print(f"🔍 DEBUG - Found KYC.11 (industry question) at index {i}")
-            elif "[[Q:KYC.16]]" in content:  # Business structure question
+                print(f"🔍 DEBUG - Found KYC.12 (industry question) at index {i}")
+            elif "[[Q:KYC.17]]" in content:  # Business structure question (renumbered from KYC.16)
                 kyc_question_indices["business_type"] = i
-                print(f"🔍 DEBUG - Found KYC.16 (business type question) at index {i}")
-            elif "[[Q:KYC.10]]" in content:  # Location question
+                print(f"🔍 DEBUG - Found KYC.17 (business type question) at index {i}")
+            elif "[[Q:KYC.10]]" in content:  # Business location question
                 kyc_question_indices["location"] = i
-                print(f"🔍 DEBUG - Found KYC.10 (location question) at index {i}")
+                print(f"🔍 DEBUG - Found KYC.10 (business location question) at index {i}")
+            elif "[[Q:KYC.11]]" in content:  # Business offering location question
+                kyc_question_indices["offering_location"] = i
+                print(f"🔍 DEBUG - Found KYC.11 (business offering location question) at index {i}")
             # Business Plan Question 1 - Business Name (HIGHEST PRIORITY)
             elif "[[Q:BUSINESS_PLAN.01]]" in content or "[[Q:BP.01]]" in content:
                 kyc_question_indices["business_name"] = i
@@ -4306,6 +4393,8 @@ def extract_business_context_from_history(history):
             is_kyc_industry_answer = "industry" in kyc_question_indices and i == kyc_question_indices["industry"] + 1
             is_kyc_business_type_answer = "business_type" in kyc_question_indices and i == kyc_question_indices["business_type"] + 1
             is_kyc_location_answer = "location" in kyc_question_indices and i == kyc_question_indices["location"] + 1
+            is_kyc_offering_location_answer = "offering_location" in kyc_question_indices and i == kyc_question_indices["offering_location"] + 1
+            is_bp_sales_location_answer = "sales_location" in kyc_question_indices and i == kyc_question_indices["sales_location"] + 1
             
             # Extract business name from BP.01 answer (HIGHEST PRIORITY - weight 100)
             if is_bp_name_answer and len(content.strip()) > 2:
@@ -4319,27 +4408,75 @@ def extract_business_context_from_history(history):
                     context_weights["business_name"] = 100
                     print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: BP.01 business name answer (EXACT): '{business_name_answer}' (weight 100)")
             
-            # Extract industry from KYC.11 answer - Use user's EXACT answer
+            # Extract industry from KYC.12 answer - Use user's EXACT answer (renumbered from KYC.11)
             if is_kyc_industry_answer and len(content.strip()) > 2:
                 # Use the user's exact answer - no keyword matching, no hardcoding
                 industry_answer = content.strip()
                 business_context["industry"] = industry_answer
                 context_weights["industry"] = 100
-                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.11 industry answer (EXACT): '{industry_answer}' (weight 100)")
+                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.12 industry answer (EXACT): '{industry_answer}' (weight 100)")
             
-            # Extract business type from KYC.16 answer (HIGHEST PRIORITY)
+            # Extract business type from KYC.17 answer (HIGHEST PRIORITY) (renumbered from KYC.16)
             if is_kyc_business_type_answer and len(content.strip()) > 2:
                 business_type_answer = content.strip()
                 business_context["business_type"] = business_type_answer
                 context_weights["business_type"] = 100
-                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.16 business type answer: '{business_type_answer}' (weight 100)")
+                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.17 business type answer: '{business_type_answer}' (weight 100)")
             
-            # Extract location from KYC.10 answer (HIGHEST PRIORITY)
+            # Extract business location from KYC.10 answer (HIGHEST PRIORITY)
             if is_kyc_location_answer and len(content.strip()) > 2:
                 location_answer = content.strip()
                 business_context["location"] = location_answer
                 context_weights["location"] = 100
-                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.10 location answer: '{location_answer}' (weight 100)")
+                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.10 business location answer: '{location_answer}' (weight 100)")
+            
+            # Extract business offering location from KYC.11 answer (HIGHEST PRIORITY)
+            if is_kyc_offering_location_answer and len(content.strip()) > 2:
+                offering_location_answer = content.strip()
+                business_context["offering_location"] = offering_location_answer
+                context_weights["offering_location"] = 100
+                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.11 business offering location answer: '{offering_location_answer}' (weight 100)")
+            
+            # Extract sales location from BP.08 answer (HIGHEST PRIORITY)
+            if is_bp_sales_location_answer and len(content.strip()) > 2:
+                sales_location_answer = content.strip()
+                business_context["sales_location"] = sales_location_answer
+                context_weights["sales_location"] = 100
+                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: BP.08 sales location answer: '{sales_location_answer}' (weight 100)")
+            
+            # Extract previously mentioned staff (for context in future questions)
+            import re
+            staff_keywords = ['secretary', 'assistant', 'receptionist', 'office manager', 'bookkeeper', 'accountant', 'staff', 'employee', 'worker']
+            for keyword in staff_keywords:
+                # Pattern to match: (number)? (office )? (a/an )? keyword (s)?
+                # Use word boundaries to avoid partial matches
+                pattern = r'\b(\d+)?\s*(?:office\s+)?(?:a\s+|an\s+)?' + re.escape(keyword) + r's?\b'
+                matches = re.finditer(pattern, content_lower)
+                found_match = False
+                for match in matches:
+                    full_match = match.group(0)  # The full matched string
+                    number = match.group(1)  # The number group (if present)
+                    
+                    # Extract the full phrase including "office" if present
+                    if number:
+                        # Has a number, include it
+                        staff_mention = f"{number} {full_match.replace(number, '').strip()}"
+                    else:
+                        # No number, use the full match
+                        staff_mention = full_match.strip()
+                    
+                    # Clean up the mention (remove extra spaces, normalize)
+                    staff_mention = re.sub(r'\s+', ' ', staff_mention).strip()
+                    
+                    # Add to list if not already present
+                    if "staffing_needs" not in business_context:
+                        business_context["staffing_needs"] = []
+                    if staff_mention and staff_mention not in business_context["staffing_needs"]:
+                        business_context["staffing_needs"].append(staff_mention)
+                        print(f"🔍 DEBUG - Found staff mention in extract_business_context: '{staff_mention}'")
+                        found_match = True
+                if found_match:
+                    break  # Only process first keyword match per message
             
             # Extract business name - prioritize domain names and longer names over short responses
             # First check for domain-like names (highest priority - weight 80)
@@ -5823,7 +5960,7 @@ async def generate_next_question(question_tag: str, session_data: dict) -> str:
         "BUSINESS_PLAN.10": "How will you reach your customers (marketing strategy)?",
         "BUSINESS_PLAN.11": "What is your pricing strategy?",
         "BUSINESS_PLAN.12": "What are your estimated startup costs?",
-        "BUSINESS_PLAN.13": "What are your projected sales for the first year?",
+        "BUSINESS_PLAN.13": "Where will your business be located? Why did you choose this location?",
         "BUSINESS_PLAN.14": "What funding do you need and how will you get it?",
         "BUSINESS_PLAN.15": "What are your key operational requirements?",
         "BUSINESS_PLAN.16": "What equipment or technology do you need?",
@@ -5953,6 +6090,60 @@ def generate_staffing_needs_draft(business_context, history):
     business_name = business_context.get("business_name", "your business")
     industry = business_context.get("industry", "your industry")
     business_type = business_context.get("business_type", "your business type")
+    
+    # Check if user previously mentioned specific staff
+    mentioned_staff = business_context.get("staffing_needs", [])
+    
+    # Also extract from history if not in business_context
+    if not mentioned_staff:
+        import re
+        staff_keywords = ['secretary', 'assistant', 'receptionist', 'office manager', 'bookkeeper', 'accountant', 'staff', 'employee', 'worker']
+        for msg in history:
+            if msg.get('role') == 'user':
+                content_lower = msg.get('content', '').lower()
+                for keyword in staff_keywords:
+                    pattern = r'\b(\d+)?\s*(?:office\s+)?(?:a\s+|an\s+)?' + re.escape(keyword) + r's?\b'
+                    matches = re.finditer(pattern, content_lower)
+                    for match in matches:
+                        full_match = match.group(0)
+                        number = match.group(1)
+                        if number:
+                            staff_mention = f"{number} {full_match.replace(number, '').strip()}"
+                        else:
+                            staff_mention = full_match.strip()
+                        staff_mention = re.sub(r'\s+', ' ', staff_mention).strip()
+                        if staff_mention and staff_mention not in mentioned_staff:
+                            mentioned_staff.append(staff_mention)
+                        break
+    
+    # If user previously mentioned specific staff, reference it
+    if mentioned_staff:
+        staff_list = list(set(mentioned_staff))  # Remove duplicates
+        staff_summary = ", ".join(staff_list[:3])  # Limit to first 3 mentions
+        return f"""Based on your previous answers where you mentioned {staff_summary}, here's a draft for your staffing needs:
+
+**Initial Staffing Structure:**
+You've previously indicated your staffing needs include {staff_summary}. This is a great starting point for {business_name}'s operations in the {industry} sector.
+
+**Key Considerations:**
+• {staff_summary} will help support your core {business_type} business functions
+• Consider the specific roles and responsibilities for each position
+• Think about the qualifications and skills needed for these roles in the {industry} industry
+• Plan for how these staff members will integrate into your operations
+
+**Operational Integration:**
+• How will {staff_summary} support your daily operations at {business_name}?
+• What systems and processes will you need to manage this team effectively?
+• Consider training needs and onboarding processes specific to {industry}
+• Plan for supervision and performance management
+
+**Resource Planning:**
+• Budget for salaries, benefits, and training for {staff_summary}
+• Workspace requirements for your team
+• Tools and equipment needed for each role in {industry}
+• Consider part-time vs. full-time arrangements based on your needs
+
+This staffing structure will help you build a strong foundation for {business_name}'s operations."""
     
     return f"Based on your business goals, here's a draft for your staffing needs: {business_name}'s short-term operational needs should focus on identifying critical roles required for launch in the {industry} sector, including key personnel who can drive your core {business_type} business functions. Consider hiring initial staff who bring essential skills and experience in {industry}, securing appropriate workspace for your team, and establishing operational processes that support your business model. Prioritize roles that directly impact customer experience and business operations, ensuring you have the right team in place to execute your business plan effectively. Focus on identifying key positions specific to {business_type} operations, required qualifications for {industry} professionals, and your hiring timeline for building a strong foundation team."
 

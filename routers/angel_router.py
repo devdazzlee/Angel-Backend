@@ -706,9 +706,11 @@ async def patch_session_context_from_response(session_id, response_content, tag,
         updates["business_type"] = response_content.strip()
     elif tag == "KYC.09":  # Motivation
         updates["motivation"] = response_content.strip()
-    elif tag == "KYC.10":  # Location
+    elif tag == "KYC.10":  # Business location
         updates["location"] = response_content.strip()
-    elif tag == "KYC.11":  # Industry
+    elif tag == "KYC.11":  # Business offering location
+        updates["offering_location"] = response_content.strip()
+    elif tag == "KYC.12":  # Industry (renumbered from KYC.11)
         updates["industry"] = response_content.strip()
     elif tag == "KYC.07":  # Skills comfort level
         updates["skills_assessment"] = response_content.strip()
@@ -1579,12 +1581,21 @@ async def get_phase_chat_history(
 @router.post("/sessions/{session_id}/transition-decision")
 async def handle_transition_decision(session_id: str, request: Request, payload: dict):
     """Handle Approve/Revisit decisions for Plan to Roadmap transition"""
+    from services.stripe_service import check_user_subscription_status
     
     user_id = request.state.user["id"]
     session = await get_session(session_id, user_id)
     decision = payload.get("decision")  # "approve" or "revisit"
     
     if decision == "approve":
+        # Check subscription status before allowing roadmap transition
+        has_active_subscription = await check_user_subscription_status(user_id)
+        if not has_active_subscription:
+            return {
+                "success": False,
+                "message": "Subscription required to proceed to Roadmap phase. Please subscribe to continue.",
+                "requires_subscription": True
+            }
         history = await fetch_chat_history(session_id)
         # Check if existing artifact is in old format (doesn't have Scene 1-8 structure)
         existing_artifact = session.get("business_plan_artifact", "")
@@ -1775,6 +1786,19 @@ Let's start with the first area that needs attention. I'll provide specific guid
 
 @router.post("/sessions/{session_id}/start-implementation")
 async def start_implementation(session_id: str, request: Request):
+    """Start Implementation phase - requires active subscription"""
+    from services.stripe_service import check_user_subscription_status
+    
+    user_id = request.state.user["id"]
+    
+    # Check subscription status before allowing implementation start
+    has_active_subscription = await check_user_subscription_status(user_id)
+    if not has_active_subscription:
+        return {
+            "success": False,
+            "message": "Subscription required to start Implementation phase. Please subscribe to continue.",
+            "requires_subscription": True
+        }
     """Handle transition from Roadmap to Implementation phase"""
     
     user_id = request.state.user["id"]
@@ -1835,8 +1859,19 @@ async def start_implementation(session_id: str, request: Request):
 @router.post("/sessions/{session_id}/roadmap-to-implementation-transition")
 async def roadmap_to_implementation_transition(session_id: str, request: Request):
     """Handle transition from Roadmap to Implementation phase"""
+    from services.stripe_service import check_user_subscription_status
     
     user_id = request.state.user["id"]
+    
+    # Check subscription status before allowing implementation transition
+    has_active_subscription = await check_user_subscription_status(user_id)
+    if not has_active_subscription:
+        return {
+            "success": False,
+            "message": "Subscription required to proceed to Implementation phase. Please subscribe to continue.",
+            "requires_subscription": True
+        }
+    
     session = await get_session(session_id, user_id)
     
     # CRITICAL: Update session phase to ROADMAP_TO_IMPLEMENTATION_TRANSITION in database

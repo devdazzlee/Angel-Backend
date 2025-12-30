@@ -54,3 +54,4 @@ CREATE TRIGGER update_user_legal_acceptances_updated_at
     FOR EACH ROW 
     EXECUTE FUNCTION update_legal_acceptances_updated_at();
 
+
