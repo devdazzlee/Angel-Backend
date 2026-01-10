@@ -107,7 +107,7 @@ async def save_found_info_to_history(
     body = await request.json()
     session_id = body.get("session_id")
     business_info = body.get("business_info", {})
-    found_questions = body.get("found_questions", [])  # List of question numbers that were found (1-46)
+    found_questions = body.get("found_questions", [])  # List of question numbers that were found (1-45)
     
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
@@ -261,8 +261,8 @@ async def save_found_info_to_history(
         qa_pairs_to_save = []
         
         # Process each found question number
-        # IMPORTANT: For ALL 46 questions, we extract answers from business_info OR use AI to extract from document
-        print(f"🔍 Processing {len(found_questions)} found questions (out of 46 total) to extract answers...")
+        # IMPORTANT: For ALL 45 questions, we extract answers from business_info OR use AI to extract from document
+        print(f"🔍 Processing {len(found_questions)} found questions (out of 45 total) to extract answers...")
         print(f"📋 Available business_info fields: {list(business_info.keys())}")
         
         # We'll use AI to extract answers from business_info JSON for any question
@@ -314,7 +314,7 @@ async def save_found_info_to_history(
                             return answer_text
             
             # If still no answer, use AI to extract from business_info JSON
-            # This works for ALL 46 questions by analyzing the structured data
+            # This works for ALL 45 questions by analyzing the structured data
             try:
                 from openai import AsyncOpenAI
                 ai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -359,9 +359,9 @@ async def save_found_info_to_history(
             
             return None
         
-        # CRITICAL FIX: Process ALL 46 questions to determine which are truly found vs missing
+        # CRITICAL FIX: Process ALL 45 questions to determine which are truly found vs missing
         # The frontend's "found_questions" is just an estimate - we need to verify by extracting answers
-        all_questions = list(range(1, 47))  # Questions 1-46
+        all_questions = list(range(1, 46))  # Questions 1-45
         questions_that_failed_extraction = []
         
         # Process all questions (not just the frontend's "found_questions" estimate)
@@ -473,7 +473,7 @@ async def save_found_info_to_history(
         current_answered_count = session.get("answered_count", 0)
         
         # Count how many BUSINESS_PLAN questions were already answered before this upload
-        existing_bp_questions = len([q for q in existing_question_numbers if 1 <= q <= 46])
+        existing_bp_questions = len([q for q in existing_question_numbers if 1 <= q <= 45])
         
         # New answered_count = existing BP questions + newly saved questions
         # This ensures we don't double-count if questions were already in history
@@ -529,15 +529,15 @@ async def save_found_info_to_history(
             asked_q_tag = f"BUSINESS_PLAN.{first_missing:02d}"
             print(f"🎯 Setting asked_q to first missing question: {asked_q_tag}")
         elif qa_pairs_to_save:
-            # If no missing questions, all 46 questions were found in the uploaded plan
-            # Set to next question after the highest saved, or Q46 if all done
+            # If no missing questions, all 45 questions were found in the uploaded plan
+            # Set to next question after the highest saved, or Q45 if all done
             next_question = max_saved_question + 1
-            if next_question <= 46:
+            if next_question <= 45:
                 asked_q_tag = f"BUSINESS_PLAN.{next_question:02d}"
                 print(f"🎯 No missing questions - setting asked_q to next question: {asked_q_tag}")
             else:
-                # All 46 questions answered - stay on Q46
-                asked_q_tag = f"BUSINESS_PLAN.46"
+                # All 45 questions answered - stay on Q45
+                asked_q_tag = f"BUSINESS_PLAN.45"
                 print(f"🎯 All questions answered - setting asked_q to: {asked_q_tag}")
         else:
             # No questions were saved (edge case - shouldn't happen)
@@ -563,7 +563,7 @@ async def save_found_info_to_history(
         
         # Verify the updates will work correctly with progress calculation
         # Progress calculation uses asked_q to determine current question number
-        # Example: If asked_q = "BUSINESS_PLAN.07", progress will show "Question 7 of 46"
+        # Example: If asked_q = "BUSINESS_PLAN.07", progress will show "Question 7 of 45"
         if asked_q_tag.startswith("BUSINESS_PLAN."):
             current_q_num = int(asked_q_tag.split(".")[1])
             expected_progress = round((current_q_num / 46) * 100)

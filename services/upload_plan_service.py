@@ -250,7 +250,7 @@ async def analyze_plan_completeness(content: str, business_info: Dict[str, Any])
     Returns analysis with missing questions that need to be answered
     """
     try:
-        # List of all 46 business plan questions to check against
+        # List of all 45 business plan questions to check against (9 sections restructured)
         business_plan_questions = [
             "What is your business name?",
             "What is your business tagline or mission statement?",
@@ -329,7 +329,7 @@ async def analyze_plan_completeness(content: str, business_info: Dict[str, Any])
             }},
             "missing_questions": [
                 {{
-                    "question_number": 1-46,
+                    "question_number": 1-45,
                     "question_text": "Full question text",
                     "category": "Category (e.g., Financial, Marketing, Operations)",
                     "priority": "high/medium/low"

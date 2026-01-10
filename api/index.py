@@ -15,6 +15,7 @@ from routers.specialized_agents_router import router as specialized_agents_route
 from routers.appendices_router import router as appendices_router
 from routers.upload_plan_router import router as upload_plan_router
 from routers.stripe_router import router as stripe_router
+from routers.preferences_router import router as preferences_router
 from middlewares.auth import verify_auth_token  # if you actually use it
 
 from exceptions import (
@@ -85,6 +86,7 @@ app.include_router(specialized_agents_router, prefix="/specialized-agents")
 app.include_router(appendices_router, prefix="/appendices")
 app.include_router(upload_plan_router, prefix="/upload-plan")
 app.include_router(stripe_router, prefix="/stripe")
+app.include_router(preferences_router)
 
 app.add_exception_handler(AuthApiError, supabase_auth_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)

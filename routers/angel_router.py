@@ -376,8 +376,8 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
                 "reply": assistant_reply,
                 "progress": {
                     "phase": "PLAN_TO_ROADMAP_TRANSITION",
-                    "answered": 46,
-                    "total": 46,
+                    "answered": 45,
+                    "total": 45,
                     "percent": 100
                 },
                 "session_id": session_id,
@@ -554,11 +554,11 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         print(f"📝 Updated session: asked_q={tag}, current_phase={tag.split('.')[0]}")
         
         # Auto-transition to roadmap after business plan completion
-        # Only transition when we've completed all business plan questions (46 total)
+        # Only transition when we've completed all business plan questions (45 total)
         if tag.startswith("BUSINESS_PLAN."):
             try:
                 question_num = int(tag.split(".")[1])
-                if question_num > 46:
+                if question_num > 45:
                     session["asked_q"] = "ROADMAP.01"
                     session["current_phase"] = "ROADMAP"
                     print(f"🔄 Auto-transitioned to ROADMAP after completing BUSINESS_PLAN question {question_num}")
@@ -1673,9 +1673,9 @@ async def handle_transition_decision(session_id: str, request: Request, payload:
         session["current_phase"] = "BUSINESS_PLAN"
         # Keep the current progress instead of resetting to 01
         # This allows user to continue from where they left off
-        current_asked_q = session.get("asked_q", "BUSINESS_PLAN.46")
+        current_asked_q = session.get("asked_q", "BUSINESS_PLAN.45")
         if not current_asked_q.startswith("BUSINESS_PLAN."):
-            current_asked_q = "BUSINESS_PLAN.46"
+            current_asked_q = "BUSINESS_PLAN.45"
         
         # Calculate correct answered count from the tag
         answered_from_tag = 46  # Default to 46 if at end
@@ -1702,7 +1702,7 @@ async def handle_transition_decision(session_id: str, request: Request, payload:
                 "progress": {
                     "phase": "BUSINESS_PLAN",
                     "answered": answered_from_tag,  # Use tag-based calculation
-                    "total": 46,
+                    "total": 45,
                     "percent": 100
                 }
             }
@@ -1778,7 +1778,7 @@ Let's start with the first area that needs attention. I'll provide specific guid
             "progress": {
                 "phase": "BUSINESS_PLAN",
                 "answered": session.get("answered_count", 0),
-                "total": 46,
+                "total": 45,
                 "percent": 0
             }
         }

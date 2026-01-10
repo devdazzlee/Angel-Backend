@@ -53,11 +53,53 @@ async def supabase_auth_exception_handler(request: Request, exc: AuthApiError):
     print(f"🔗 Path: {request.url.path}")
     print(f"📝 Error Message: {exc.message}")
     
+    # Improve error message for email confirmation errors
+    error_message = exc.message.lower()
+    error_detail = exc.message  # Default to original message
+    
+    # Check if this is an email confirmation error
+    email_confirmation_keywords = [
+        "email not confirmed",
+        "email not verified",
+        "email confirmation",
+        "email verify",
+        "unconfirmed email",
+        "email address not confirmed",
+        "user email not confirmed",
+        "email address is not confirmed",
+        "email not confirmed",
+        "email_confirmed",
+        "email address must be confirmed"
+    ]
+    
+    # Check if error is related to email confirmation
+    is_email_confirmation_error = any(keyword in error_message for keyword in email_confirmation_keywords)
+    
+    # Also check the request path - if it's a signin/login attempt with unconfirmed email
+    if is_email_confirmation_error or (
+        "/signin" in str(request.url.path).lower() or 
+        "/login" in str(request.url.path).lower() or
+        "/auth/signin" in str(request.url.path).lower()
+    ):
+        # Check if the error might be related to unconfirmed email
+        # Supabase sometimes returns different error messages for unconfirmed emails
+        unconfirmed_indicators = [
+            "invalid login credentials",
+            "invalid credentials",
+            "email or password is incorrect",
+            "user not found"
+        ]
+        
+        # If it's a login attempt and we get generic auth error, it might be unconfirmed email
+        # But we should only suggest email confirmation if we're certain
+        if is_email_confirmation_error:
+            error_detail = "If you just signed up, check your inbox for a validation link. You must confirm your email address before you can sign in."
+    
     return JSONResponse(
         status_code=HTTP_400_BAD_REQUEST,
         content={
             "success": False,
             "error": "Authentication Failed",
-            "message": exc.message,
+            "message": error_detail,
         },
     )

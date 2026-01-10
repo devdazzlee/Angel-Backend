@@ -18,8 +18,8 @@ def smart_trim_history(history_list, max_lines=150):
     return trimmed
 
 TOTALS_BY_PHASE = {
-    "KYC": 20,  # Updated to 20 questions (added business offering location question)
-    "BUSINESS_PLAN": 46,  # Restored to full 46 questions
+    "KYC": 6,  # Updated to 6 questions (kept only: 1, 3, 7, 14, 15, 17)
+    "BUSINESS_PLAN": 45,  # Updated to 45 questions (9 sections restructured)
     "PLAN_TO_ROADMAP_TRANSITION": 1,  # Restored to normal flow
     "ROADMAP": 1,
     "ROADMAP_GENERATED": 1,
@@ -77,7 +77,7 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
 
 def calculate_combined_progress(current_phase: str, answered_count: int, current_tag: str = None) -> dict:
     """
-    Calculate combined progress for KYC + Business Plan phases (65 total questions).
+    Calculate combined progress for KYC + Business Plan phases (51 total questions).
     This provides an overall progress view that combines both phases.
     """
     print(f"🔍 Combined Progress Calculation Debug:")
@@ -87,9 +87,9 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
     
     # Define combined phase totals
     COMBINED_TOTALS = {
-        "KYC": 20,
-        "BUSINESS_PLAN": 46,
-        "COMBINED_KYC_BP": 66,  # 20 + 46 = 66 total questions
+        "KYC": 6,
+        "BUSINESS_PLAN": 45,
+        "COMBINED_KYC_BP": 51,  # 6 + 45 = 51 total questions
         "ROADMAP": 1,
         "IMPLEMENTATION": 10
     }
@@ -103,8 +103,8 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
                 # For KYC, current step is just the question number
                 current_step = question_num
             elif current_phase == "BUSINESS_PLAN":
-                # For Business Plan, add KYC total (20) to current question number
-                current_step = 20 + question_num
+                # For Business Plan, add KYC total (6) to current question number
+                current_step = 6 + question_num
             else:
                 # For other phases, use answered_count as fallback
                 current_step = answered_count
@@ -134,24 +134,24 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
         
         # Calculate phase-specific step for display
         if current_phase == "KYC":
-            phase_specific_step = question_num if current_tag and current_tag.startswith("KYC.") else min(current_step, 20)
+            phase_specific_step = question_num if current_tag and current_tag.startswith("KYC.") else min(current_step, 6)
         elif current_phase == "BUSINESS_PLAN":
-            phase_specific_step = question_num if current_tag and current_tag.startswith("BUSINESS_PLAN.") else max(0, current_step - 20)
+            phase_specific_step = question_num if current_tag and current_tag.startswith("BUSINESS_PLAN.") else max(0, current_step - 6)
         else:
             phase_specific_step = current_step
             
         result = {
             "phase": current_phase,
-            "answered": current_step,  # Combined step (1-66)
-            "phase_answered": phase_specific_step,  # Phase-specific step (1-20 for KYC, 1-46 for BP)
+            "answered": current_step,  # Combined step (1-51)
+            "phase_answered": phase_specific_step,  # Phase-specific step (1-6 for KYC, 1-45 for BP)
             "total": total_combined,
             "percent": percent,
             "combined": True,  # Flag to indicate this is combined progress
             "phase_breakdown": {
-                "kyc_completed": min(current_step, 20),
-                "kyc_total": 20,
-                "bp_completed": max(0, current_step - 20),
-                "bp_total": 46
+                "kyc_completed": min(current_step, 6),
+                "kyc_total": 6,
+                "bp_completed": max(0, current_step - 6),
+                "bp_total": 45
             }
         }
     else:

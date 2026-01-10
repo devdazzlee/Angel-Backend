@@ -19,7 +19,7 @@ async def create_test_session():
             "title": "Test Roadmap Session",
             "current_phase": "ROADMAP",
             "asked_q": "ROADMAP.01",
-            "answered_count": 66,  # Business plan questions (20 KYC + 46 Business Plan)
+            "answered_count": 51,  # Business plan questions (6 KYC + 45 Business Plan)
             "mode": "BUSINESS",
             "status": "OPEN"
         }).execute()
