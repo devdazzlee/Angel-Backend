@@ -55,3 +55,5 @@ CREATE TRIGGER update_user_legal_acceptances_updated_at
     EXECUTE FUNCTION update_legal_acceptances_updated_at();
 
 
+
+
