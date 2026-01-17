@@ -48,6 +48,7 @@ async def root():
 # ✅ CORS Support
 origins = [
     "https://angle-ai-zsdt.vercel.app",
+    "https://azure-angel-frontend.vercel.app",
     "https://angle-ai.vercel.app",
     "https://founderport.ai",
     "https://founderport.ai/",
