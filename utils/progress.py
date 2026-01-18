@@ -20,6 +20,8 @@ def smart_trim_history(history_list, max_lines=150):
 TOTALS_BY_PHASE = {
     "KYC": 6,  # Updated to 6 questions (kept only: 1, 3, 7, 14, 15, 17)
     "BUSINESS_PLAN": 45,  # Updated to 45 questions (9 sections restructured)
+    "PLAN_TO_SUMMARY_TRANSITION": 1,  # Transition phase - show summary first
+    "PLAN_TO_BUDGET_TRANSITION": 1,  # Transition phase - no questions, just waiting for user action
     "PLAN_TO_ROADMAP_TRANSITION": 1,  # Restored to normal flow
     "ROADMAP": 1,
     "ROADMAP_GENERATED": 1,
@@ -36,6 +38,24 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
     print(f"  - current_phase: {current_phase}")
     print(f"  - answered_count: {answered_count}")
     print(f"  - current_tag: {current_tag}")
+    
+    # Handle transition phases - they don't have questions, just show 100% complete
+    transition_phases = [
+        "PLAN_TO_SUMMARY_TRANSITION",
+        "PLAN_TO_BUDGET_TRANSITION",
+        "PLAN_TO_ROADMAP_TRANSITION", 
+        "ROADMAP_TO_IMPLEMENTATION_TRANSITION",
+        "ROADMAP_GENERATED"
+    ]
+    
+    if current_phase in transition_phases:
+        total_in_phase = TOTALS_BY_PHASE.get(current_phase, 1)
+        return {
+            "phase": current_phase,
+            "answered": total_in_phase,
+            "total": total_in_phase,
+            "percent": 100
+        }
     
     phase_order = ["KYC", "BUSINESS_PLAN", "ROADMAP", "ROADMAP_GENERATED", "ROADMAP_TO_IMPLEMENTATION_TRANSITION", "IMPLEMENTATION"]
     
@@ -54,7 +74,11 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
         current_step = max(1, answered_count)
         print(f"⚠️ No valid tag found, using answered_count: {current_step}")
     
-    total_in_phase = TOTALS_BY_PHASE[current_phase]
+    # Get total for phase - handle missing phases gracefully
+    total_in_phase = TOTALS_BY_PHASE.get(current_phase, 1)
+    if current_phase not in TOTALS_BY_PHASE:
+        print(f"⚠️ Phase '{current_phase}' not in TOTALS_BY_PHASE, using default total: 1")
+    
     print(f"  - total_in_phase: {total_in_phase}")
     
     # Ensure current_step doesn't exceed total for this phase

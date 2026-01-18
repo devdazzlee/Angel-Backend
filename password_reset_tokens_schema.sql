@@ -53,3 +53,4 @@ COMMENT ON TABLE password_reset_tokens IS 'Stores password reset tokens with 10-
 COMMENT ON COLUMN password_reset_tokens.expires_at IS 'Token expiration time (10 minutes from creation)';
 COMMENT ON COLUMN password_reset_tokens.used IS 'Whether this token has been used to reset a password';
 
+

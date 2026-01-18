@@ -1757,7 +1757,7 @@ async def handle_business_plan_completion(session_data, history):
     # No artifact in initial response - user will request it when needed
     business_plan_artifact = None
     
-    # Create the transition message
+    # Create the transition message - Show summary first, then budget, then roadmap
     transition_message = f"""🎉 **CONGRATULATIONS! Planning Champion Award** 🎉
 
 You've successfully completed your comprehensive business plan! This is a significant milestone in your entrepreneurial journey.
@@ -1772,25 +1772,11 @@ You've successfully completed your comprehensive business plan! This is a signif
 
 ---
 
-## What's Next: Roadmap Generation
-
-Based on your detailed business plan, I will now generate a comprehensive, actionable launch roadmap that translates your plan into explicit, chronological tasks. This roadmap will include:
-
-**Legal Formation** - Business structure, licensing, permits
-**Financial Planning** - Funding strategies, budgeting, accounting setup
-**Product & Operations** - Supply chain, equipment, operational processes
-**Marketing & Sales** - Brand positioning, customer acquisition, sales processes
-**Full Launch & Scaling** - Go-to-market strategy, growth planning
-
-**Research-Backed Recommendations:** The roadmap will be tailored specifically to your business, industry, and location, with research drawn from **Government Sources, Academic Research, and Industry Reports** to provide authoritative, verified guidance.
-
----
-
 ## **Ready to Move Forward?**
 
 Please review your business plan summary above. If everything looks accurate and complete, you can:
 
-**Continue** - Proceed to roadmap generation with full Business Plan Artifact
+**Continue** - Proceed to budget planning, then roadmap generation
 **Modify** - Adjust any aspects that need refinement
 
 What would you like to do?"""
@@ -1806,7 +1792,7 @@ What would you like to do?"""
         "reply": transition_message,
         "web_search_status": {"is_searching": False, "query": None},
         "immediate_response": None,
-        "transition_phase": "PLAN_TO_ROADMAP",
+        "transition_phase": "PLAN_TO_SUMMARY",  # Show summary first, then budget, then roadmap
         "business_plan_summary": business_plan_summary,
         "business_plan_artifact": business_plan_artifact,  # Include the full artifact in the response
         "show_accept_modify": button_detection.get("show_buttons", False),
@@ -1819,6 +1805,155 @@ What would you like to do?"""
             # Will be saved when background task completes
         }
     }
+
+async def handle_budget_setup(session_data, history):
+    """Handle the transition from Business Plan to Budget phase"""
+    
+    # Extract business context
+    business_name = session_data.get("business_name") or session_data.get("business_idea_brief", "your business")
+    industry = session_data.get("industry", "your industry")
+    location = session_data.get("location", "your location")
+    business_type = session_data.get("business_type", "service")
+    
+    # Generate estimated expenses based on business plan
+    estimated_expenses = await generate_estimated_expenses_from_business_plan(session_data, history)
+    
+    # Create budget setup message
+    budget_message = f"""💰 **Budget Planning Time!** 💰
+
+Great work completing your business plan! Now let's create a comprehensive budget for your business.
+
+Based on your business plan for **{business_name}** in the **{industry}** industry, I've prepared an estimated budget breakdown for Year 1.
+
+---
+
+## 📊 **Initial Investment**
+
+Before we dive into the budget details, I need to know:
+
+**What is the total initial investment you're planning to put into your business?**
+
+This includes all sources of funding:
+- Personal savings
+- Loans
+- Investments from partners
+- Grants or other funding sources
+
+---
+
+## 💡 **Estimated Expenses (Based on Your Business Plan)**
+
+I've analyzed your business plan and prepared estimated expenses for Year 1. These are tailored to your **{industry}** business in **{location}**:
+
+{estimated_expenses}
+
+---
+
+## 🎯 **What's Next**
+
+Once you provide your initial investment amount, I'll:
+1. Show you a detailed budget breakdown with estimated expenses and revenues
+2. Allow you to adjust amounts using sliders
+3. Let you add custom expenses or revenue sources
+4. Display your budget in a pie chart or table format
+5. Save this budget so I can reference it throughout our conversation
+
+**Ready to set up your budget?** Please let me know your total initial investment amount, and we'll proceed with the detailed budget setup!"""
+
+    return {
+        "reply": budget_message,
+        "transition_phase": "BUDGET_SETUP",
+        "estimated_expenses": estimated_expenses,
+        "business_context": {
+            "business_name": business_name,
+            "industry": industry,
+            "location": location,
+            "business_type": business_type
+        }
+    }
+
+async def generate_estimated_expenses_from_business_plan(session_data, history):
+    """Generate estimated expenses based on business plan context using AI"""
+    
+    business_name = session_data.get("business_name") or session_data.get("business_idea_brief", "your business")
+    industry = session_data.get("industry", "your industry")
+    location = session_data.get("location", "your location")
+    business_type = session_data.get("business_type", "service")
+    
+    # Extract relevant business plan information from history
+    business_plan_context = ""
+    if history:
+        # Get last 20 messages for context
+        recent_messages = history[-20:] if len(history) > 20 else history
+        business_plan_context = "\n".join([
+            f"{msg.get('role', 'user')}: {msg.get('content', '')[:500]}"
+            for msg in recent_messages
+        ])
+    
+    prompt = f"""You are a financial planning expert. Based on the following business plan information, generate a realistic list of estimated monthly expenses for Year 1.
+
+BUSINESS CONTEXT:
+- Business Name: {business_name}
+- Industry: {industry}
+- Location: {location}
+- Business Type: {business_type}
+
+BUSINESS PLAN INFORMATION:
+{business_plan_context[:3000]}
+
+REQUIREMENTS:
+1. Generate 6-10 realistic expense categories specific to this {industry} business
+2. Provide monthly estimated amounts (in USD) appropriate for {location}
+3. Include industry-specific expenses (e.g., inventory for retail, equipment for manufacturing, licenses for regulated industries)
+4. Adjust amounts based on location cost of living
+5. Format as a clear list with category names and estimated monthly amounts
+
+FORMAT YOUR RESPONSE AS:
+- **Category Name 1**: $X,XXX/month - Brief description
+- **Category Name 2**: $X,XXX/month - Brief description
+- etc.
+
+Be specific to {industry} and realistic for {location}. Include common expenses like:
+- Rent/Office Space (if applicable)
+- Salaries/Staffing
+- Marketing & Advertising
+- Utilities
+- Software & Technology
+- Insurance
+- Legal & Accounting
+- Inventory/Supplies (if applicable)
+- Equipment/Maintenance (if applicable)
+- Other industry-specific expenses
+
+Return ONLY the formatted list, no additional text."""
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a financial planning expert specializing in startup budgets."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=800
+        )
+        
+        estimated_expenses = response.choices[0].message.content.strip()
+        return estimated_expenses
+    except Exception as e:
+        print(f"Error generating estimated expenses: {e}")
+        # Fallback to generic expenses
+        return f"""Based on your {industry} business in {location}, here are typical Year 1 monthly expenses:
+
+- **Rent/Office Space**: $1,500-$3,000/month - Office or retail space rental
+- **Salaries/Staffing**: $3,000-$8,000/month - Employee wages and benefits
+- **Marketing & Advertising**: $500-$2,000/month - Marketing campaigns and promotions
+- **Utilities**: $200-$500/month - Electricity, water, internet, phone
+- **Software & Technology**: $200-$800/month - Software licenses and tech tools
+- **Insurance**: $300-$600/month - Business insurance premiums
+- **Legal & Accounting**: $200-$500/month - Legal and accounting services
+- **Inventory/Supplies**: $500-$2,000/month - Product inventory or supplies
+- **Equipment/Maintenance**: $200-$1,000/month - Equipment purchase and maintenance"""
 
 async def generate_business_plan_summary(session_data, history):
     """Generate a comprehensive summary of the business plan"""
@@ -2477,6 +2612,10 @@ Do NOT include question numbers, progress percentages, or step counts in your re
                     last_assistant_tag = tag_match.group(1)
                     break
         
+        # Also check if we've answered 45 questions based on progress
+        answered_count = session_data.get("answered_count", 0)
+        business_plan_complete = False
+        
         # Check both current_tag and last_assistant_tag to catch question 45
         tags_to_check = [current_tag]
         if last_assistant_tag:
@@ -2488,20 +2627,48 @@ Do NOT include question numbers, progress percentages, or step counts in your re
                     question_num = int(tag.split(".")[1])
                     # Check if user just answered the final question (45) with any response
                     # Also check if we're at question 45 or beyond (in case of uploaded plans)
-                    if (question_num >= 45 and 
-                        not tag.endswith("_ACK") and
-                        len(user_content.strip()) > 0 and
-                        user_content.lower().strip() not in ["draft", "support", "scrapping", "scraping", "accept"]):
-                        
-                        print(f"🎯 User answered final Business Plan question ({question_num}) - triggering completion handler IMMEDIATELY (before AI generation)")
-                        print(f"   Current asked_q: {current_tag}, Last assistant tag: {last_assistant_tag}")
-                        # Trigger roadmap transition immediately - this will return the proper transition response
-                        completion_response = await handle_business_plan_completion(session_data, history)
-                        print(f"✅ Completion handler returned transition_phase: {completion_response.get('transition_phase')}")
-                        return completion_response
+                    if question_num >= 45:
+                        business_plan_complete = True
+                        break
                 except (ValueError, IndexError) as e:
                     print(f"⚠️ Error parsing question number from tag {tag}: {e}")
                     pass
+        
+        # Also check if we've answered enough questions (45 total for business plan)
+        # This is a more reliable check than just tag parsing
+        if not business_plan_complete:
+            # Count business plan questions answered from history
+            bp_questions_answered = 0
+            for msg in history:
+                if msg.get('role') == 'assistant':
+                    content = msg.get('content', '')
+                    # Count all BUSINESS_PLAN question tags
+                    bp_tags = re.findall(r'\[\[Q:(BUSINESS_PLAN\.\d+)\]\]', content)
+                    if bp_tags:
+                        for bp_tag in bp_tags:
+                            try:
+                                q_num = int(bp_tag.split(".")[1])
+                                if q_num <= 45:
+                                    bp_questions_answered = max(bp_questions_answered, q_num)
+                            except (ValueError, IndexError):
+                                pass
+            
+            # If we've seen question 45 in history and user is providing input, consider it complete
+            if bp_questions_answered >= 45 and len(user_content.strip()) > 0:
+                business_plan_complete = True
+                print(f"🎯 Detected business plan completion via history: {bp_questions_answered} questions answered")
+        
+        # Trigger completion if business plan is complete
+        if (business_plan_complete and 
+            len(user_content.strip()) > 0 and
+            user_content.lower().strip() not in ["draft", "support", "scrapping", "scraping", "accept"]):
+            
+            print(f"🎯 Business Plan completion detected - triggering completion handler IMMEDIATELY (before AI generation)")
+            print(f"   Current asked_q: {current_tag}, Last assistant tag: {last_assistant_tag}, Answered count: {answered_count}")
+            # Trigger budget transition immediately - this will return the proper transition response
+            completion_response = await handle_business_plan_completion(session_data, history)
+            print(f"✅ Completion handler returned transition_phase: {completion_response.get('transition_phase')}")
+            return completion_response
     
     # Accept command should be handled by AI naturally, not manually
     # Let the system prompt in constant.py guide question progression

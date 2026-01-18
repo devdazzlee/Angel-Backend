@@ -331,6 +331,49 @@ async def delete_budget_item(session_id: str, item_id: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Failed to delete budget item: {str(e)}")
 
 
+@router.post("/sessions/{session_id}/budget/generate-estimates")
+async def generate_estimated_expenses(session_id: str, request: Request):
+    """Generate estimated expenses based on business plan context"""
+    from services.angel_service import generate_estimated_expenses_from_business_plan
+    from db.supabase import get_session, fetch_chat_history
+    
+    user_id = request.state.user["id"]
+    
+    try:
+        # Get session to verify ownership
+        session_response = supabase.table("chat_sessions").select("*").eq("id", session_id).eq("user_id", user_id).execute()
+        
+        if not session_response.data:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        session = session_response.data[0]
+        
+        # Get chat history
+        history_response = supabase.table("chat_messages").select("*").eq("session_id", session_id).order("created_at").execute()
+        history = [{"role": msg.get("role"), "content": msg.get("content", "")} for msg in (history_response.data or [])]
+        
+        # Generate estimated expenses
+        estimated_expenses_text = await generate_estimated_expenses_from_business_plan(session, history)
+        
+        return {
+            "success": True,
+            "result": {
+                "estimated_expenses": estimated_expenses_text,
+                "business_context": {
+                    "business_name": session.get("business_name") or session.get("business_idea_brief", ""),
+                    "industry": session.get("industry", ""),
+                    "location": session.get("location", ""),
+                    "business_type": session.get("business_type", "")
+                }
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error generating estimated expenses: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate estimated expenses: {str(e)}")
+
+
 @router.get("/sessions/{session_id}/budget/summary")
 async def get_budget_summary(session_id: str, request: Request):
     """Get budget summary statistics"""

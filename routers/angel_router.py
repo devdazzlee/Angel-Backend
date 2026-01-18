@@ -263,6 +263,34 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     # Log the incoming message for debugging
     print(f"📨 POST /chat - Received message: '{payload.content[:200]}...' (length: {len(payload.content)})")
     
+    # CRITICAL: Block normal chat processing during transition phases
+    # User should interact with modals, not chat during transitions
+    current_phase = session.get("current_phase", "")
+    transition_phases = [
+        "PLAN_TO_BUDGET_TRANSITION",
+        "PLAN_TO_SUMMARY_TRANSITION",
+        "PLAN_TO_ROADMAP_TRANSITION",
+        "ROADMAP_TO_IMPLEMENTATION_TRANSITION"
+    ]
+    
+    if current_phase in transition_phases:
+        print(f"🚫 Blocking chat message - session is in transition phase: {current_phase}")
+        print(f"   User should interact with the transition modal, not send chat messages")
+        return {
+            "success": False,
+            "message": f"Session is in {current_phase} phase. Please complete the transition first.",
+            "result": {
+                "reply": f"You're currently in a transition phase. Please complete the current step before continuing.",
+                "progress": {
+                    "phase": current_phase,
+                    "answered": 1,
+                    "total": 1,
+                    "percent": 100
+                },
+                "transition_phase": current_phase
+            }
+        }
+    
     # Save user message
     await save_chat_message(session_id, user_id, "user", payload.content)
 
@@ -292,7 +320,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
 
     # CRITICAL: Don't save assistant reply to chat history if it's a transition
     # Transitions should show modals, not appear in chat
-    if transition_phase not in ["PLAN_TO_ROADMAP", "KYC_TO_BUSINESS_PLAN", "ROADMAP_GENERATED"]:
+    if transition_phase not in ["PLAN_TO_ROADMAP", "PLAN_TO_BUDGET", "PLAN_TO_SUMMARY", "KYC_TO_BUSINESS_PLAN", "ROADMAP_GENERATED", "BUDGET_SETUP"]:
         # Also check if we're in PLAN_TO_ROADMAP_TRANSITION phase - don't save to chat
         current_phase = session.get("current_phase", "")
         if current_phase != "PLAN_TO_ROADMAP_TRANSITION":
@@ -309,6 +337,42 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         await patch_session(session_id, session_update)
 
     # Handle transition phases
+    if transition_phase == "PLAN_TO_SUMMARY":
+        # Show business plan summary first, then user can proceed to budget
+        # Update session to summary transition phase
+        await patch_session(session_id, {
+            "current_phase": "PLAN_TO_SUMMARY_TRANSITION"
+        })
+        
+        session["current_phase"] = "PLAN_TO_SUMMARY_TRANSITION"
+        session["transition_data"] = {
+            "business_plan_summary": business_plan_summary,
+            "business_plan_artifact": business_plan_artifact,
+            "transition_type": "PLAN_TO_SUMMARY"
+        }
+        
+        return {
+            "success": True,
+            "message": "Business plan completed - showing summary",
+            "result": {
+                "reply": assistant_reply,
+                "progress": {
+                    "phase": "PLAN_TO_SUMMARY_TRANSITION",
+                    "answered": 45,
+                    "total": 45,
+                    "percent": 100
+                },
+                "session_id": session_id,
+                "web_search_status": web_search_status,
+                "immediate_response": immediate_response,
+                "transition_phase": "PLAN_TO_SUMMARY",
+                "business_plan_summary": business_plan_summary,
+                "business_plan_artifact": business_plan_artifact,
+                "show_accept_modify": show_accept_modify,
+                "transition_data": session.get("transition_data")
+            }
+        }
+    
     if transition_phase == "KYC_TO_BUSINESS_PLAN":
         # Update session to transition phase
         session["current_phase"] = "BUSINESS_PLAN"
@@ -333,6 +397,57 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
                 "web_search_status": web_search_status,
                 "immediate_response": immediate_response,
                 "transition_phase": transition_phase
+            }
+        }
+    
+    if transition_phase == "PLAN_TO_BUDGET":
+        # Transition from Business Plan to Budget phase
+        from services.angel_service import handle_budget_setup
+        
+        # Get business plan artifact if available
+        business_plan_artifact = angel_response.get("business_plan_artifact", None)
+        business_plan_summary = angel_response.get("business_plan_summary", None)
+        
+        # Generate budget setup message
+        budget_response = await handle_budget_setup(session, history)
+        
+        # Prepare transition data (store in memory only, not in database)
+        transition_data = {
+            "business_plan_summary": business_plan_summary,
+            "business_plan_artifact": business_plan_artifact,
+            "transition_type": "PLAN_TO_BUDGET",
+            "estimated_expenses": budget_response.get("estimated_expenses", ""),
+            "business_context": budget_response.get("business_context", {})
+        }
+        
+        # Update session to budget transition phase (don't save transition_data to DB - it's not a column)
+        await patch_session(session_id, {
+            "current_phase": "PLAN_TO_BUDGET_TRANSITION"
+        })
+        
+        session["current_phase"] = "PLAN_TO_BUDGET_TRANSITION"
+        session["transition_data"] = transition_data  # Store in memory only
+        
+        return {
+            "success": True,
+            "message": "Business plan completed - transition to budget",
+            "result": {
+                "reply": budget_response["reply"],
+                "progress": {
+                    "phase": "PLAN_TO_BUDGET_TRANSITION",
+                    "answered": 45,
+                    "total": 45,
+                    "percent": 100
+                },
+                "session_id": session_id,
+                "web_search_status": web_search_status,
+                "immediate_response": immediate_response,
+                "transition_phase": "PLAN_TO_BUDGET",
+                "business_plan_summary": business_plan_summary,
+                "business_plan_artifact": business_plan_artifact,
+                "estimated_expenses": budget_response.get("estimated_expenses", ""),
+                "business_context": budget_response.get("business_context", {}),
+                "transition_data": session.get("transition_data")
             }
         }
     
@@ -1580,93 +1695,257 @@ async def get_phase_chat_history(
 
 @router.post("/sessions/{session_id}/transition-decision")
 async def handle_transition_decision(session_id: str, request: Request, payload: dict):
-    """Handle Approve/Revisit decisions for Plan to Roadmap transition"""
+    """Handle Approve/Revisit decisions for Plan to Budget/Roadmap transitions"""
     from services.stripe_service import check_user_subscription_status
     
     user_id = request.state.user["id"]
     session = await get_session(session_id, user_id)
     decision = payload.get("decision")  # "approve" or "revisit"
+    transition_type = payload.get("transition_type", "plan_to_roadmap")  # "summary_to_budget" or "plan_to_budget" or "budget_to_roadmap" or "plan_to_roadmap"
     
     if decision == "approve":
-        # Check subscription status before allowing roadmap transition
-        has_active_subscription = await check_user_subscription_status(user_id)
-        if not has_active_subscription:
-            return {
-                "success": False,
-                "message": "Subscription required to proceed to Roadmap phase. Please subscribe to continue.",
-                "requires_subscription": True
-            }
-        history = await fetch_chat_history(session_id)
-        # Check if existing artifact is in old format (doesn't have Scene 1-8 structure)
-        existing_artifact = session.get("business_plan_artifact", "")
-        needs_regeneration = False
-        
-        if existing_artifact:
-            # Check if it's in the old format (has traditional sections but no Scene 1-8)
-            has_old_format = (
-                "## Executive Summary" in existing_artifact or 
-                "Executive Summary" in existing_artifact and "## Scene 1" not in existing_artifact
-            )
-            has_new_format = "## Scene 1" in existing_artifact and "## Scene 8" in existing_artifact
+        # Check if we're transitioning from summary to budget
+        if transition_type == "summary_to_budget":
+            # Summary is accepted, now transition to budget
+            from services.angel_service import handle_budget_setup
+            history = await fetch_chat_history(session_id)
             
-            if has_old_format and not has_new_format:
-                print(f"🔄 Existing artifact is in old format - regenerating in 8-scene table format...")
-                needs_regeneration = True
-        
-        if needs_regeneration or not existing_artifact:
-            business_plan_artifact = await generate_business_plan_artifact(session, history)
-            session["business_plan_artifact"] = business_plan_artifact
-        else:
-            business_plan_artifact = existing_artifact
-            print(f"✅ Using existing artifact (already in correct format)")
-        session["business_plan_generated_at"] = datetime.now().isoformat()
-        
-        # Transition to Roadmap phase
-        session["current_phase"] = "ROADMAP"
-        session["asked_q"] = "ROADMAP.01"
-        session["answered_count"] = 0
-        
-        await patch_session(session_id, {
-            "current_phase": session["current_phase"],
-            "asked_q": session["asked_q"],
-            "answered_count": session["answered_count"],
-            "business_plan_artifact": session["business_plan_artifact"],
-            "business_plan_generated_at": session["business_plan_generated_at"]
-        })
-        
-        # Generate roadmap
-        roadmap_response = await handle_roadmap_generation(session, history)
-        roadmap_payload = {
-            "content": roadmap_response["roadmap_content"],
-            "structured_steps": roadmap_response.get("structured_steps", []),
-            "tasks": roadmap_response.get("implementation_tasks", []),
-            "metadata": roadmap_response.get("roadmap_metadata", {})
-        }
-        session["roadmap_data"] = roadmap_payload
-        
-        await patch_session(session_id, {
-            "roadmap_data": roadmap_payload
-        })
-        
-        return {
-            "success": True,
-            "message": "Plan approved - transitioning to roadmap",
-            "result": {
-                "action": "transition_to_roadmap",
-                "roadmap": roadmap_response["roadmap_content"],
-                "business_plan": business_plan_artifact,
-                "quote": roadmap_response.get("quote"),
-                "structured_steps": roadmap_response.get("structured_steps", []),
-                "implementation_tasks": roadmap_response.get("implementation_tasks", []),
-                "progress": {
-                    "phase": "ROADMAP",
-                    "answered": 0,
-                    "total": 1,
-                    "percent": 0
-                },
-                "transition_phase": roadmap_response["transition_phase"]
+            # Get business plan data from session
+            business_plan_summary = session.get("business_plan_summary", "")
+            business_plan_artifact = session.get("business_plan_artifact", None)
+            
+            # Generate budget setup message
+            budget_response = await handle_budget_setup(session, history)
+            
+            # Prepare transition data
+            transition_data = {
+                "business_plan_summary": business_plan_summary,
+                "business_plan_artifact": business_plan_artifact,
+                "transition_type": "PLAN_TO_BUDGET",
+                "estimated_expenses": budget_response.get("estimated_expenses", ""),
+                "business_context": budget_response.get("business_context", {})
             }
-        }
+            
+            # Update session to budget transition phase
+            await patch_session(session_id, {
+                "current_phase": "PLAN_TO_BUDGET_TRANSITION"
+            })
+            
+            session["current_phase"] = "PLAN_TO_BUDGET_TRANSITION"
+            session["transition_data"] = transition_data
+            
+            return {
+                "success": True,
+                "message": "Summary accepted - transitioning to budget",
+                "result": {
+                    "action": "transition_to_budget",
+                    "reply": budget_response["reply"],
+                    "progress": {
+                        "phase": "PLAN_TO_BUDGET_TRANSITION",
+                        "answered": 45,
+                        "total": 45,
+                        "percent": 100
+                    },
+                    "transition_phase": "PLAN_TO_BUDGET",
+                    "business_plan_summary": business_plan_summary,
+                    "business_plan_artifact": business_plan_artifact,
+                    "estimated_expenses": budget_response.get("estimated_expenses", ""),
+                    "business_context": budget_response.get("business_context", {}),
+                    "transition_data": transition_data
+                }
+            }
+        
+        # Check if we're transitioning from budget to roadmap
+        elif transition_type == "budget_to_roadmap":
+            # Budget is complete, now transition to roadmap
+            # Check subscription status before allowing roadmap transition
+            has_active_subscription = await check_user_subscription_status(user_id)
+            if not has_active_subscription:
+                return {
+                    "success": False,
+                    "message": "Subscription required to proceed to Roadmap phase. Please subscribe to continue.",
+                    "requires_subscription": True
+                }
+            
+            history = await fetch_chat_history(session_id)
+            # Check if existing artifact is in old format (doesn't have Scene 1-8 structure)
+            existing_artifact = session.get("business_plan_artifact", "")
+            needs_regeneration = False
+            
+            if existing_artifact:
+                # Check if it's in the old format (has traditional sections but no Scene 1-8)
+                has_old_format = (
+                    "## Executive Summary" in existing_artifact or 
+                    "Executive Summary" in existing_artifact and "## Scene 1" not in existing_artifact
+                )
+                has_new_format = "## Scene 1" in existing_artifact and "## Scene 8" in existing_artifact
+                
+                if has_old_format and not has_new_format:
+                    print(f"🔄 Existing artifact is in old format - regenerating in 8-scene table format...")
+                    needs_regeneration = True
+            
+            if needs_regeneration or not existing_artifact:
+                from services.angel_service import generate_business_plan_artifact
+                business_plan_artifact = await generate_business_plan_artifact(session, history)
+                session["business_plan_artifact"] = business_plan_artifact
+            else:
+                business_plan_artifact = existing_artifact
+                print(f"✅ Using existing artifact (already in correct format)")
+            session["business_plan_generated_at"] = datetime.now().isoformat()
+            
+            # Transition to Roadmap phase
+            session["current_phase"] = "ROADMAP"
+            session["asked_q"] = "ROADMAP.01"
+            session["answered_count"] = 0
+            
+            await patch_session(session_id, {
+                "current_phase": session["current_phase"],
+                "asked_q": session["asked_q"],
+                "answered_count": session["answered_count"],
+                "business_plan_artifact": session["business_plan_artifact"],
+                "business_plan_generated_at": session["business_plan_generated_at"]
+            })
+            
+            # Generate roadmap
+            from services.angel_service import handle_roadmap_generation
+            roadmap_response = await handle_roadmap_generation(session, history)
+            roadmap_payload = {
+                "content": roadmap_response["roadmap_content"],
+                "structured_steps": roadmap_response.get("structured_steps", []),
+                "tasks": roadmap_response.get("implementation_tasks", []),
+                "metadata": roadmap_response.get("roadmap_metadata", {})
+            }
+            session["roadmap_data"] = roadmap_payload
+            
+            await patch_session(session_id, {
+                "roadmap_data": roadmap_payload
+            })
+            
+            return {
+                "success": True,
+                "message": "Budget approved - transitioning to roadmap",
+                "result": {
+                    "action": "transition_to_roadmap",
+                    "roadmap": roadmap_response["roadmap_content"],
+                    "business_plan": business_plan_artifact,
+                    "quote": roadmap_response.get("quote"),
+                    "structured_steps": roadmap_response.get("structured_steps", []),
+                    "implementation_tasks": roadmap_response.get("implementation_tasks", []),
+                    "progress": {
+                        "phase": "ROADMAP",
+                        "answered": 0,
+                        "total": 1,
+                        "percent": 0
+                    },
+                    "transition_phase": roadmap_response["transition_phase"]
+                }
+            }
+        
+        # Original plan_to_roadmap transition (for backward compatibility)
+        elif transition_type == "plan_to_roadmap":
+            # Check subscription status before allowing roadmap transition
+            has_active_subscription = await check_user_subscription_status(user_id)
+            if not has_active_subscription:
+                return {
+                    "success": False,
+                    "message": "Subscription required to proceed to Roadmap phase. Please subscribe to continue.",
+                    "requires_subscription": True
+                }
+            history = await fetch_chat_history(session_id)
+            # Check if existing artifact is in old format (doesn't have Scene 1-8 structure)
+            existing_artifact = session.get("business_plan_artifact", "")
+            needs_regeneration = False
+            
+            if existing_artifact:
+                # Check if it's in the old format (has traditional sections but no Scene 1-8)
+                has_old_format = (
+                    "## Executive Summary" in existing_artifact or 
+                    "Executive Summary" in existing_artifact and "## Scene 1" not in existing_artifact
+                )
+                has_new_format = "## Scene 1" in existing_artifact and "## Scene 8" in existing_artifact
+                
+                if has_old_format and not has_new_format:
+                    print(f"🔄 Existing artifact is in old format - regenerating in 8-scene table format...")
+                    needs_regeneration = True
+            
+            if needs_regeneration or not existing_artifact:
+                from services.angel_service import generate_business_plan_artifact
+                business_plan_artifact = await generate_business_plan_artifact(session, history)
+                session["business_plan_artifact"] = business_plan_artifact
+            else:
+                business_plan_artifact = existing_artifact
+                print(f"✅ Using existing artifact (already in correct format)")
+            session["business_plan_generated_at"] = datetime.now().isoformat()
+            
+            # Transition to Roadmap phase
+            session["current_phase"] = "ROADMAP"
+            session["asked_q"] = "ROADMAP.01"
+            session["answered_count"] = 0
+            
+            await patch_session(session_id, {
+                "current_phase": session["current_phase"],
+                "asked_q": session["asked_q"],
+                "answered_count": session["answered_count"],
+                "business_plan_artifact": session["business_plan_artifact"],
+                "business_plan_generated_at": session["business_plan_generated_at"]
+            })
+            
+            # Generate roadmap
+            from services.angel_service import handle_roadmap_generation
+            roadmap_response = await handle_roadmap_generation(session, history)
+            roadmap_payload = {
+                "content": roadmap_response["roadmap_content"],
+                "structured_steps": roadmap_response.get("structured_steps", []),
+                "tasks": roadmap_response.get("implementation_tasks", []),
+                "metadata": roadmap_response.get("roadmap_metadata", {})
+            }
+            session["roadmap_data"] = roadmap_payload
+            
+            await patch_session(session_id, {
+                "roadmap_data": roadmap_payload
+            })
+            
+            return {
+                "success": True,
+                "message": "Plan approved - transitioning to roadmap",
+                "result": {
+                    "action": "transition_to_roadmap",
+                    "roadmap": roadmap_response["roadmap_content"],
+                    "business_plan": business_plan_artifact,
+                    "quote": roadmap_response.get("quote"),
+                    "structured_steps": roadmap_response.get("structured_steps", []),
+                    "implementation_tasks": roadmap_response.get("implementation_tasks", []),
+                    "progress": {
+                        "phase": "ROADMAP",
+                        "answered": 0,
+                        "total": 1,
+                        "percent": 0
+                    },
+                    "transition_phase": roadmap_response["transition_phase"]
+                }
+            }
+        
+        # Handle plan_to_budget transition (when user approves business plan)
+        elif transition_type == "plan_to_budget":
+            # Transition to Budget phase
+            await patch_session(session_id, {
+                "current_phase": "BUDGET"
+            })
+            session["current_phase"] = "BUDGET"
+            
+            return {
+                "success": True,
+                "message": "Plan approved - transitioning to budget",
+                "result": {
+                    "action": "transition_to_budget",
+                    "progress": {
+                        "phase": "BUDGET",
+                        "answered": 0,
+                        "total": 1,
+                        "percent": 0
+                    }
+                }
+            }
     
     elif decision == "revisit":
         # Return to Business Plan phase for modifications

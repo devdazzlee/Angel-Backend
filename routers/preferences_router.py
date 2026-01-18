@@ -65,3 +65,4 @@ async def set_feedback_intensity(
         logger.error(f"Error updating feedback intensity: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update feedback intensity: {str(e)}") from e
 
+
