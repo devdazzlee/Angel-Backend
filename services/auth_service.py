@@ -399,38 +399,95 @@ async def update_password(token: str, new_password: str):
             logger.error(f"Failed to decode recovery token: {decode_error}")
             raise ValueError("Invalid reset token format. Please use the link from your email.") from decode_error
         
-        # Use admin API to update password directly
-        # The token is already validated by Supabase when user clicked the link
-        # We just need to extract user_id and update the password
+        # Use the recovery token to create a user session and update password
+        # The token is an access_token that's already validated by Supabase
+        # We need to create a user client (not admin) and use the token to authenticate
         try:
-            update_response = supabase.auth.admin.update_user_by_id(
-                user_id,
-                {"password": new_password}
-            )
+            from db.supabase import SUPABASE_URL
+            import os
             
-            if update_response.user:
-                logger.info(f"Password updated successfully for user: {update_response.user.email}")
-                return {
-                    "success": True,
-                    "message": "Password updated successfully",
-                    "user": {
-                        "id": update_response.user.id,
-                        "email": update_response.user.email
-                    }
-                }
-            else:
-                raise ValueError("Failed to update password - no user returned")
+            # Get anon key for user client (fallback to service role if not available)
+            anon_key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+            if not anon_key:
+                raise ValueError("Supabase anon key not configured")
+            
+            # Create a user client (not admin client)
+            user_client = create_client(SUPABASE_URL, anon_key)
+            
+            # Set the session using the access_token from recovery link
+            # The token is already validated, we just need to use it to authenticate
+            try:
+                # Use the token to get user info and set session
+                # We'll use the token directly in the Authorization header
+                # First, let's try to update password using the token as bearer token
+                import httpx
                 
-        except AuthApiError as admin_error:
-            logger.error(f"Admin API failed to update password: {admin_error.message}")
-            error_lower = admin_error.message.lower()
-            
-            if "not found" in error_lower or "invalid" in error_lower:
-                raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from admin_error
-            if "not allowed" in error_lower or "forbidden" in error_lower:
-                # This shouldn't happen with service role key, but if it does, provide clear error
-                raise ValueError("Unable to update password. Please ensure your Supabase service role key has proper permissions, or request a new password reset link.") from admin_error
-            raise ValueError(f"Failed to update password: {admin_error.message}") from admin_error
+                # Make direct API call with the token
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "apikey": anon_key,
+                    "Content-Type": "application/json"
+                }
+                
+                update_data = {"password": new_password}
+                response = httpx.put(
+                    f"{SUPABASE_URL}/auth/v1/user",
+                    headers=headers,
+                    json=update_data,
+                    timeout=30.0
+                )
+                
+                if response.status_code == 200:
+                    user_data = response.json()
+                    logger.info(f"Password updated successfully for user: {user_data.get('email', email)}")
+                    return {
+                        "success": True,
+                        "message": "Password updated successfully",
+                        "user": {
+                            "id": user_data.get("id", user_id),
+                            "email": user_data.get("email", email)
+                        }
+                    }
+                elif response.status_code == 401 or response.status_code == 403:
+                    raise ValueError("Invalid or expired reset token. Please request a new password reset link.")
+                else:
+                    error_msg = response.text or f"HTTP {response.status_code}"
+                    raise ValueError(f"Failed to update password: {error_msg}")
+                    
+            except httpx.HTTPError as http_error:
+                logger.error(f"HTTP error updating password: {http_error}")
+                raise ValueError("Failed to update password. Please try again later.") from http_error
+            except ValueError:
+                raise
+            except Exception as token_error:
+                logger.error(f"Error using token to update password: {token_error}")
+                # Fallback: Try admin API as last resort
+                try:
+                    update_response = supabase.auth.admin.update_user_by_id(
+                        user_id,
+                        {"password": new_password}
+                    )
+                    if update_response.user:
+                        logger.info(f"Password updated successfully via admin API for user: {update_response.user.email}")
+                        return {
+                            "success": True,
+                            "message": "Password updated successfully",
+                            "user": {
+                                "id": update_response.user.id,
+                                "email": update_response.user.email
+                            }
+                        }
+                except Exception as admin_fallback_error:
+                    logger.error(f"Admin API fallback also failed: {admin_fallback_error}")
+                    raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from token_error
+                raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from token_error
+                
+        except AuthApiError as auth_error:
+            logger.error(f"Auth API error updating password: {auth_error.message}")
+            error_lower = auth_error.message.lower()
+            if "expired" in error_lower or "invalid" in error_lower or "token" in error_lower:
+                raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from auth_error
+            raise ValueError(f"Failed to update password: {auth_error.message}") from auth_error
         
     except ValueError as e:
         # Re-raise ValueError errors (already formatted)
