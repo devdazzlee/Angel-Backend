@@ -282,13 +282,14 @@ async def send_reset_password_email(email: str):
         
         user_id = user_obj.id
         
-        # Check if email is confirmed - Supabase may not send reset emails to unconfirmed emails
+        # Check if email is confirmed - we'll try to send reset email anyway
+        # If Supabase rejects it, we'll handle the error and provide helpful message
         email_confirmed = getattr(user_obj, 'email_confirmed_at', None) is not None
         if not email_confirmed:
-            logger.warning(f"Password reset requested for unconfirmed email: {email}")
-            raise ValueError("Please confirm your email address first. Check your inbox for the confirmation email, then try resetting your password again.")
+            logger.info(f"Password reset requested for unconfirmed email: {email} - will attempt to send anyway")
         
-        # User exists and email is confirmed, send password reset email using Supabase's email service
+        # User exists, send password reset email using Supabase's email service
+        # Note: Supabase may allow password reset for unconfirmed emails depending on configuration
         # Note: Email sender (support@founderport.ai) must be configured in Supabase Dashboard
         # Authentication > Email Templates > Reset Password
         # Also ensure SMTP is configured in Project Settings > Auth > SMTP Settings
@@ -318,11 +319,13 @@ async def send_reset_password_email(email: str):
                 logger.warning(f"Password reset rate limited for {email}. Please wait {wait_time} seconds before requesting again.")
                 raise ValueError(f"Too many password reset requests. Please wait {wait_time} seconds before requesting again. Check your email inbox - you may have already received a reset link.") from send_error
             
+            # Handle email confirmation errors
+            if "email" in error_str and ("not confirmed" in error_str or "unconfirmed" in error_str):
+                logger.warning(f"Password reset blocked for unconfirmed email: {email}")
+                raise ValueError("Please confirm your email address first. Check your inbox for the confirmation email, then try resetting your password again. If you didn't receive the confirmation email, please contact support.") from send_error
+            
             # Handle other errors
             logger.error(f"Failed to send password reset email: {send_error}")
-            if "email" in error_str and "not confirmed" in error_str:
-                raise ValueError("Please confirm your email address first. Check your inbox for the confirmation email, then try resetting your password again.") from send_error
-            
             raise ValueError("Failed to send password reset email. Please check your Supabase email configuration (SMTP settings and email templates) or contact support.") from send_error
         
         # Note: Token tracking removed - Supabase manages token expiration (default 1 hour)
@@ -350,71 +353,65 @@ async def send_reset_password_email(email: str):
 async def update_password(token: str, new_password: str):
     """
     Update user password using the reset token from email.
-    Validates 10-minute expiration before allowing password update.
-    Extracts email from token and updates password via admin API.
+    Supabase recovery tokens are JWT tokens that contain user information.
+    We decode the token to get user_id and update password via admin API.
     """
     try:
+        import base64
+        import json
         from datetime import datetime
         
-        # Check if token exists in our password_reset_tokens table and validate 10-minute expiration
-        token_record = None
-        user_id = None
-        email = None
-        
+        # Supabase recovery tokens are JWT tokens - decode to get user info
+        # JWT format: header.payload.signature
         try:
-            # Query password_reset_tokens table to check expiration
-            token_result = supabase.table("password_reset_tokens").select("*").eq("token", token).eq("used", False).single().execute()
+            # Split JWT token into parts
+            token_parts = token.split('.')
+            if len(token_parts) != 3:
+                raise ValueError("Invalid token format")
             
-            if token_result.data:
-                token_record = token_result
-                token_data = token_result.data
-                expires_at_str = token_data.get("expires_at")
-                created_at_str = token_data.get("created_at")
-                user_id = token_data.get("user_id")
-                email = token_data.get("email")
+            # Decode payload (second part of JWT)
+            payload = token_parts[1]
+            # Add padding if needed for base64 decoding
+            padding = len(payload) % 4
+            if padding:
+                payload += '=' * (4 - padding)
+            
+            # Decode base64
+            decoded_payload = base64.urlsafe_b64decode(payload)
+            token_data = json.loads(decoded_payload)
+            
+            # Extract user information from token
+            user_id = token_data.get('sub')  # 'sub' is the user ID in JWT
+            email = token_data.get('email')
+            exp = token_data.get('exp')  # Expiration timestamp
+            
+            if not user_id:
+                raise ValueError("Token does not contain user information")
+            
+            # Check if token is expired (exp is Unix timestamp)
+            if exp:
+                from datetime import datetime, timezone
+                exp_datetime = datetime.fromtimestamp(exp, tz=timezone.utc)
+                now = datetime.now(timezone.utc)
                 
-                if expires_at_str:
-                    expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
-                    now = datetime.now(expires_at.tzinfo) if expires_at.tzinfo else datetime.now()
-                    
-                    # Check if token has expired (10 minutes)
-                    if now > expires_at:
-                        logger.warning(f"Password reset token expired for token: {token[:20]}...")
-                        raise ValueError("Password reset link has expired. Please request a new password reset link. Reset links expire after 10 minutes.")
-                    
-                    # Additional validation: Check if token was created more than 10 minutes ago
-                    if created_at_str:
-                        created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
-                        elapsed = (now - created_at).total_seconds()
-                        if elapsed > 600:  # 10 minutes in seconds
-                            logger.warning(f"Password reset token expired (more than 10 minutes old) for token: {token[:20]}...")
-                            raise ValueError("Password reset link has expired. Please request a new password reset link. Reset links expire after 10 minutes.")
-        except ValueError:
-            # Re-raise expiration errors
-            raise
-        except Exception as token_check_error:
-            # If table doesn't exist or token not found, log warning but continue with Supabase validation
-            logger.warning(f"Could not check token expiration in database (table may not exist or token not found): {token_check_error}")
-            # Continue with Supabase's token validation as fallback
+                if now > exp_datetime:
+                    logger.warning(f"Password reset token expired for user: {user_id}")
+                    raise ValueError("Password reset link has expired. Please request a new password reset link.")
+            
+            logger.info(f"Decoded recovery token for user: {user_id}, email: {email}")
+            
+        except (ValueError, json.JSONDecodeError, Exception) as decode_error:
+            logger.error(f"Failed to decode recovery token: {decode_error}")
+            raise ValueError("Invalid reset token format. Please use the link from your email.") from decode_error
         
-        # If we found token record with valid expiration, use it to update password
-        if token_record and token_record.data and user_id:
-            # Update password using admin API (we already validated expiration)
+        # Update password using admin API
+        try:
             update_response = supabase.auth.admin.update_user_by_id(
                 user_id,
                 {"password": new_password}
             )
             
             if update_response.user:
-                # Mark token as used
-                try:
-                    supabase.table("password_reset_tokens").update({
-                        "used": True,
-                        "used_at": datetime.now().isoformat()
-                    }).eq("token", token).execute()
-                except Exception as mark_error:
-                    logger.warning(f"Could not mark token as used: {mark_error}")
-                
                 logger.info(f"Password updated successfully for user: {update_response.user.email}")
                 return {
                     "success": True,
@@ -424,30 +421,30 @@ async def update_password(token: str, new_password: str):
                         "email": update_response.user.email
                     }
                 }
-        
-        # Fallback: Use Supabase's standard recovery flow (if token record not found)
-        # Try to verify and use the recovery token via Supabase's exchange method
-        # For recovery tokens, Supabase uses a different flow - tokens need to be exchanged for session
-        # However, we can try using Supabase's verify_otp or update_user_by_id if we can get user from token
-        
-        # If we couldn't find token in our table, rely on Supabase's validation
-        # Note: Supabase's default expiration may be different (configure in dashboard)
-        # But we've documented that reset links expire in 10 minutes in the email
-        raise ValueError("Invalid or expired reset token. Please request a new password reset link. Reset links expire after 10 minutes.")
+            else:
+                raise ValueError("Failed to update password - no user returned")
+                
+        except AuthApiError as admin_error:
+            logger.error(f"Admin API failed to update password: {admin_error.message}")
+            error_lower = admin_error.message.lower()
+            if "not found" in error_lower or "invalid" in error_lower:
+                raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from admin_error
+            raise ValueError(f"Failed to update password: {admin_error.message}") from admin_error
         
     except ValueError as e:
+        # Re-raise ValueError errors (already formatted)
         raise e
     except AuthApiError as exc:
         logger.error(f"Failed to update password: {exc.message}")
         error_lower = exc.message.lower()
         if "expired" in error_lower or "invalid" in error_lower or "token" in error_lower:
-            raise ValueError("Invalid or expired reset token. Please request a new password reset link. Reset links expire after 10 minutes.") from exc
+            raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from exc
         raise ValueError(f"Failed to update password: {exc.message}") from exc
     except Exception as e:
         logger.error(f"Unexpected error updating password: {e}")
         error_str = str(e).lower()
         if "expired" in error_str:
-            raise ValueError("Password reset link has expired. Please request a new password reset link. Reset links expire after 10 minutes.") from e
+            raise ValueError("Password reset link has expired. Please request a new password reset link.") from e
         raise ValueError("Failed to update password. Please try again later.") from e
 
 def refresh_session(refresh_token: str):
