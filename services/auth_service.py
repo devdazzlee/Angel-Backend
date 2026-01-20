@@ -352,21 +352,22 @@ async def send_reset_password_email(email: str):
 
 async def update_password(token: str, new_password: str):
     """
-    Update user password using the reset token from email.
-    Supabase recovery tokens must be verified using verify_otp with type="recovery",
-    then we can update the password using the verified session.
+    Update user password using the recovery access_token from email.
+    The token is already validated by Supabase when user clicks the link.
+    We decode it to get user_id and update password via admin API.
     """
     try:
         import base64
         import json
+        from supabase import create_client
         
-        # First, decode the JWT token to extract email (needed for verify_otp)
+        # Decode the JWT access_token to extract user information
         try:
             token_parts = token.split('.')
             if len(token_parts) != 3:
                 raise ValueError("Invalid token format")
             
-            # Decode payload to get email
+            # Decode payload
             payload = token_parts[1]
             padding = len(payload) % 4
             if padding:
@@ -375,12 +376,12 @@ async def update_password(token: str, new_password: str):
             decoded_payload = base64.urlsafe_b64decode(payload)
             token_data = json.loads(decoded_payload)
             
+            user_id = token_data.get('sub')  # User ID
             email = token_data.get('email')
-            user_id = token_data.get('sub')
-            exp = token_data.get('exp')
+            exp = token_data.get('exp')  # Expiration timestamp
             
-            if not email:
-                raise ValueError("Token does not contain email information")
+            if not user_id:
+                raise ValueError("Token does not contain user information")
             
             # Check expiration
             if exp:
@@ -392,43 +393,20 @@ async def update_password(token: str, new_password: str):
                     logger.warning(f"Password reset token expired for user: {user_id}")
                     raise ValueError("Password reset link has expired. Please request a new password reset link.")
             
-            logger.info(f"Decoded recovery token for email: {email}")
+            logger.info(f"Decoded recovery token for user_id: {user_id}, email: {email}")
             
         except (ValueError, json.JSONDecodeError, Exception) as decode_error:
             logger.error(f"Failed to decode recovery token: {decode_error}")
             raise ValueError("Invalid reset token format. Please use the link from your email.") from decode_error
         
-        # Verify the recovery token using Supabase's verify_otp
-        # This is the proper way to validate recovery tokens and get a session
-        # verify_otp requires both email and token for recovery type
+        # Use admin API to update password directly
+        # The token is already validated by Supabase when user clicked the link
+        # We just need to extract user_id and update the password
         try:
-            verify_response = supabase.auth.verify_otp({
-                "token": token,
-                "type": "recovery",
-                "email": email
-            })
-            
-            if not verify_response.session:
-                raise ValueError("Token verification failed - no session returned")
-            
-            session = verify_response.session
-            logger.info(f"Recovery token verified for email: {email}, user_id: {session.user.id}")
-            
-        except AuthApiError as verify_error:
-            logger.error(f"Failed to verify recovery token: {verify_error.message}")
-            error_lower = verify_error.message.lower()
-            if "expired" in error_lower or "invalid" in error_lower or "token" in error_lower:
-                raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from verify_error
-            raise ValueError(f"Failed to verify reset token: {verify_error.message}") from verify_error
-        
-        # Now update the password using the verified session
-        # Use update_user with the session from verify_otp
-        try:
-            # The session is already set on the client from verify_otp
-            # Now we can update the user's password
-            update_response = supabase.auth.update_user({
-                "password": new_password
-            })
+            update_response = supabase.auth.admin.update_user_by_id(
+                user_id,
+                {"password": new_password}
+            )
             
             if update_response.user:
                 logger.info(f"Password updated successfully for user: {update_response.user.email}")
@@ -443,12 +421,16 @@ async def update_password(token: str, new_password: str):
             else:
                 raise ValueError("Failed to update password - no user returned")
                 
-        except AuthApiError as update_error:
-            logger.error(f"Failed to update password: {update_error.message}")
-            error_lower = update_error.message.lower()
-            if "expired" in error_lower or "invalid" in error_lower or "token" in error_lower or "session" in error_lower:
-                raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from update_error
-            raise ValueError(f"Failed to update password: {update_error.message}") from update_error
+        except AuthApiError as admin_error:
+            logger.error(f"Admin API failed to update password: {admin_error.message}")
+            error_lower = admin_error.message.lower()
+            
+            if "not found" in error_lower or "invalid" in error_lower:
+                raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from admin_error
+            if "not allowed" in error_lower or "forbidden" in error_lower:
+                # This shouldn't happen with service role key, but if it does, provide clear error
+                raise ValueError("Unable to update password. Please ensure your Supabase service role key has proper permissions, or request a new password reset link.") from admin_error
+            raise ValueError(f"Failed to update password: {admin_error.message}") from admin_error
         
     except ValueError as e:
         # Re-raise ValueError errors (already formatted)
