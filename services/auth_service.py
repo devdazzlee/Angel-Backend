@@ -353,42 +353,36 @@ async def send_reset_password_email(email: str):
 async def update_password(token: str, new_password: str):
     """
     Update user password using the reset token from email.
-    Supabase recovery tokens are JWT tokens that contain user information.
-    We decode the token to get user_id and update password via admin API.
+    Supabase recovery tokens must be verified using verify_otp with type="recovery",
+    then we can update the password using the verified session.
     """
     try:
         import base64
         import json
-        from datetime import datetime
         
-        # Supabase recovery tokens are JWT tokens - decode to get user info
-        # JWT format: header.payload.signature
+        # First, decode the JWT token to extract email (needed for verify_otp)
         try:
-            # Split JWT token into parts
             token_parts = token.split('.')
             if len(token_parts) != 3:
                 raise ValueError("Invalid token format")
             
-            # Decode payload (second part of JWT)
+            # Decode payload to get email
             payload = token_parts[1]
-            # Add padding if needed for base64 decoding
             padding = len(payload) % 4
             if padding:
                 payload += '=' * (4 - padding)
             
-            # Decode base64
             decoded_payload = base64.urlsafe_b64decode(payload)
             token_data = json.loads(decoded_payload)
             
-            # Extract user information from token
-            user_id = token_data.get('sub')  # 'sub' is the user ID in JWT
             email = token_data.get('email')
-            exp = token_data.get('exp')  # Expiration timestamp
+            user_id = token_data.get('sub')
+            exp = token_data.get('exp')
             
-            if not user_id:
-                raise ValueError("Token does not contain user information")
+            if not email:
+                raise ValueError("Token does not contain email information")
             
-            # Check if token is expired (exp is Unix timestamp)
+            # Check expiration
             if exp:
                 from datetime import datetime, timezone
                 exp_datetime = datetime.fromtimestamp(exp, tz=timezone.utc)
@@ -398,18 +392,41 @@ async def update_password(token: str, new_password: str):
                     logger.warning(f"Password reset token expired for user: {user_id}")
                     raise ValueError("Password reset link has expired. Please request a new password reset link.")
             
-            logger.info(f"Decoded recovery token for user: {user_id}, email: {email}")
+            logger.info(f"Decoded recovery token for email: {email}")
             
         except (ValueError, json.JSONDecodeError, Exception) as decode_error:
             logger.error(f"Failed to decode recovery token: {decode_error}")
             raise ValueError("Invalid reset token format. Please use the link from your email.") from decode_error
         
-        # Update password using admin API
+        # Verify the recovery token using Supabase's verify_otp
+        # This is the proper way to validate recovery tokens and get a session
         try:
-            update_response = supabase.auth.admin.update_user_by_id(
-                user_id,
-                {"password": new_password}
-            )
+            verify_response = supabase.auth.verify_otp({
+                "token": token,
+                "type": "recovery"
+            })
+            
+            if not verify_response.session:
+                raise ValueError("Token verification failed - no session returned")
+            
+            session = verify_response.session
+            logger.info(f"Recovery token verified for email: {email}, user_id: {session.user.id}")
+            
+        except AuthApiError as verify_error:
+            logger.error(f"Failed to verify recovery token: {verify_error.message}")
+            error_lower = verify_error.message.lower()
+            if "expired" in error_lower or "invalid" in error_lower or "token" in error_lower:
+                raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from verify_error
+            raise ValueError(f"Failed to verify reset token: {verify_error.message}") from verify_error
+        
+        # Now update the password using the verified session
+        # Use update_user with the session from verify_otp
+        try:
+            # The session is already set on the client from verify_otp
+            # Now we can update the user's password
+            update_response = supabase.auth.update_user({
+                "password": new_password
+            })
             
             if update_response.user:
                 logger.info(f"Password updated successfully for user: {update_response.user.email}")
@@ -424,12 +441,12 @@ async def update_password(token: str, new_password: str):
             else:
                 raise ValueError("Failed to update password - no user returned")
                 
-        except AuthApiError as admin_error:
-            logger.error(f"Admin API failed to update password: {admin_error.message}")
-            error_lower = admin_error.message.lower()
-            if "not found" in error_lower or "invalid" in error_lower:
-                raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from admin_error
-            raise ValueError(f"Failed to update password: {admin_error.message}") from admin_error
+        except AuthApiError as update_error:
+            logger.error(f"Failed to update password: {update_error.message}")
+            error_lower = update_error.message.lower()
+            if "expired" in error_lower or "invalid" in error_lower or "token" in error_lower or "session" in error_lower:
+                raise ValueError("Invalid or expired reset token. Please request a new password reset link.") from update_error
+            raise ValueError(f"Failed to update password: {update_error.message}") from update_error
         
     except ValueError as e:
         # Re-raise ValueError errors (already formatted)
