@@ -43,6 +43,63 @@ def _check_user_exists(email: str) -> bool:
     return False
 
 
+def _get_user_by_email(email: str):
+    """
+    Get user by email from Supabase auth.users table using direct database query.
+    Uses RPC function for efficient O(1) lookup - works for any number of users.
+    Returns user-like object if found, None otherwise.
+    """
+    try:
+        # Primary method: Use RPC function that queries auth.users directly
+        # This is the most efficient approach - direct database query, no pagination needed
+        result = supabase.rpc('get_user_by_email', {'email_address': email}).execute()
+        
+        if result.data:
+            user_data = result.data
+            # Create a simple user-like object from the JSON response
+            class UserObject:
+                def __init__(self, data):
+                    self.id = data.get('id')
+                    self.email = data.get('email')
+                    self.email_confirmed_at = data.get('email_confirmed_at')
+                    self.created_at = data.get('created_at')
+                    self.updated_at = data.get('updated_at')
+                    self.user_metadata = data.get('user_metadata', {})
+                    self.app_metadata = data.get('app_metadata', {})
+            
+            logger.info(f"Found user with email {email} via RPC function")
+            return UserObject(user_data)
+        
+        logger.info(f"User with email {email} not found via RPC function")
+        return None
+        
+    except Exception as e:
+        # Fallback: If RPC function doesn't exist, use admin API
+        # This should rarely happen if SQL function is properly set up
+        logger.warning(f"RPC function get_user_by_email not available, using admin API fallback: {e}")
+        try:
+            # Fallback: Use admin API with get_user_by_id after finding user_id
+            # This is less efficient but works as backup
+            email_lower = email.lower().strip()
+            
+            # Try to get user using admin API's list_users with pagination
+            # But limit to first page only as fallback (not ideal, but better than nothing)
+            users_response = supabase.auth.admin.list_users(page=1, per_page=1000)
+            
+            if hasattr(users_response, 'users') and users_response.users:
+                for user in users_response.users:
+                    if user.email and user.email.lower().strip() == email_lower:
+                        logger.info(f"Found user with email {email} via admin API fallback")
+                        return user
+            
+            logger.warning(f"User with email {email} not found in admin API fallback")
+            return None
+            
+        except Exception as admin_error:
+            logger.error(f"Failed to get user by email via admin API fallback: {admin_error}")
+            return None
+
+
 async def create_user(email: str, password: str, full_name: str):
     # Check if user already exists before attempting signup
     if _check_user_exists(email):
@@ -174,11 +231,21 @@ async def authenticate_user(email: str, password: str):
         ]
         
         if any(keyword in error_message for keyword in invalid_credential_keywords):
-            # Could be unconfirmed email - check if user exists
+            # Could be unconfirmed email - check if user exists and email confirmation status
             try:
                 if _check_user_exists(email):
-                    # User exists - might be unconfirmed email
-                    raise ValueError("If you just signed up, check your inbox for a validation link. You must confirm your email address before you can sign in. If you've already confirmed, please check your email and password.")
+                    # User exists - check if email is confirmed
+                    user = _get_user_by_email(email)
+                    if user:
+                        # Check email confirmation status
+                        email_confirmed = getattr(user, 'email_confirmed_at', None) is not None
+                        if not email_confirmed:
+                            raise ValueError("If you just signed up, check your inbox for a validation link. You must confirm your email address before you can sign in.")
+                        # Email is confirmed but password is wrong
+                        raise ValueError("Invalid password. Please check your password and try again.")
+            except ValueError:
+                # Re-raise ValueError (email confirmation or password error)
+                raise
             except Exception:
                 pass  # If we can't check, just return generic error
             
@@ -205,93 +272,69 @@ async def send_reset_password_email(email: str):
             logger.warning(f"Password reset requested for non-existent email: {email}")
             raise ValueError("This account is not available. Please check your email address.")
         
-        # Get user by email to get user_id
-        from db.supabase import supabase
-        user_response = supabase.auth.admin.list_users()
-        user_id = None
-        user_obj = None
+        # Get user by email using direct database query (RPC function)
+        # This efficiently queries auth.users table directly - works for any number of users
+        user_obj = _get_user_by_email(email)
         
-        # Find user by email
-        if hasattr(user_response, 'users') and user_response.users:
-            for user in user_response.users:
-                if user.email and user.email.lower() == email.lower():
-                    user_id = user.id
-                    user_obj = user
-                    break
+        if not user_obj:
+            logger.error(f"User exists in database but not found in admin API for email: {email}")
+            raise ValueError("User account found but unable to process reset. Please contact support.")
         
-        if not user_id:
-            raise ValueError("User not found. Please check your email address.")
+        user_id = user_obj.id
         
-        # User exists, generate reset link using admin API (allows custom expiration handling)
+        # Check if email is confirmed - Supabase may not send reset emails to unconfirmed emails
+        email_confirmed = getattr(user_obj, 'email_confirmed_at', None) is not None
+        if not email_confirmed:
+            logger.warning(f"Password reset requested for unconfirmed email: {email}")
+            raise ValueError("Please confirm your email address first. Check your inbox for the confirmation email, then try resetting your password again.")
+        
+        # User exists and email is confirmed, send password reset email using Supabase's email service
+        # Note: Email sender (support@founderport.ai) must be configured in Supabase Dashboard
+        # Authentication > Email Templates > Reset Password
+        # Also ensure SMTP is configured in Project Settings > Auth > SMTP Settings
         frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
         frontend_url = frontend_url.rstrip('/')
         redirect_url = f"{frontend_url}/reset-password"
         
-        # Generate recovery link using admin API
-        # This generates a link that we can track for expiration
-        link_response = supabase.auth.admin.generate_link({
-            "type": "recovery",
-            "email": email,
-            "options": {
-                "redirect_to": redirect_url
-            }
-        })
-        
-        if not link_response or not hasattr(link_response, 'properties') or not link_response.properties:
-            raise ValueError("Failed to generate password reset link. Please try again later.")
-        
-        # Extract token from the generated link
-        reset_link = link_response.properties.get('action_link', '') or link_response.properties.get('href', '')
-        if not reset_link:
-            # Fallback: Use standard reset_password_for_email if generate_link doesn't work
-            logger.warning("Admin generate_link didn't return link, using standard reset_password_for_email")
+        # Use reset_password_for_email - this generates the link AND sends the email in one call
+        # This is simpler and avoids rate limiting issues from calling multiple endpoints
+        try:
             supabase.auth.reset_password_for_email(
                 email,
                 {
                     "redirect_to": redirect_url
                 }
             )
-        else:
-            # Extract token from link (format: .../recover?token=...)
-            import re
-            token_match = re.search(r'[?&]token=([^&]+)', reset_link)
-            if token_match:
-                reset_token = token_match.group(1)
-                
-                # Store reset token with creation timestamp and 10-minute expiration
-                from datetime import datetime, timedelta
-                expires_at = datetime.now() + timedelta(minutes=10)
-                
-                # Store in password_reset_tokens table (create table if doesn't exist)
-                try:
-                    supabase.table("password_reset_tokens").insert({
-                        "user_id": user_id,
-                        "email": email,
-                        "token": reset_token,
-                        "created_at": datetime.now().isoformat(),
-                        "expires_at": expires_at.isoformat(),
-                        "used": False
-                    }).execute()
-                    
-                    logger.info(f"Password reset token stored for {email}, expires at {expires_at}")
-                except Exception as db_error:
-                    logger.warning(f"Could not store reset token in database (table may not exist): {db_error}")
-                    # Continue anyway - Supabase will validate the token
+            logger.info(f"Password reset email sent to {email}")
+        except Exception as send_error:
+            error_str = str(send_error).lower()
+            
+            # Handle rate limiting - Supabase limits password reset requests to once per 60 seconds
+            if "429" in str(send_error) or "too many requests" in error_str or "after" in error_str and "seconds" in error_str:
+                # Extract wait time from error message if available
+                import re
+                wait_match = re.search(r'after (\d+) seconds?', error_str)
+                wait_time = wait_match.group(1) if wait_match else "60"
+                logger.warning(f"Password reset rate limited for {email}. Please wait {wait_time} seconds before requesting again.")
+                raise ValueError(f"Too many password reset requests. Please wait {wait_time} seconds before requesting again. Check your email inbox - you may have already received a reset link.") from send_error
+            
+            # Handle other errors
+            logger.error(f"Failed to send password reset email: {send_error}")
+            if "email" in error_str and "not confirmed" in error_str:
+                raise ValueError("Please confirm your email address first. Check your inbox for the confirmation email, then try resetting your password again.") from send_error
+            
+            raise ValueError("Failed to send password reset email. Please check your Supabase email configuration (SMTP settings and email templates) or contact support.") from send_error
         
-        # Send the reset email using Supabase's email service
-        # Note: Email sender (support@founderport.ai) must be configured in Supabase Dashboard
-        # Authentication > Email Templates > Reset Password
-        supabase.auth.reset_password_for_email(
-            email,
-            {
-                "redirect_to": redirect_url
-            }
-        )
+        # Note: Token tracking removed - Supabase manages token expiration (default 1 hour)
+        # If you need custom 10-minute expiration, you would need to:
+        # 1. Use generate_link to get the token
+        # 2. Store it in password_reset_tokens table
+        # 3. Send email via your own SMTP
+        # For now, we use Supabase's built-in reset_password_for_email which handles everything
         
-        logger.info(f"Password reset email sent to {email} (expires in 10 minutes)")
         return {
             "email": email, 
-            "message": "A password reset link has been sent to your email. The link will expire in 10 minutes."
+            "message": "A password reset link has been sent to your email. Please check your inbox (and spam folder). The link will expire in 1 hour."
         }
     except ValueError as e:
         # Re-raise ValueError (user doesn't exist)

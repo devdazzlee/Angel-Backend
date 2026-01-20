@@ -38,8 +38,11 @@ async def signup(user: SignUpSchema):
 
 @auth_router.post("/signin")
 async def signin(user: SignInSchema):
-    session = await authenticate_user(user.email, user.password)
-    return {"success": True, "message": "User authenticated successfully", "result": {"session": session}}
+    try:
+        session = await authenticate_user(user.email, user.password)
+        return {"success": True, "message": "User authenticated successfully", "result": {"session": session}}
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 @auth_router.post("/reset-password")
 async def reset_password(user: ResetPasswordSchema):
