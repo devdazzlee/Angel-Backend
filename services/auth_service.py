@@ -400,10 +400,12 @@ async def update_password(token: str, new_password: str):
         
         # Verify the recovery token using Supabase's verify_otp
         # This is the proper way to validate recovery tokens and get a session
+        # verify_otp requires both email and token for recovery type
         try:
             verify_response = supabase.auth.verify_otp({
                 "token": token,
-                "type": "recovery"
+                "type": "recovery",
+                "email": email
             })
             
             if not verify_response.session:
