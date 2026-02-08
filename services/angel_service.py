@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import Optional, Dict, List, Any
 from utils.constant import ANGEL_SYSTEM_PROMPT
 import logging
+from routers.budget_router import RevenueStreamInitial # Import the new Pydantic model
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,40 @@ client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Web search throttling
 web_search_count = 0
 web_search_reset_time = datetime.now()
+
+# ... existing code ...
+
+async def generate_initial_revenue_streams(business_type: str) -> List[RevenueStreamInitial]:
+    """
+    Generates a list of initial revenue streams based on the business type.
+    """
+    revenue_streams = []
+
+    # Map business types to their corresponding revenue streams
+    # This logic implements the client requirement for dynamic revenue streams
+    if business_type.lower() in ["e-commerce", "retail"]:
+        revenue_streams.append(RevenueStreamInitial(name="Product Sales"))
+    elif business_type.lower() in ["saas", "software"]:
+        revenue_streams.append(RevenueStreamInitial(name="Subscriptions"))
+        revenue_streams.append(RevenueStreamInitial(name="License Sales"))
+    elif business_type.lower() in ["consulting", "services"]:
+        revenue_streams.append(RevenueStreamInitial(name="Service Fees"))
+        revenue_streams.append(RevenueStreamInitial(name="Hourly Consulting"))
+        revenue_streams.append(RevenueStreamInitial(name="Retainer Fees"))
+    elif business_type.lower() in ["content creator", "influencer"]:
+        revenue_streams.append(RevenueStreamInitial(name="Ad Revenue"))
+        revenue_streams.append(RevenueStreamInitial(name="Sponsorships"))
+        revenue_streams.append(RevenueStreamInitial(name="Affiliate Income"))
+        revenue_streams.append(RevenueStreamInitial(name="Merchandise Sales"))
+    elif business_type.lower() in ["coaching", "education"]:
+        revenue_streams.append(RevenueStreamInitial(name="Course Sales"))
+        revenue_streams.append(RevenueStreamInitial(name="Coaching Sessions"))
+        revenue_streams.append(RevenueStreamInitial(name="Workshops"))
+    else:
+        # Default for other types or if business_type is not recognized
+        revenue_streams.append(RevenueStreamInitial(name="General Revenue"))
+
+    return revenue_streams
 
 MOTIVATIONAL_QUOTES = [
     {
@@ -220,74 +255,74 @@ To use web search, include in your response: WEBSEARCH_QUERY: [your search query
 
 THOUGHT_STARTERS_BY_TAG = {
     "BUSINESS_PLAN.01": [
-        "Does your business name show what you do or what you stand for?",
-        "Is it simple to say, spell, and remember?",
-        "Does it sound professional and match how you want people to view your business?"
+        "What core problem does your idea solve, and for whom?",
+        "How is your solution different from what currently exists?",
+        "What vision do you have for your business in the next 1-3 years?"
     ],
     "BUSINESS_PLAN.02": [
-        "What one sentence captures what your business stands for?",
-        "How would you describe your business in a memorable way?",
-        "What message do you want customers to remember about your business?"
+        "What specific features or components will your product/service have?",
+        "How will customers acquire or access your offering?",
+        "What is the core benefit customers will receive from your product/service?"
     ],
     "BUSINESS_PLAN.03": [
-        "Who are you helping, and how are you helping them?",
-        "What made you want to start this business?",
-        "What's the main result or positive change your customer gets from working with you?"
+        "What is your unique selling proposition (USP) that no one else can claim?",
+        "What specific features, benefits, or experiences set you apart?",
+        "Why would a customer choose your offering over a competitor's?"
     ],
     "BUSINESS_PLAN.04": [
-        "What do you do that's different from other businesses doing something similar?",
-        "Why would someone pick you instead of another option?",
-        "What specific benefit or feature would make a customer remember your business?"
+        "What key milestones have you achieved so far?",
+        "What specific steps are you planning to take next to advance your business?",
+        "What is the biggest challenge or unknown at your current stage?"
     ],
     "BUSINESS_PLAN.05": [
-        "What will your customer get or experience when they buy from you?",
-        "How does it work from start to finish?",
-        "What makes this product or service valuable or helpful to your customer's daily life or work?"
+        "Does your name reflect your brand's values or mission?",
+        "Is it easy to remember, pronounce, and spell?",
+        "Check if the name and relevant domain/social media handles are available."
     ],
     "BUSINESS_PLAN.06": [
-        "How does it work from start to finish?",
-        "What value or results will customers get from using it?",
-        "Which feature matters most to your target customer?"
+        "Are there sub-sectors within this industry that you specifically target?",
+        "What are the defining characteristics or major trends in this industry?",
+        "How does your business fit into the broader industry landscape?"
     ],
     "BUSINESS_PLAN.07": [
-        "What intellectual assets need protection?",
-        "Do you have any unique processes, formulas, or technology?",
-        "Which parts of your business would be hardest for a competitor to copy?"
+        "Think SMART: Specific, Measurable, Achievable, Relevant, Time-bound.",
+        "What are 1-3 critical goals you must achieve in the next 6-12 months for success?",
+        "How will you measure progress towards these short-term goals?"
     ],
     "BUSINESS_PLAN.08": [
-        "Where will you sell your services?",
-        "What channels or platforms will you use to reach customers?",
-        "How will your sales location affect your regulatory requirements, marketing strategy, and operations?"
+        "Create a customer avatar: give them a name, age, job, and daily challenges.",
+        "What are their specific needs, desires, and pain points that your business addresses?",
+        "Where do they spend their time (online and offline)?"
     ],
     "BUSINESS_PLAN.09": [
-        "What kind of people or businesses will buy from you?",
-        "What do they care about most when choosing who to buy from?",
-        "What challenges or goals do they have that your business helps with?"
+        "Will you sell directly, through partners, or both?",
+        "What channels are most convenient and accessible for your target customer?",
+        "How will your distribution strategy impact your costs and reach?"
     ],
     "BUSINESS_PLAN.10": [
-        "Is the market large enough to support your business?",
-        "What percentage of this market can you realistically capture?",
-        "Which segment of the market is most reachable for you right now?"
+        "What specific challenge or unmet need drives customers to seek a solution?",
+        "How significant is this problem for them (time, money, frustration)?",
+        "Why has this problem persisted, and how does your solution uniquely address it?"
     ],
     "BUSINESS_PLAN.11": [
-        "What other businesses offer something similar to you?",
-        "What do they do well that customers appreciate?",
-        "What could you do better or differently to stand out in a meaningful way?"
+        "What do you already know about your top 3-5 competitors?",
+        "How do you think your competitors are currently solving the problem your business addresses?",
+        "What gaps or weaknesses do you observe in their offerings or customer service?"
     ],
     "BUSINESS_PLAN.12": [
-        "What solutions are customers using now?",
-        "How does your business make that problem easier or go away?",
-        "Why is solving this problem valuable or urgent for them?"
+        "What technological, social, or economic trends are shaping your industry?",
+        "How might these trends create new opportunities or pose threats to your business?",
+        "Are there any emerging consumer behaviors that could influence your product or strategy?"
     ],
     "BUSINESS_PLAN.13": [
-        "Will you work online, in person, or both?",
-        "Why is that the best setup for your customers and business type?",
-        "How will your location affect your costs or ability to serve more people?"
+        "Based on the research, what unique value proposition can you highlight?",
+        "How can you leverage your strengths or address competitor weaknesses?",
+        "What narrative or brand story will make your business memorable?"
     ],
     "BUSINESS_PLAN.14": [
-        "What basic tools, equipment, or software will you need to run your business?",
-        "Do you need a workspace, storage area, or vehicle to operate?",
-        "What will you need right away versus what can wait until later?"
+        "Consider the pros and cons of each option for your specific business model.",
+        "How does your chosen location impact customer access, operating costs, and market reach?",
+        "Are there any legal or logistical considerations for your preferred location type?"
     ],
     "BUSINESS_PLAN.15": [
         "What things do you need to have ready before you can open or start taking customers?",
@@ -295,124 +330,124 @@ THOUGHT_STARTERS_BY_TAG = {
         "What daily routines or systems will help your business run smoothly?"
     ],
     "BUSINESS_PLAN.16": [
-        "Which suppliers or partners are critical on day one?",
-        "How will you build and maintain these relationships?",
-        "What backup options do you have if a supplier falls through?"
+        "What is the most efficient and cost-effective delivery method for your product/service?",
+        "How will your delivery method enhance the customer experience?",
+        "Are there any specific logistics or partnerships needed for your chosen delivery approach?"
     ],
     "BUSINESS_PLAN.17": [
-        "As your business grows, what new resources or people will you need?",
-        "How can you prepare now for future growth?",
-        "What parts of your operations might need to be updated or automated later?"
+        "Are there any immediate operational tasks not listed that are critical for launch?",
+        "What human resources (staff, contractors) will you need from day one?",
+        "How will you prioritize these operational needs given your current resources?"
     ],
     "BUSINESS_PLAN.18": [
-        "How will you decide what to charge — by cost, value, or what competitors charge?",
-        "Do you plan to offer packages, discounts, or different price levels?",
-        "How will you make sure your prices cover costs but still attract customers?"
+        "What is the fundamental purpose of your business?",
+        "What impact do you want your business to have on customers, employees, or the world?",
+        "How do your core values guide your decisions and actions?"
     ],
     "BUSINESS_PLAN.19": [
-        "What specific results do you want in your first year?",
-        "What small steps will help you reach those sales targets?",
-        "What would success at the end of the first year look like for you personally?"
+        "Which marketing channels are most effective for reaching your target customer?",
+        "What kind of content or messaging will resonate with your audience?",
+        "How will you measure the success of your marketing efforts?"
     ],
     "BUSINESS_PLAN.20": [
-        "What one-time expenses will you have before starting?",
-        "Which of those are most important to pay for first?",
-        "Are there any ways to share, rent, or delay certain costs to save money?"
+        "What is your budget for marketing and sales efforts?",
+        "What internal skills do you possess, and what external expertise might you need?",
+        "How will you ensure consistent messaging across all your marketing and sales activities?"
     ],
     "BUSINESS_PLAN.21": [
-        "What monthly costs will you need to cover, like rent, supplies, or staff?",
-        "Which expenses are fixed and which change based on sales?",
-        "How will you track and review your spending each month?"
+        "Can you articulate your USP in a single, compelling sentence?",
+        "Does your USP address a specific customer pain point or desire?",
+        "Is your USP distinct, defensible, and difficult for competitors to copy?"
     ],
     "BUSINESS_PLAN.22": [
-        "When do you expect to cover your costs (break even)?",
-        "What milestones indicate progress toward profitability?",
-        "How will you adjust if revenue takes longer to grow?"
+        "What launch activities will generate initial excitement and awareness?",
+        "How will you track the effectiveness of your promotions?",
+        "What resources (time, money, partnerships) are needed for these strategies?"
     ],
     "BUSINESS_PLAN.23": [
-        "How much money do you need to get your business off the ground?",
-        "What will that money pay for in the first few months?",
-        "What's your plan if it takes longer than expected to start making income?"
+        "Are there any critical marketing efforts for launch not mentioned?",
+        "What is your initial budget allocation for these marketing activities?",
+        "How will you measure the immediate impact of your short-term marketing?"
     ],
     "BUSINESS_PLAN.24": [
-        "What larger expenses might come up as your business grows?",
-        "How will you plan or save for those costs?",
-        "What steps can you take now to keep your business financially healthy later?"
+        "Consider the implications of each structure for liability, taxation, and administrative burden.",
+        "Does your chosen structure align with your long-term growth plans?",
+        "Have you consulted with a legal or tax professional about this decision?"
     ],
     "BUSINESS_PLAN.25": [
-        "What systems will help you stay organized with paperwork and payments?",
-        "How will you keep your business and personal finances separate?",
-        "Do you need professional help to manage bookkeeping or taxes?"
+        "Why is registering your business name an important first step?",
+        "What are the next steps if you haven't registered it yet?",
+        "Have you checked for name availability at the state and federal levels (e.g., USPTO)?"
     ],
     "BUSINESS_PLAN.26": [
-        "How will people find out about your business — online, word of mouth, or in person?",
-        "What types of marketing fit best for your audience and budget?",
-        "How will you measure if your marketing is bringing in customers?"
+        "Do these permits/licenses seem accurate for your industry and location?",
+        "Are there any permits or licenses you've encountered that are not listed here?",
+        "What is your plan for applying and obtaining these necessary permits/licenses?"
     ],
     "BUSINESS_PLAN.27": [
-        "What steps will you take to turn interest into a purchase?",
-        "Who will talk to customers, close sales, or follow up — you or someone else?",
-        "How will you track your leads and customer information to stay organized?"
+        "Do these insurance types cover the primary risks associated with your business?",
+        "Are there any industry-specific insurance requirements not listed here?",
+        "What steps will you take to obtain quotes and secure these policies?"
     ],
     "BUSINESS_PLAN.28": [
-        "What marketing and sales expenses are required per customer?",
-        "How can you reduce acquisition costs over time?",
-        "Which channels give you the lowest cost per new customer?"
+        "What systems or processes will you put in place to stay updated on regulations?",
+        "Who will be responsible for overseeing legal and regulatory compliance?",
+        "How will you document your compliance efforts?"
     ],
     "BUSINESS_PLAN.29": [
-        "How can you keep customers coming back after the first purchase?",
-        "Could you build loyalty through newsletters, memberships, or repeat offers?",
-        "What ongoing value will encourage long-term relationships?"
+        "Which revenue streams are most viable given your product/service and target market?",
+        "How will each revenue stream contribute to your overall profitability?",
+        "Are there any alternative revenue models you've considered?"
     ],
     "BUSINESS_PLAN.30": [
-        "How will you keep attracting new customers after the first few months?",
-        "What ongoing marketing habits will help you grow over time?",
-        "Which credibility builders (reviews, case studies, PR) will you focus on?"
+        "Will you use cost-plus, value-based, competitive, or freemium pricing?",
+        "How does your pricing align with your brand positioning and target customer's budget?",
+        "Have you researched competitor pricing for similar products/services?"
     ],
     "BUSINESS_PLAN.31": [
-        "Who has access to your target market?",
-        "What mutually beneficial partnerships could you create?",
-        "How can you make collaboration attractive for potential partners?"
+        "Will you use accounting software, a bookkeeper, or an accountant?",
+        "What financial reports will you regularly review (e.g., P&L, balance sheet, cash flow)?",
+        "How will you separate business and personal finances?"
     ],
     "BUSINESS_PLAN.32": [
-        "Does your business type require any special permits or certifications?",
-        "Have you checked your local city or county website for requirements?",
-        "When do you need these permits in place before opening or selling?"
+        "How much capital do you need to launch and operate for the first 6-12 months?",
+        "What are the pros and cons of your chosen funding source(s)?",
+        "What is your backup plan if your primary funding source falls through?"
     ],
     "BUSINESS_PLAN.33": [
-        "What risks could your business face — like damage, accidents, or liability?",
-        "What kind of insurance will help protect you from those risks?",
-        "Do you know what coverage is legally required for your type of business?"
+        "What specific revenue targets do you aim to achieve?",
+        "When do you realistically expect to break even?",
+        "How will achieving these goals impact your business's growth and stability?"
     ],
     "BUSINESS_PLAN.34": [
-        "How will you prevent others from copying your innovations?",
-        "Do you know which protections (patents, trademarks, copyrights) apply?",
-        "Who can help you file or manage the right protections?"
+        "Do these cost categories align with your expectations for starting the business?",
+        "Are there any significant startup costs missing from this breakdown?",
+        "How will you manage and optimize these costs in the early stages?"
     ],
     "BUSINESS_PLAN.35": [
-        "What legal relationships require formal agreements?",
-        "Which documents will protect your interests with employees or partners?",
-        "Do you have templates or a lawyer to help draft these agreements?"
+        "What does 'scaling' mean for your specific business (e.g., more customers, new markets, expanded product lines)?",
+        "What are the biggest challenges you anticipate in scaling, and how will you address them?",
+        "What foundational elements do you need to put in place now to support future growth?"
     ],
     "BUSINESS_PLAN.36": [
-        "Do you understand how your structure affects taxes and compliance?",
-        "How will you maintain tax compliance throughout the year?",
-        "What systems will keep your filings and deadlines on track?"
+        "Where do you envision your business being in terms of market position, revenue, and impact?",
+        "What significant achievements define success for your business in the long term?",
+        "How will these long-term goals guide your strategic decisions today?"
     ],
     "BUSINESS_PLAN.37": [
-        "How will you protect customer and business data?",
-        "What security measures are required in your industry?",
-        "Who is responsible for monitoring privacy and security?"
+        "How will your current operations need to evolve to support your long-term vision?",
+        "What infrastructure (physical or digital) will be necessary for future scale?",
+        "How will you ensure operational efficiency as your business grows?"
     ],
     "BUSINESS_PLAN.38": [
-        "What growth milestones do you want to achieve?",
-        "What resources will you need to support each milestone?",
-        "How will you measure progress as you move through the first year?"
+        "What significant capital investments might be required for your long-term goals?",
+        "How will you fund new product development, market expansion, or talent acquisition?",
+        "What financial metrics will be key indicators of long-term health and growth?"
     ],
     "BUSINESS_PLAN.39": [
-        "What related products or services could you add later?",
-        "What customer feedback could guide your next offering?",
-        "How will you decide when you're ready to launch something new?"
+        "How do you plan to evolve your brand presence and market leadership over time?",
+        "What new marketing channels or strategies might you explore in the future?",
+        "How will you maintain customer loyalty and advocacy as your business scales?"
     ],
     "BUSINESS_PLAN.40": [
         "What new opportunities exist beyond your initial market?",
@@ -420,9 +455,9 @@ THOUGHT_STARTERS_BY_TAG = {
         "What research will you do before expanding to a new segment?"
     ],
     "BUSINESS_PLAN.41": [
-        "Who could help you scale faster?",
-        "What value can you offer potential partners?",
-        "How would you structure a win-win alliance?"
+        "How will you ensure ongoing legal and regulatory compliance as your business grows?",
+        "What administrative systems will you need for efficient management at scale?",
+        "Who will oversee these administrative functions as your business expands?"
     ],
     "BUSINESS_PLAN.42": [
         "What problems could slow your business down — finances, competition, or staffing?",
@@ -435,14 +470,9 @@ THOUGHT_STARTERS_BY_TAG = {
         "What signs will tell you it's time to make a change or try a new approach?"
     ],
     "BUSINESS_PLAN.44": [
-        "What can you do now to lower those risks?",
-        "Who can you reach out to for support when challenges come up?",
-        "What early warning signs will tell you to adjust your plan?"
-    ],
-    "BUSINESS_PLAN.45": [
-        "Are there any gaps or areas that need more attention?",
-        "What else should be included in your comprehensive business plan?",
-        "Is there anything you'd like to research further before moving on?"
+        "What specific needs would this additional funding address (e.g., R&D, market entry, talent)?",
+        "What are potential funding sources (e.g., venture capital, angel investors, grants, debt)?",
+        "What milestones would you need to achieve to attract investors or secure loans?"
     ],
     "BUSINESS_PLAN.45": [
         "What lasting impact do you want your business to have?",
