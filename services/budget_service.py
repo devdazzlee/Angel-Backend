@@ -2,8 +2,11 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from fastapi import HTTPException
 from pydantic import BaseModel
-from db.supabase import create_supabase_client, get_session, fetch_chat_history
+from db.supabase import create_supabase_client
+from services.session_service import get_session
+from services.chat_service import fetch_chat_history
 from services.angel_service import generate_estimated_expenses_from_business_plan, generate_initial_revenue_streams
+from schemas.budget_schemas import RevenueStreamInitial
 import re
 import uuid
 
@@ -18,12 +21,6 @@ class BudgetItemCreate(BaseModel):
     actual_amount: Optional[float] = None
     description: Optional[str] = None
     is_custom: Optional[bool] = True
-
-class RevenueStreamInitial(BaseModel):
-    name: str
-    estimated_price: float = 0.0
-    estimated_volume: int = 0
-    category: str = "revenue"
 
 class RevenueStreamSave(BaseModel):
     id: str

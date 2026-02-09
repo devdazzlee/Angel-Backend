@@ -2,7 +2,8 @@ from fastapi import APIRouter, Request, HTTPException, Depends
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 from middlewares.auth import verify_auth_token
-from services.budget_service import BudgetService, BudgetItemCreate, BudgetCreate, RevenueStreamInitial, RevenueStreamSave
+from services.budget_service import BudgetService, BudgetItemCreate, BudgetCreate, RevenueStreamSave
+from schemas.budget_schemas import RevenueStreamInitial
 
 router = APIRouter(
     tags=["Budget"],

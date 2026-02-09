@@ -208,7 +208,7 @@ EDUCATIONAL CONTENT FORMATTING (COMPACT):
   - **Constructive feedback:** • Point 1 • Point 2
   - **Considerations:** • Point 1 • Point 2 • Point 3
 • Minimize spacing between educational points (use single line breaks, not paragraphs)
-• Preserve Thought Starter (🧠) and Quick Tip (💡) sections with proper spacing
+• Ensure Thought Starter (🧠) and Quick Tip (💡) sections appear on a new line, clearly separated from the main question for improved readability.
 • NEVER include "Areas Where You May Need Additional Support" section
 
 QUESTION FORMAT STRUCTURE:

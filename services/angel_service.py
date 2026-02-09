@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import Optional, Dict, List, Any
 from utils.constant import ANGEL_SYSTEM_PROMPT
 import logging
-from routers.budget_router import RevenueStreamInitial # Import the new Pydantic model
+from schemas.budget_schemas import RevenueStreamInitial
 
 logger = logging.getLogger(__name__)
 
@@ -1703,9 +1703,10 @@ The Business Planning phase is comprehensive and detailed. This ensures your fin
 
 Once you're ready, we'll begin the Business Planning phase where we'll dive deep into every aspect of your business idea — from your product and market to finances and growth strategy.
 
-**Let's build the business of your dreams together!**
+**Let's build the business of our dreams together!**
 
-*"The way to get started is to quit talking and begin doing."* – Walt Disney"""
+**"The way to get started is to quit talking and begin doing."** – Walt Disney
+    """
     
     # Check if we should show Accept/Modify buttons
     button_detection = await should_show_accept_modify_buttons(

@@ -550,9 +550,15 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         print(f"  - Last phase: {last_phase}, Last num: {last_num}")
         print(f"  - Current phase: {current_phase}, Current num: {current_num}")
         
-        # Only increment if moving to next sequential question
+      # KYC-specific logic: handle non-sequential question progression
         if (current_phase == last_phase and int(current_num) == int(last_num) + 1) or \
-           (current_phase != last_phase and current_num == "01"):
+           (current_phase != last_phase and current_num == "01") or \
+           (current_phase == "KYC" and last_phase == "KYC" and 
+            ((last_num == "1" and current_num == "3") or
+             (last_num == "3" and current_num == "7") or
+             (last_num == "7" and current_num == "14") or
+             (last_num == "14" and current_num == "15") or
+             (last_num == "15" and current_num == "17"))):
             session["answered_count"] += 1
             print(f"✅ Incremented answered_count to {session['answered_count']}")
         else:
@@ -707,17 +713,29 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     print(f"📊 Phase Progress Output: {phase_progress}")
     
     # For KYC and Business Plan phases, also calculate combined progress (Overall Progress)
+    print(f"🔍 CHECKING PHASE: {current_phase} in ['KYC', 'BUSINESS_PLAN']: {current_phase in ['KYC', 'BUSINESS_PLAN']}")
     if current_phase in ["KYC", "BUSINESS_PLAN"]:
+        print(f"🔍 ENTERING COMBINED PROGRESS CALCULATION")
         combined_progress = calculate_combined_progress(current_phase, answered_count, current_tag)
         print(f"📊 Combined Progress Output (for Overall Progress): {combined_progress}")
         # Add combined progress info to phase_progress for frontend
         phase_progress["overall_progress"] = {
             "answered": combined_progress["answered"],
             "total": combined_progress["total"],
-            "percent": combined_progress["percent"]
+            "percent": combined_progress["percent"],
+            "phase_breakdown": combined_progress.get("phase_breakdown", {
+                "kyc_completed": 0,
+                "kyc_total": 6,
+                "bp_completed": 0,
+                "bp_total": 45
+            })
         }
+        print(f"🔍 ADDED phase_breakdown TO overall_progress")
+    else:
+        print(f"🔍 SKIPPING COMBINED PROGRESS - PHASE: {current_phase}")
     
     print(f"📊 Final Progress Data Sent to Frontend: {phase_progress}")
+    print(f"📊 Phase Breakdown Data: {phase_progress.get('overall_progress', {}).get('phase_breakdown', 'NOT FOUND')}")
     
     # Update session in DB (without phase_progress since it's calculated on the fly)
     await patch_session(session_id, {
