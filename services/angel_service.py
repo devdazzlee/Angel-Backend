@@ -232,7 +232,20 @@ IMPORTANT RULES:
 
 FAILURE TO INCLUDE CORRECT TAGS WILL BREAK THE SYSTEM. ALWAYS include the correct sequential tag before asking any question.
 
-FORMATTING REQUIREMENT: Always use structured format for questions - NEVER paragraph format!"""
+FORMATTING REQUIREMENT: Always use structured format for questions - NEVER paragraph format!
+
+TOPLINE QUESTION RULE:
+Every response MUST include a clear, bold topline question that matches the question tag. Examples:
+- [[Q:BUSINESS_PLAN.08]] **Who is your target customer?**
+- [[Q:BUSINESS_PLAN.14]] **Where will your business be located?**
+The topline question should be the EXACT question from the questionnaire, bolded. Never omit the topline question.
+Thought starters and coaching text are secondary - the bold topline question is MANDATORY.
+
+AUTO-RESEARCH QUESTIONS (Q11, Q12, Q17, Q23, Q26, Q27, Q34, Q42):
+For these questions, Angel presents findings/suggestions FIRST, then asks for user feedback.
+You MUST still include the [[Q:BUSINESS_PLAN.XX]] tag and a clear topline statement.
+Example for Q11: [[Q:BUSINESS_PLAN.11]] **Here's what I found about your competitors:**
+Example for Q12: [[Q:BUSINESS_PLAN.12]] **Here are the industry trends affecting your business:**"""
 
 WEB_SEARCH_PROMPT = """You have access to web search capabilities, but use them VERY SPARINGLY during Implementation phase.
 
@@ -873,7 +886,11 @@ def format_response_structure(reply):
     return formatted_reply
 
 def ensure_question_separation(reply, session_data=None):
-    """Ensure questions are properly separated and not combined"""
+    """Ensure questions are properly separated and not combined.
+    
+    Also ensures the MAIN question (the one with the [[Q:...]] tag) is on its own line
+    and not embedded at the end of a coaching paragraph.
+    """
     
     # Check if this is a business plan question that might be combined
     if session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
@@ -887,6 +904,43 @@ def ensure_question_separation(reply, session_data=None):
         
         for pattern, replacement in combined_patterns:
             reply = re.sub(pattern, replacement, reply)
+        
+        # Separate the main question from coaching text when embedded at end of paragraph
+        # Pattern: "...coaching text ending with period. What is your question?"
+        # Should become: "...coaching text.\n\nWhat is your question?"
+        tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.\d{2}\]\]', reply)
+        if tag_match:
+            # Find lines that end with a question mark and have significant text before it
+            lines = reply.split('\n')
+            new_lines = []
+            for line in lines:
+                stripped = line.strip()
+                # Skip tag lines, empty lines, thought starters
+                if not stripped or '[[Q:' in stripped or stripped.startswith('🧠') or stripped.startswith('💡'):
+                    new_lines.append(line)
+                    continue
+                
+                # Check if line has coaching text followed by a question
+                # Pattern: "...text ending with period/comma. Question text?"
+                # Match: sentence-ending punctuation, space, then a capital letter starting a question
+                embedded_q_match = re.match(
+                    r'^(.{40,}[.!,;])\s+((?:What|How|Where|Who|When|Why|Which|Do|Does|Are|Is|Have|Has|Can|Could|Would|Will|Tell|Describe|Explain|Share)[^?]{10,}\?)(.*)$',
+                    stripped
+                )
+                if embedded_q_match:
+                    coaching_text = embedded_q_match.group(1).strip()
+                    question_text = embedded_q_match.group(2).strip()
+                    trailing = embedded_q_match.group(3).strip()
+                    new_lines.append(coaching_text)
+                    new_lines.append('')
+                    new_lines.append(question_text)
+                    if trailing:
+                        new_lines.append('')
+                        new_lines.append(trailing)
+                else:
+                    new_lines.append(line)
+            
+            reply = '\n'.join(new_lines)
     
     return reply
 
@@ -1089,14 +1143,24 @@ def check_for_section_summary(current_tag, session_data, history):
     
     # Define section boundaries - these are the LAST questions in each section
     # When user answers these questions, we show a section summary BEFORE moving to next section
+    # Aligned with constant.py section definitions:
+    #   Section 1: Product/Service Details (Q1-Q4)
+    #   Section 2: Business Overview (Q5-Q7)
+    #   Section 3: Market Research (Q8-Q13)
+    #   Section 4: Location & Operations (Q14-Q17)
+    #   Section 5: Marketing & Sales Strategy (Q18-Q23)
+    #   Section 6: Legal & Regulatory Compliance (Q24-Q28)
+    #   Section 7: Revenue Model & Financials (Q29-Q34)
+    #   Section 8: Growth & Scaling (Q35-Q41)
+    #   Section 9: Challenges & Contingency Planning (Q42-Q45)
     section_boundaries = {
         4: "SECTION 1 SUMMARY REQUIRED: After BUSINESS_PLAN.04, provide:",
-        8: "SECTION 2 SUMMARY REQUIRED: After BUSINESS_PLAN.08, provide:",
-        12: "SECTION 3 SUMMARY REQUIRED: After BUSINESS_PLAN.12, provide:",
+        7: "SECTION 2 SUMMARY REQUIRED: After BUSINESS_PLAN.07, provide:",
+        13: "SECTION 3 SUMMARY REQUIRED: After BUSINESS_PLAN.13, provide:",
         17: "SECTION 4 SUMMARY REQUIRED: After BUSINESS_PLAN.17, provide:",
-        25: "SECTION 5 SUMMARY REQUIRED: After BUSINESS_PLAN.25, provide:",
-        31: "SECTION 6 SUMMARY REQUIRED: After BUSINESS_PLAN.31, provide:",
-        37: "SECTION 7 SUMMARY REQUIRED: After BUSINESS_PLAN.37, provide:",
+        23: "SECTION 5 SUMMARY REQUIRED: After BUSINESS_PLAN.23, provide:",
+        28: "SECTION 6 SUMMARY REQUIRED: After BUSINESS_PLAN.28, provide:",
+        34: "SECTION 7 SUMMARY REQUIRED: After BUSINESS_PLAN.34, provide:",
         41: "SECTION 8 SUMMARY REQUIRED: After BUSINESS_PLAN.41, provide:",
         45: "SECTION 9 SUMMARY REQUIRED: After BUSINESS_PLAN.45, provide:"
     }
@@ -1113,19 +1177,56 @@ def check_for_section_summary(current_tag, session_data, history):
     return None
 
 def get_section_name(question_num):
-    """Get the section name based on question number"""
-    section_names = {
-        4: "Business Foundation",
-        8: "Product/Service Details", 
-        12: "Market Research",
+    """Get the section name based on question number.
+    
+    Aligned with constant.py section definitions:
+      Section 1: Product/Service Details (Q1-Q4)
+      Section 2: Business Overview (Q5-Q7)
+      Section 3: Market Research (Q8-Q13)
+      Section 4: Location & Operations (Q14-Q17)
+      Section 5: Marketing & Sales Strategy (Q18-Q23)
+      Section 6: Legal & Regulatory Compliance (Q24-Q28)
+      Section 7: Revenue Model & Financials (Q29-Q34)
+      Section 8: Growth & Scaling (Q35-Q41)
+      Section 9: Challenges & Contingency Planning (Q42-Q45)
+    """
+    # Map boundary endpoints to section names
+    boundary_names = {
+        4: "Product/Service Details",
+        7: "Business Overview",
+        13: "Market Research",
         17: "Location & Operations",
-        25: "Financial Planning",
-        31: "Marketing & Sales",
-        37: "Legal & Compliance",
+        23: "Marketing & Sales Strategy",
+        28: "Legal & Regulatory Compliance",
+        34: "Revenue Model & Financials",
         41: "Growth & Scaling",
-        45: "Risk Management"
+        45: "Challenges & Contingency Planning"
     }
-    return section_names.get(question_num, "Unknown Section")
+    
+    # Check if question_num is a boundary endpoint
+    if question_num in boundary_names:
+        return boundary_names[question_num]
+    
+    # Otherwise, determine which section the question belongs to
+    if question_num <= 4:
+        return "Product/Service Details"
+    elif question_num <= 7:
+        return "Business Overview"
+    elif question_num <= 13:
+        return "Market Research"
+    elif question_num <= 17:
+        return "Location & Operations"
+    elif question_num <= 23:
+        return "Marketing & Sales Strategy"
+    elif question_num <= 28:
+        return "Legal & Regulatory Compliance"
+    elif question_num <= 34:
+        return "Revenue Model & Financials"
+    elif question_num <= 41:
+        return "Growth & Scaling"
+    elif question_num <= 45:
+        return "Challenges & Contingency Planning"
+    return "Unknown Section"
 
 async def add_critiquing_insights(reply, session_data=None, user_input=None):
     """Add critiquing insights and coaching based on user's business field (50/50 approach)"""
@@ -1512,11 +1613,33 @@ def build_recent_answer_excerpt(answer: str, max_length: int = 160) -> str:
     return cleaned
 
 def apply_business_plan_thought_starter(reply: str, session_data=None) -> str:
-    """Inject a single thought starter for Business Plan questions and remove default guidance"""
+    """Inject a single thought starter for Business Plan questions and remove default guidance.
+    
+    IMPORTANT: Do NOT inject thought starters into section summaries.
+    """
     if not reply:
         return reply
     
-    # Determine question tag
+    # SKIP section summaries - they should never have thought starters
+    reply_lower = reply.lower()
+    if any(indicator in reply_lower for indicator in [
+        'section complete', 'summary of your information', 
+        'ready to continue?', '[[accept_modify_buttons]]',
+        'please confirm that this information is accurate'
+    ]):
+        # Still clean up any AI-generated thought starters from section summaries
+        cleaned_lines = []
+        for line in reply.split('\n'):
+            stripped = line.strip().lower()
+            if ("thought starter" in stripped or
+                stripped.startswith("consider:") or stripped.startswith("• consider:") or
+                stripped.startswith("think about:") or stripped.startswith("• think about:")):
+                continue
+            cleaned_lines.append(line)
+        return '\n'.join(cleaned_lines)
+    
+    # Determine question tag - ONLY from the reply text, not session fallback
+    # This ensures the thought starter matches the question being ASKED, not the previous one
     question_tag = None
     tag_match = re.search(r'\[\[Q:(BUSINESS_PLAN\.\d{2})\]\]', reply)
     if tag_match:
@@ -1533,25 +1656,23 @@ def apply_business_plan_thought_starter(reply: str, session_data=None) -> str:
     if not thought_starter:
         return reply
     
-    # Remove existing guidance lines (Catch plain Thought Starter, Consider, Think about)
+    # Remove ALL existing guidance lines (AI-generated thought starters, consider, think about, etc.)
     cleaned_lines = []
     for line in reply.split('\n'):
         stripped = line.strip().lower()
-        # Remove lines with "Consider:" or "Think about:" in any format
+        # Remove lines with "Consider:", "Think about:", "Thought Starter:", "Note:" in any format
         if (stripped.startswith("• consider:") or 
             stripped.startswith("consider:") or
             stripped.startswith("• think about:") or 
             stripped.startswith("think about:") or
             stripped.startswith("• note:") or
             stripped.startswith("thought starter:") or
-            " consider:" in stripped or "think about:" in stripped or "thought starter" in stripped):
+            " consider:" in stripped or "think about:" in stripped or "thought starter" in stripped or
+            stripped.startswith("🧠") or stripped.startswith("💭")):
             continue
         cleaned_lines.append(line)
     
-    # Avoid duplicates if already present after cleanup
-    if any("🧠 Thought Starter:" in line for line in cleaned_lines):
-        return '\n'.join(cleaned_lines)
-    
+    # Now insert the CORRECT hardcoded thought starter (always replace, never keep AI-generated ones)
     insertion_line = f"🧠 Thought Starter: {thought_starter}"
     
     # Locate where to insert (before quick tips or end)
@@ -2099,6 +2220,69 @@ def provide_critiquing_feedback(user_msg, session_data, history):
     # No critique needed - answer is substantive
     return None
 
+def _get_current_topic_keywords(asked_q: str) -> list:
+    """Get topic-related keywords for the current question to allow follow-up questions."""
+    topic_keywords = {
+        # Product/Service Details
+        "BUSINESS_PLAN.01": ["business", "idea", "concept", "venture"],
+        "BUSINESS_PLAN.02": ["product", "service", "offer", "provide"],
+        "BUSINESS_PLAN.03": ["unique", "different", "stand out", "competitive advantage"],
+        "BUSINESS_PLAN.04": ["stage", "phase", "progress", "status"],
+        # Business Overview
+        "BUSINESS_PLAN.05": ["name", "brand", "business name"],
+        "BUSINESS_PLAN.06": ["industry", "sector", "field", "category"],
+        "BUSINESS_PLAN.07": ["goal", "objective", "target", "short-term"],
+        # Market Research
+        "BUSINESS_PLAN.08": ["customer", "demographic", "target", "audience", "market"],
+        "BUSINESS_PLAN.09": ["purchase", "buy", "available", "sell", "distribution"],
+        "BUSINESS_PLAN.10": ["problem", "solve", "pain point", "need"],
+        "BUSINESS_PLAN.11": ["competitor", "competition", "rival", "alternative"],
+        "BUSINESS_PLAN.12": ["trend", "industry trend", "market trend", "change"],
+        "BUSINESS_PLAN.13": ["differentiate", "stand out", "unique", "advantage"],
+        # Location & Operations
+        "BUSINESS_PLAN.14": ["location", "located", "store", "online", "physical"],
+        "BUSINESS_PLAN.15": ["facility", "resource", "equipment", "office", "warehouse"],
+        "BUSINESS_PLAN.16": ["deliver", "shipping", "service delivery", "distribution"],
+        "BUSINESS_PLAN.17": ["operational", "operations", "launch", "staff", "hire"],
+        # Marketing & Sales
+        "BUSINESS_PLAN.18": ["mission", "values", "purpose", "core values"],
+        "BUSINESS_PLAN.19": ["market", "marketing", "social media", "advertis"],
+        "BUSINESS_PLAN.20": ["sales team", "marketing firm", "self-market"],
+        "BUSINESS_PLAN.21": ["usp", "selling proposition", "value proposition"],
+        "BUSINESS_PLAN.22": ["promotion", "launch", "campaign", "discount", "event"],
+        "BUSINESS_PLAN.23": ["marketing need", "advertising", "budget", "online presence"],
+        # Legal & Regulatory
+        "BUSINESS_PLAN.24": ["structure", "llc", "sole proprietorship", "corporation", "entity"],
+        "BUSINESS_PLAN.25": ["register", "business name", "registration"],
+        "BUSINESS_PLAN.26": ["permit", "license", "legal", "zoning", "regulation", "comply"],
+        "BUSINESS_PLAN.27": ["insurance", "liability", "property insurance", "coverage"],
+        "BUSINESS_PLAN.28": ["compliance", "adherence", "lawyer", "legal requirement"],
+        # Revenue & Financials
+        "BUSINESS_PLAN.29": ["revenue", "money", "income", "sales", "subscription"],
+        "BUSINESS_PLAN.30": ["pricing", "price", "charge", "cost", "rate"],
+        "BUSINESS_PLAN.31": ["financial", "accounting", "bookkeeping", "track"],
+        "BUSINESS_PLAN.32": ["funding", "capital", "investment", "loan", "savings"],
+        "BUSINESS_PLAN.33": ["financial goal", "revenue goal", "break-even", "first year"],
+        "BUSINESS_PLAN.34": ["cost", "expense", "startup cost", "operating cost"],
+        # Growth & Scaling
+        "BUSINESS_PLAN.35": ["scale", "scaling", "grow", "expand"],
+        "BUSINESS_PLAN.36": ["long-term", "2-5 year", "future", "vision"],
+        "BUSINESS_PLAN.37": ["expand", "facilities", "staff", "operational"],
+        "BUSINESS_PLAN.38": ["funding", "expansion", "financial need", "investment"],
+        "BUSINESS_PLAN.39": ["marketing goal", "brand", "partnership", "influencer"],
+        "BUSINESS_PLAN.40": ["new market", "product line", "expansion", "service line"],
+        "BUSINESS_PLAN.41": ["administrative", "audit", "compliance", "legal"],
+        # Challenges & Contingency
+        "BUSINESS_PLAN.42": ["challenge", "obstacle", "risk", "contingency"],
+        "BUSINESS_PLAN.43": ["adapt", "market change", "competitor", "pivot"],
+        "BUSINESS_PLAN.44": ["additional funding", "expand", "investment", "growth"],
+        "BUSINESS_PLAN.45": ["vision", "5 year", "five year", "future", "see this business"],
+    }
+    # Always include general business-related keywords
+    base_keywords = ["business", "company", "startup"]
+    return topic_keywords.get(asked_q, base_keywords) + base_keywords
+
+
 def validate_question_answer(user_msg, session_data, history):
     """
     Enhanced validation with critiquing behaviors - challenge superficial answers
@@ -2178,10 +2362,20 @@ For now, please share your thoughts directly about the current question.
         return None
     
     # Check if user is trying to ask unrelated questions instead of answering
+    # BUT allow follow-up questions that RELATE to the current question topic
     unrelated_question_indicators = ["what is ai", "tell me about", "explain", "how does", "can you tell me about"]
     
     if user_msg_lower.endswith("?") and any(indicator in user_msg_lower for indicator in unrelated_question_indicators):
-        # Create phase-specific message
+        # Check if the question is about the CURRENT topic (allow these through)
+        current_topic_keywords = _get_current_topic_keywords(asked_q)
+        is_topic_related = any(keyword in user_msg_lower for keyword in current_topic_keywords)
+        
+        if is_topic_related:
+            # This is a follow-up question about the current topic - allow it through
+            print(f"✅ Allowing topic-related follow-up question for {asked_q}: {user_msg_lower[:80]}...")
+            return None
+        
+        # Only block truly unrelated questions
         if current_phase == "KYC":
             help_message = """Please provide a direct answer to help me understand your situation better."""
         else:
@@ -2420,12 +2614,40 @@ BUSINESS PLAN SPECIFIC RULES:
 • Ask ONE question at a time in EXACT sequential order
 • Each question must be on its own line with proper spacing
 • NEVER mold user answers into mission, vision, USP without explicit verification
+• CRITICAL: Your response must contain EXACTLY ONE [[Q:BUSINESS_PLAN.XX]] tag - NO MORE.
+• Do NOT ask multiple questions. Only ask the single next sequential question.
+• Your response must be DIRECTLY RELEVANT to the question being asked. Stay on topic.
+• NEVER include sub-questions like "What problems are you solving?" or "How will you differentiate?" in a response about a different question.
 • Do NOT list option bullets in your message - UI shows clickable buttons for multiple-choice questions
 • Start with BUSINESS_PLAN.01 and proceed sequentially
+• AUTO-RESEARCH QUESTIONS (Q11, Q12): These are NOT skippable. When it's time for Q11 or Q12, you MUST include the tag and present the question. The backend will inject research results automatically.
+  - For Q11: Say "Now I will do some initial research to help you understand who are some competitors for your business."
+  - For Q12: Say "Next I'll look into trends that are currently affecting your industry, and how they impact your business."
+• EVERY question must have a BOLD topline question. NEVER omit the actual question text. Example:
+  [[Q:BUSINESS_PLAN.14]] **Where will your business be located (e.g., online, physical store, both)?**
 • Do NOT jump to later questions or combine multiple questions
 • Do NOT provide section summaries or verification steps - just ask the next question
 • When user answers, acknowledge briefly (1-2 sentences) and immediately ask the next question
 • NEVER include "Question X" in your response - the UI shows it automatically
+
+QUESTION FORMATTING (CRITICAL):
+• The MAIN QUESTION must ALWAYS be on its OWN line, separated from coaching/feedback text
+• NEVER embed the question at the end of a coaching paragraph
+• The question must be clearly distinguishable - put a blank line BEFORE and AFTER the question
+• Do NOT generate "Thought Starter:", "Consider:", "Think about:", or similar guidance - the system adds these automatically
+• Do NOT include any follow-up questions or hints after the main question
+
+CORRECT FORMAT:
+"Great insight about your business!
+
+[Brief coaching feedback - 2-3 sentences max]
+
+[[Q:BUSINESS_PLAN.XX]]
+
+What is your business name?"
+
+WRONG FORMAT (DO NOT DO THIS):
+"Great insight! Your strategy is strong. What is your business name?"
 
 CONSTRUCTIVE FEEDBACK SYSTEM (INTENSITY: {feedback_intensity}/10):
 Purpose: Reality checks plus actionable guidance to strengthen the user's answer, assumptions, and overall business.
@@ -3087,7 +3309,7 @@ CRITICAL INSTRUCTIONS:
             )
             
             # Apply guardrail: Force generate next sequential question
-            if needs_guardrail and last_q_num is not None and last_q_num < 46:
+            if needs_guardrail and last_q_num is not None and last_q_num < 45:
                 next_q_num = last_q_num + 1
                 next_tag = f"BUSINESS_PLAN.{next_q_num:02d}"
                 
@@ -3139,6 +3361,19 @@ CRITICAL INSTRUCTIONS:
     # Inject missing tag if AI forgot to include one
     reply_content = inject_missing_tag(reply_content, session_data)
     
+    # CRITICAL: Enforce single-question rule - strip extra [[Q:...]] tags if AI generated multiple
+    import re
+    all_tags = re.findall(r'\[\[Q:(BUSINESS_PLAN\.\d{2})\]\]', reply_content)
+    if len(all_tags) > 1:
+        print(f"⚠️ MULTI-QUESTION VIOLATION: AI generated {len(all_tags)} question tags: {all_tags}. Keeping only the first: {all_tags[0]}")
+        # Keep only the first occurrence and the content up to the second tag
+        first_tag = all_tags[0]
+        second_tag_pattern = f'[[Q:{all_tags[1]}]]'
+        second_tag_pos = reply_content.find(second_tag_pattern)
+        if second_tag_pos > 0:
+            reply_content = reply_content[:second_tag_pos].rstrip()
+            print(f"✅ Trimmed reply to contain only [[Q:{first_tag}]]")
+    
     # Check if AI response contains WEBSEARCH_QUERY (from scrapping command)
     if "WEBSEARCH_QUERY:" in reply_content:
         needs_web_search = True
@@ -3182,6 +3417,71 @@ CRITICAL INSTRUCTIONS:
     elif section_summary_info:
         print(f"🔒 Section summary active - NOT updating asked_q (staying at {current_tag_before_update})")
     
+    # AUTO-RESEARCH: For Q11 (competitors) and Q12 (trends), automatically conduct web search
+    # and inject research results into the response
+    auto_research_questions = {
+        "BUSINESS_PLAN.11": "competitor research",
+        "BUSINESS_PLAN.12": "industry trends research"
+    }
+    if tag_match and not is_command_response:
+        detected_tag = tag_match.group(1)
+        if detected_tag in auto_research_questions:
+            research_type = auto_research_questions[detected_tag]
+            print(f"🔍 AUTO-RESEARCH TRIGGERED for {detected_tag} ({research_type})")
+            
+            # Extract business context for targeted research
+            business_context = extract_business_context_from_history(history)
+            if session_data:
+                business_context.update({
+                    "industry": session_data.get("industry", ""),
+                    "location": session_data.get("location", ""),
+                    "business_name": session_data.get("business_name", ""),
+                    "business_type": session_data.get("business_type", "")
+                })
+            
+            industry = business_context.get("industry", "business")
+            location = business_context.get("location", "")
+            business_name = business_context.get("business_name", "your business")
+            current_year = datetime.now().year
+            previous_year = current_year - 1
+            
+            try:
+                if detected_tag == "BUSINESS_PLAN.11":
+                    # Competitor research
+                    competitor_result = await handle_competitor_research_request(
+                        f"research competitors for {industry} in {location}",
+                        business_context,
+                        history
+                    )
+                    if competitor_result.get("success"):
+                        research_content = competitor_result['analysis']
+                        reply_content += f"\n\n🔍 **Competitor Research Results:**\n\n{research_content}"
+                        reply_content += f"\n\n*Research conducted using authoritative sources ({previous_year}-{current_year})*"
+                        reply_content += "\n\nPlease review these findings. Is there anything you'd like me to adjust or explore further?"
+                        print(f"✅ Auto-research completed for Q11 - competitor analysis injected")
+                    else:
+                        # Fallback to regular web search
+                        search_result = await conduct_web_search(
+                            f"top competitors {industry} business {location} {previous_year} strengths weaknesses"
+                        )
+                        if search_result and "unable to conduct" not in search_result:
+                            reply_content += f"\n\n🔍 **Competitor Research:**\n\n{search_result}"
+                            reply_content += "\n\nPlease review these findings. Is there anything you'd like me to adjust or explore further?"
+                            print(f"✅ Auto-research fallback completed for Q11")
+                
+                elif detected_tag == "BUSINESS_PLAN.12":
+                    # Industry trends research
+                    search_result = await conduct_web_search(
+                        f"{industry} industry trends {previous_year} {current_year} market analysis impact"
+                    )
+                    if search_result and "unable to conduct" not in search_result:
+                        reply_content += f"\n\n🔍 **Industry Trends Research:**\n\n{search_result}"
+                        reply_content += f"\n\n*Research based on {previous_year}-{current_year} data*"
+                        reply_content += "\n\nHow do you think these trends will impact your business? Is there anything you'd like me to explore further?"
+                        print(f"✅ Auto-research completed for Q12 - industry trends injected")
+            except Exception as e:
+                print(f"⚠️ Auto-research error for {detected_tag}: {e}")
+    
     # Validate business plan question sequence (now with updated session data)
     reply_content = validate_business_plan_sequence(reply_content, session_data)
     
@@ -3207,47 +3507,67 @@ CRITICAL INSTRUCTIONS:
         # The summary shows AFTER answering the last question of a section
         # We stay on the same question number until user accepts the summary
         
+        # Extract ALL Q&A pairs from this section to provide full context for summary
+        # Section boundaries define which questions belong to each section
+        section_qa_context = _extract_section_qa_pairs(
+            history, 
+            section_summary_info['trigger_question'],
+            section_summary_info['section_name']
+        )
+        
         # Add section summary requirements to the system prompt
         summary_instruction = f"""
-IMPORTANT: You have just completed {section_summary_info['section_name']} section. 
-You MUST provide a comprehensive section summary that includes:
+IMPORTANT: You have just completed the "{section_summary_info['section_name']}" section. 
+You MUST provide a comprehensive section summary that covers ALL inputs from this entire section, not just the last question.
 
-1. **Summary**: Recap the key information provided in this section
-2. **Educational Insights**: Provide valuable insights about this business area
-3. **Critical Considerations**: Highlight important watchouts and considerations for this business type
-4. **Verification Request**: Ask user to verify the information before proceeding
+HERE ARE ALL THE USER'S ANSWERS FOR THIS SECTION:
+{section_qa_context}
 
-Use this EXACT format:
-"🎯 **{section_summary_info['section_name']} Section Complete**
+You MUST summarize ALL of the above inputs in your summary. Do NOT only reference the most recent answer.
+
+Provide the summary in this EXACT format:
+
+🎯 **{section_summary_info['section_name']} Section Complete**
 
 **Summary of Your Information:**
-[Recap key points from this section]
+[Recap ALL key information the user provided across EVERY question in this section. Include specific details, names, numbers, and choices they mentioned.]
 
 **Educational Insights:**
-[Provide valuable business insights related to this section]
+[Provide 2-3 valuable business insights specifically related to {section_summary_info['section_name']}]
 
 **Critical Considerations:**
-[Highlight important watchouts and things to consider]
+[Highlight 2-3 important watchouts and things to consider based on their specific answers]
 
 **Ready to Continue?**
 Please confirm that this information is accurate before we move to the next section. You can either accept this summary and continue, or let me know what you'd like to modify.
 
-[[ACCEPT_MODIFY_BUTTONS]]"
+[[ACCEPT_MODIFY_BUTTONS]]
 
 CRITICAL: 
 - End your response with [[ACCEPT_MODIFY_BUTTONS]] to trigger the Accept/Modify buttons
 - Do NOT ask the next question immediately
 - Do NOT include any question tags like [[Q:BUSINESS_PLAN.XX]] in this response
+- Do NOT include any "Thought Starter:", "Consider:", "Think about:", or similar guidance hints
+- This is a SUMMARY only - no follow-up questions or hints
+- Your summary MUST reference ALL answers from this section, not just the last one
 """
         # Add this instruction to the messages
         msgs.append({"role": "system", "content": summary_instruction})
         
-        # Regenerate the response with section summary
+        # Regenerate the response with section summary - use MORE history context
+        # Build messages with extended history for section summaries
+        summary_msgs = [msgs[0]]  # Keep system prompt
+        # Include more history for summaries (up to 30 messages to cover full sections)
+        extended_history = history[-30:] if len(history) > 30 else history
+        summary_msgs.extend(extended_history)
+        summary_msgs.append({"role": "user", "content": user_content})
+        summary_msgs.append({"role": "system", "content": summary_instruction})
+        
         response = await client.chat.completions.create(
             model="gpt-4o",
-            messages=msgs,
+            messages=summary_msgs,
             temperature=0.7,
-            max_tokens=1000,
+            max_tokens=1200,  # Increased for comprehensive summaries
             stream=False
         )
         reply_content = response.choices[0].message.content
@@ -3433,6 +3753,13 @@ CRITICAL:
     # Remove [[ACCEPT_MODIFY_BUTTONS]] tag - it's only for backend detection, not display
     reply_content = reply_content.replace("[[ACCEPT_MODIFY_BUTTONS]]", "").strip()
     
+    # POST-PROCESSING: Strip contradictory "can't accommodate" messages from otherwise helpful replies
+    # This happens when the AI answers the user's question but then appends the guardrail refusal
+    reply_content = _strip_contradictory_guardrail(reply_content)
+    
+    # POST-PROCESSING: Strip unrelated "Follow-up prompts:" sections from auto-generated responses
+    reply_content = _strip_followup_prompts(reply_content)
+    
     return {
         "reply": reply_content,
         "web_search_status": web_search_status,
@@ -3441,14 +3768,189 @@ CRITICAL:
         "show_accept_modify": button_detection.get("show_buttons", False)
     }
 
+def _strip_contradictory_guardrail(reply_content: str) -> str:
+    """Remove the 'can't accommodate' guardrail message when the AI has already provided useful content.
+    
+    This happens when:
+    1. User asks a follow-up question about the current topic (e.g., 'Does my consulting business need a license?')
+    2. The AI answers the question helpfully
+    3. But then appends 'I'm sorry, but I can't accommodate that request. Let's return to our current workflow.'
+    
+    If the reply is >200 chars (has substantial content), the guardrail was contradictory.
+    """
+    guardrail_phrases = [
+        "I'm sorry, but I can't accommodate that request. Let's return to our current workflow.",
+        "I'm sorry, but I can't accommodate that request.",
+        "I can't accommodate that request. Let's return to our current workflow.",
+    ]
+    
+    for phrase in guardrail_phrases:
+        if phrase in reply_content:
+            # Only remove if there's substantial content BEFORE the guardrail
+            phrase_pos = reply_content.find(phrase)
+            content_before = reply_content[:phrase_pos].strip()
+            if len(content_before) > 200:
+                # The AI already answered the question - remove the contradictory guardrail
+                reply_content = content_before
+                print(f"✅ Stripped contradictory guardrail from reply (content before: {len(content_before)} chars)")
+                break
+    
+    return reply_content
+
+
+def _strip_followup_prompts(reply_content: str) -> str:
+    """Remove 'Follow-up prompts:' sections and similar AI-generated sub-questions
+    from auto-generated content.
+    
+    These appear in auto-suggest responses (Q17, Q23, Q26, Q27, Q34, Q42) where 
+    Angel generates content but then adds unrelated follow-up questions.
+    """
+    # Strip "Follow-up prompts:" and everything after it
+    followup_patterns = [
+        r'\n\s*Follow-up prompts?:\s*\n.*',
+        r'\n\s*Follow-up questions?:\s*\n.*',
+        r'\n\s*Additional questions?:\s*\n.*',
+    ]
+    
+    for pattern in followup_patterns:
+        reply_content = re.sub(pattern, '', reply_content, flags=re.DOTALL | re.IGNORECASE).strip()
+    
+    return reply_content
+
+
+def _extract_section_qa_pairs(history: list, section_end_q: int, section_name: str) -> str:
+    """Extract all Q&A pairs from a specific section for comprehensive section summaries.
+    
+    Uses section boundaries to determine which questions belong to which section.
+    Returns a formatted string of all Q&A pairs for the section.
+    """
+    # Define section question ranges
+    section_ranges = {
+        "Product/Service Details": (1, 4),
+        "Business Overview": (5, 7),
+        "Market Research": (8, 13),
+        "Location & Operations": (14, 17),
+        "Marketing & Sales Strategy": (18, 23),
+        "Legal & Regulatory Compliance": (24, 28),
+        "Revenue Model & Financials": (29, 34),
+        "Growth & Scaling": (35, 41),
+        "Challenges & Contingency Planning": (42, 45),
+    }
+    
+    q_range = section_ranges.get(section_name, (1, section_end_q))
+    start_q, end_q = q_range
+    
+    # Scan through history to find Q&A pairs in this section's range
+    section_pairs = []
+    current_question = None
+    
+    for msg in history:
+        content = msg.get('content', '')
+        role = msg.get('role', '')
+        
+        if role == 'assistant' and content:
+            # Check if this message contains a question tag in our section range
+            tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', content)
+            if tag_match:
+                q_num = int(tag_match.group(1))
+                if start_q <= q_num <= end_q:
+                    # Extract just the question text (clean it up)
+                    clean_q = _extract_topline_question(content)
+                    current_question = f"Q{q_num}: {clean_q}"
+        
+        elif role == 'user' and content and current_question:
+            # Skip commands
+            if content.lower().strip() not in ['draft', 'support', 'scrapping', 'accept', 'modify', 'yes', 'no', 'draft more']:
+                if not content.lower().startswith(('scrapping:', 'draft', 'support')):
+                    section_pairs.append(f"{current_question}\n   → User's answer: {content[:500]}")
+                    current_question = None
+    
+    if section_pairs:
+        return "\n\n".join(section_pairs)
+    else:
+        return f"(No specific Q&A pairs found for {section_name} section - summarize based on conversation context)"
+
+
+def _extract_topline_question(full_message: str) -> str:
+    """Extract only the topline question from a full AI message, 
+    stripping acknowledgments, thought starters, tips, and previous answer references."""
+    if not full_message or len(full_message) < 10:
+        return full_message or ""
+    
+    # Remove question tags
+    cleaned = re.sub(r'\[\[Q:[A-Z_]+\.\d+\]\]', '', full_message).strip()
+    
+    # Split into lines and find the main question
+    lines = cleaned.split('\n')
+    question_lines = []
+    skip_section = False
+    
+    for line in lines:
+        stripped = line.strip().lower()
+        # Skip thought starters, tips, and guidance
+        if any(indicator in stripped for indicator in [
+            'thought starter', '🧠', '💭', '💡', 'quick tip', 'pro tip',
+            'consider:', 'think about:', 'note:', 'areas where you may need'
+        ]):
+            skip_section = True
+            continue
+        # Skip sections after a guidance indicator
+        if skip_section and stripped == '':
+            skip_section = False
+            continue
+        if skip_section:
+            continue
+        # Keep meaningful question lines
+        if line.strip():
+            question_lines.append(line.strip())
+    
+    # Return the first 2-3 meaningful lines (the topline question)
+    # Skip any leading acknowledgment that references previous answers
+    result_lines = []
+    for line in question_lines:
+        line_lower = line.lower()
+        # Skip acknowledgments of previous answers
+        if any(phrase in line_lower for phrase in [
+            'thank you for sharing', 'great answer', 'thanks for that',
+            'excellent response', 'that\'s helpful', 'good to know',
+            'thank you for providing', 'i appreciate', 'wonderful'
+        ]) and len(result_lines) == 0:
+            continue
+        result_lines.append(line)
+        # Stop after capturing the main question (usually in bold **)
+        if '**' in line or line.endswith('?') or line.endswith(':'):
+            break
+    
+    result = ' '.join(result_lines[:3]) if result_lines else cleaned[:200]
+    return result
+
+
 async def handle_draft_command(reply, history, session_data=None):
-    """Handle the Draft command with research-backed comprehensive response generation"""
+    """Handle the Draft command with comprehensive response generation"""
     # Extract context from conversation history
     context_summary = extract_conversation_context(history)
     business_context = extract_business_context_from_history(history)
     
     # Get current question context for more targeted responses
-    current_question = get_current_question_context(history, session_data)
+    # IMPORTANT: Use canonical question text from constant.py to avoid pulling in 
+    # acknowledgments, thought starters, and previous answer references from the full message
+    current_question = ""
+    if session_data and session_data.get("asked_q"):
+        asked_q = session_data.get("asked_q", "")
+        canonical = get_question_objective(asked_q)
+        if canonical:
+            current_question = canonical
+            print(f"🔍 Draft - Using canonical question for {asked_q}: {canonical[:80]}...")
+        else:
+            # Fallback to extracting from history
+            current_question = get_current_question_context(history, session_data)
+            # Clean the question text - extract only the topline question
+            current_question = _extract_topline_question(current_question)
+    else:
+        current_question = get_current_question_context(history, session_data)
+        current_question = _extract_topline_question(current_question)
+    
+    print(f"🔍 Draft - Final current_question: {current_question[:100]}...")
     
     # Conduct web search for research-backed drafts (for specific question types)
     business_name = business_context.get("business_name", "business")
@@ -3480,14 +3982,8 @@ async def handle_draft_command(reply, history, session_data=None):
     draft_content = await generate_draft_content(history, business_context, current_question, research_results)
     
     # Create a comprehensive draft response with clear heading
-    draft_response = f"Here's a research-backed draft for you:\n\n{draft_content}\n\n"
-    
-    thought_starter = None
-    if session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
-        current_tag = session_data.get("asked_q")
-        thought_starter = get_thought_starter_for_tag(current_tag)
-    if thought_starter:
-        draft_response += f"🧠 Thought Starter: {thought_starter}\n"
+    # NOTE: Do NOT append thought starters to draft responses - they introduce irrelevant context
+    draft_response = f"Here's a draft for you:\n\n{draft_content}\n\n"
     
     return draft_response
 
@@ -3528,66 +4024,122 @@ def get_current_question_context(history, session_data=None):
     return ""
 
 def get_question_topic(current_question):
-    """Extract the main topic from the current question - prioritize topline question, not sub-questions"""
+    """Extract the main topic from the current question - prioritize topline question, not sub-questions.
+    
+    Uses lowercased question text for ALL keyword matching to ensure consistency.
+    Keywords are ordered from MOST specific to LEAST specific to avoid false matches.
+    """
     if not current_question:
         print("🔍 DEBUG - No current question provided to get_question_topic")
         return "business planning"
     
-    # Check for BUSINESS_PLAN.02 tag first - this is the topline question
-    if '[[Q:BUSINESS_PLAN.02]]' in current_question or 'business_plan.02' in current_question.lower():
+    question_lower = current_question.lower()
+    
+    # Check for BUSINESS_PLAN tags first (most reliable)
+    if '[[q:business_plan.02]]' in question_lower:
         print("🔍 DEBUG - Detected BUSINESS_PLAN.02 - mission statement/tagline topic")
         return "mission statement"
     
-    # Check for mission/tagline keywords - but only if it's the main question, not a sub-question
-    if any(keyword in current_question.lower() for keyword in ['mission statement', 'tagline', 'business tagline']):
-        # Make sure it's not a sub-question by checking if it's the first question in the text
-        question_lower = current_question.lower()
-        if 'what is your business tagline or mission statement' in question_lower:
-            print("🔍 DEBUG - Detected mission statement topic (topline question)")
+    # Check for mission/tagline keywords
+    if any(keyword in question_lower for keyword in ['mission statement', 'tagline', 'business tagline']):
+        print("🔍 DEBUG - Detected mission statement topic")
             return "mission statement"
     
-    if any(keyword in current_question for keyword in ['problem does your business solve', 'who has this problem', 'problem', 'solve', 'pain point', 'need']):
+    # INDUSTRY - must check BEFORE "product/service" to avoid false matches on "food services" etc.
+    if any(keyword in question_lower for keyword in ['what industry', 'which industry', 'industry does your business', 'business fall into', 'business fall under', 'industry sector', 'primary industry']):
+        print("🔍 DEBUG - Detected industry topic")
+        return "industry analysis"
+    
+    # BUSINESS STAGE
+    if any(keyword in question_lower for keyword in ['current stage', 'stage of your business', 'idea, currently building', 'idea, prototype', 'ready for launch']):
+        print("🔍 DEBUG - Detected business stage topic")
+        return "business stage"
+    
+    # BUSINESS NAME
+    if any(keyword in question_lower for keyword in ['business name', 'name your business', 'what will you name', 'name of your business']):
+        print("🔍 DEBUG - Detected business name topic")
+        return "business naming"
+    
+    # PROBLEM/SOLUTION (specific phrases first)
+    if any(keyword in question_lower for keyword in ['problem does your business solve', 'who has this problem', 'pain point']):
         print("🔍 DEBUG - Detected problem-solution topic")
         return "problem-solution fit"
-    elif any(keyword in current_question for keyword in ['competitor', 'competition', 'main competitors', 'strengths and weaknesses', 'competitive advantage', 'unique value proposition', 'what makes your business unique']):
+    
+    # COMPETITIVE ANALYSIS
+    if any(keyword in question_lower for keyword in ['competitor', 'competition', 'main competitors', 'strengths and weaknesses', 'competitive advantage', 'unique value proposition', 'what makes your business unique']):
         print("🔍 DEBUG - Detected competitive analysis topic")
         return "competitive analysis"
-    elif any(keyword in current_question for keyword in ['target market', 'demographics', 'psychographics', 'behaviors', 'ideal customer']):
+    
+    # TARGET MARKET
+    if any(keyword in question_lower for keyword in ['target market', 'demographics', 'psychographics', 'behaviors', 'ideal customer']):
         print("🔍 DEBUG - Detected target market topic")
         return "target market definition"
-    elif any(keyword in current_question for keyword in ['location', 'space', 'facility', 'equipment', 'infrastructure', 'where will your business be located']):
+    
+    # LOCATION/OPERATIONS
+    if any(keyword in question_lower for keyword in ['location', 'space', 'facility', 'equipment', 'infrastructure', 'where will your business be located']):
         print("🔍 DEBUG - Detected operational requirements topic")
         return "operational requirements"
-    elif any(keyword in current_question for keyword in ['staff', 'hiring', 'team', 'employee', 'operational needs', 'initial staff']):
+    
+    # STAFFING
+    if any(keyword in question_lower for keyword in ['staff', 'hiring', 'team', 'employee', 'operational needs', 'initial staff']):
         print("🔍 DEBUG - Detected staffing needs topic")
         return "staffing needs"
-    elif any(keyword in current_question for keyword in ['supplier', 'vendor', 'partner', 'relationship', 'key partners']):
+    
+    # SUPPLIERS/VENDORS
+    if any(keyword in question_lower for keyword in ['supplier', 'vendor', 'partner', 'relationship', 'key partners']):
         print("🔍 DEBUG - Detected supplier relationships topic")
         return "supplier and vendor relationships"
-    elif any(keyword in current_question for keyword in ['key features and benefits', 'how does it work', 'main components', 'steps involved', 'value or results', 'product', 'service', 'core offering', 'what will you be offering']):
-        print("🔍 DEBUG - Detected core product/service topic")
-        return "core product or service"
-    elif any(keyword in current_question for keyword in ['sales', 'projected sales', 'first year', 'sales projections', 'revenue', 'income']):
-        print("🔍 DEBUG - Detected sales projections topic")
-        return "sales projections"
-    elif any(keyword in current_question for keyword in ['startup costs', 'estimated startup costs', 'one-time expenses', 'initial costs', 'launch costs']):
-        print("🔍 DEBUG - Detected startup costs topic")
-        return "startup costs"
-    elif any(keyword in current_question for keyword in ['financial', 'budget', 'costs', 'expenses', 'funding', 'investment']):
-        print("🔍 DEBUG - Detected financial planning topic")
-        return "financial planning"
-    elif any(keyword in current_question for keyword in ['intellectual property', 'patents', 'trademarks', 'copyrights', 'proprietary technology', 'unique processes', 'formulas', 'legal protections']):
+    
+    # INTELLECTUAL PROPERTY (before general "product/service" check)
+    if any(keyword in question_lower for keyword in ['intellectual property', 'patents', 'trademarks', 'copyrights', 'proprietary technology', 'unique processes', 'formulas', 'legal protections']):
         print("🔍 DEBUG - Detected intellectual property topic")
         return "intellectual property"
-    elif any(keyword in current_question for keyword in ['where will you sell', 'sales location', 'sales channels', 'where will you sell your services', 'distribution channels', 'sales platforms']):
+    
+    # STARTUP COSTS (before general "financial" check)
+    if any(keyword in question_lower for keyword in ['startup costs', 'estimated startup costs', 'one-time expenses', 'initial costs', 'launch costs']):
+        print("🔍 DEBUG - Detected startup costs topic")
+        return "startup costs"
+    
+    # PRICING
+    if any(keyword in question_lower for keyword in ['pricing', 'price', 'how much will you charge', 'pricing strategy', 'service fees', 'fee structure']):
+        print("🔍 DEBUG - Detected pricing topic")
+        return "pricing strategy"
+    
+    # SALES PROJECTIONS
+    if any(keyword in question_lower for keyword in ['projected sales', 'first year', 'sales projections', 'revenue projections']):
+        print("🔍 DEBUG - Detected sales projections topic")
+        return "sales projections"
+    
+    # SALES CHANNELS/LOCATION
+    if any(keyword in question_lower for keyword in ['where will you sell', 'sales location', 'sales channels', 'distribution channels', 'sales platforms']):
         print("🔍 DEBUG - Detected sales location topic")
         return "sales location"
-    else:
+    
+    # FINANCIAL PLANNING (general)
+    if any(keyword in question_lower for keyword in ['financial', 'budget', 'costs', 'expenses', 'funding', 'investment']):
+        print("🔍 DEBUG - Detected financial planning topic")
+        return "financial planning"
+    
+    # CORE PRODUCT/SERVICE (last resort - uses broad keywords that could false-match)
+    if any(keyword in question_lower for keyword in ['key features and benefits', 'how does it work', 'main components', 'steps involved', 'value or results', 'core offering', 'what will you be offering']):
+        print("🔍 DEBUG - Detected core product/service topic")
+        return "core product or service"
+    
+    # MARKETING
+    if any(keyword in question_lower for keyword in ['marketing', 'advertising', 'promotion', 'brand awareness', 'reach your customers']):
+        print("🔍 DEBUG - Detected marketing topic")
+        return "marketing strategy"
+    
+    # LEGAL
+    if any(keyword in question_lower for keyword in ['legal', 'license', 'permit', 'regulation', 'compliance', 'legal structure']):
+        print("🔍 DEBUG - Detected legal requirements topic")
+        return "legal requirements"
+    
         print("🔍 DEBUG - No specific topic detected, using default business planning")
         return "business planning"
 
 async def generate_draft_content(history, business_context, current_question="", research_results=None):
-    """Generate research-backed draft content based on conversation history"""
+    """Generate draft content based on conversation history and the current question topic"""
     # Extract recent messages (both user and assistant) to understand context
     recent_messages = []
     for msg in history[-8:]:  # Look at last 8 messages (4 exchanges)
@@ -3618,27 +4170,45 @@ async def generate_draft_content(history, business_context, current_question="",
     business_type = business_context.get("business_type", "your business type")
     location = business_context.get("location", "your location")
     
-    # Extract previous answers from history for better context - look at ALL history, not just recent
+    # Extract previous answers from history for context
+    # IMPORTANT: Only include answers that are RELEVANT to the current question topic
+    # to prevent irrelevant information from bleeding into the draft
     previous_answers = []
     key_information = []  # Extract key facts like "sole employee", "no staff", etc.
+    current_topic_lower = current_question.lower() if current_question else ""
     
-    # Look through ALL history to find important previous answers
+    # Identify the current question's section/topic for filtering
+    question_topic = get_question_topic(current_question)
+    
+    # Only extract key constraints (staffing, funding) - these are universally relevant
     for msg in history:
         if msg.get('role') == 'user' and len(msg.get('content', '')) > 10:
             content = msg.get('content', '')
-            # Skip command words
             if content.lower() not in ['support', 'draft', 'scrapping', 'scraping', 'accept', 'modify', 'yes', 'no']:
-                # Extract key information about staffing, ownership, etc.
                 content_lower = content.lower()
                 if any(phrase in content_lower for phrase in ['sole employee', 'only me', 'just me', 'no employees', 'no staff', 'working solo', 'i will be the only', 'i am the only']):
                     key_information.append(f"CRITICAL: User stated they are the sole employee/owner - NO staff will be hired initially")
                 if any(phrase in content_lower for phrase in ['no funding', 'self-funded', 'personal savings', 'no investors']):
                     key_information.append(f"CRITICAL: User stated funding approach")
-                if len(content.strip()) > 20:  # Only include substantial answers
-                    previous_answers.append(content[:300])  # Increased from 200 to 300
     
-    # Prioritize recent answers but include key information from anywhere
-    recent_answers = previous_answers[-5:] if len(previous_answers) > 5 else previous_answers
+    # Only include the most recent Q&A pair (the question being drafted for) 
+    # and core business info, NOT all previous unrelated answers
+    recent_qa_pairs = []
+    for i in range(len(history) - 1, max(0, len(history) - 6), -1):
+        msg = history[i]
+        if msg.get('role') == 'assistant' and msg.get('content') and '[[Q:' in msg.get('content', ''):
+            # Found the assistant's question - include it as context
+            recent_qa_pairs.append(f"Question: {msg['content'][:200]}")
+            break
+    
+    # Include business fundamentals (name, industry, idea) from early answers
+    for msg in history[:10]:  # Only first 10 messages for core business context
+        if msg.get('role') == 'user' and len(msg.get('content', '')) > 20:
+            content = msg.get('content', '')
+            if content.lower() not in ['support', 'draft', 'scrapping', 'scraping', 'accept', 'modify', 'yes', 'no']:
+                previous_answers.append(content[:200])
+    
+    recent_answers = previous_answers[-3:] if len(previous_answers) > 3 else previous_answers
     
     # Use AI to generate a comprehensive, personalized, research-backed draft
     research_section = ""
@@ -3654,11 +4224,14 @@ async def generate_draft_content(history, business_context, current_question="",
     draft_prompt = f"""
     ⚠️ CRITICAL CONTEXT - READ FIRST:
         This business is in the {industry.upper()} INDUSTRY operating as a {business_type.upper()}.
-    ALL draft content must be 100% specific to {industry.upper()} businesses - NOT education, NOT technology, NOT consulting.
-    Use ONLY {industry.upper()} industry examples, terminology, and context.
+    ALL draft content must be 100% specific to {industry.upper()} businesses.
     {research_section}
     
-    Create a comprehensive, detailed, research-backed draft answer for this business question: "{current_question}"
+    Create a draft answer for this SPECIFIC business question ONLY: "{current_question}"
+    
+    ⚠️ CRITICAL: Your draft must ONLY address the question above. Do NOT include information about 
+    unrelated topics like tools, equipment, operations, or other business areas unless the question 
+    specifically asks about them. Stay focused on the exact topic of the question.
     
     Business Context (PRIMARY IDENTIFIERS):
     - Business Name: {business_name}
@@ -3666,10 +4239,10 @@ async def generate_draft_content(history, business_context, current_question="",
     - Business Structure: {business_type}
     - Location: {location}
     
-    Previous Answers and Context:
+    Core Business Info (for context only - do NOT reference tools/equipment/resources unless asked):
     {' | '.join(recent_answers) if recent_answers else 'No previous context available'}
     
-    ⚠️ CRITICAL PREVIOUS ANSWERS - MUST RESPECT THESE:
+    ⚠️ CONSTRAINTS TO RESPECT:
     {chr(10).join(key_information) if key_information else 'No critical constraints identified'}
     
     IMPORTANT: If the user previously stated they are the sole employee/owner with no staff, 
@@ -3708,6 +4281,13 @@ async def generate_draft_content(history, business_context, current_question="",
     
     Make this a complete, polished, research-backed draft that the user can accept and use immediately. Be specific and detailed, not generic.
     REMEMBER: This is a {industry.upper()} business - all examples, features, and recommendations must be relevant to {industry.upper()}.
+    
+    ⚠️ DO NOT include:
+    - "Follow-up prompts:" or follow-up questions
+    - Additional questions for the user
+    - "Would you like to explore..." or similar prompts
+    - Thought starters or tips
+    Just provide the draft content itself.
     """
     
     try:
@@ -3719,6 +4299,8 @@ async def generate_draft_content(history, business_context, current_question="",
         )
         
         ai_draft = response.choices[0].message.content
+        # Strip any follow-up prompts/questions the AI may have added
+        ai_draft = _strip_followup_prompts(ai_draft)
         # Enforce 100-word limit
         ai_draft = truncate_to_word_limit(ai_draft, 100)
         word_count = len(ai_draft.split())
@@ -4355,7 +4937,7 @@ async def handle_support_command(reply, history, session_data=None):
         question_topic
     )
     
-    support_response = f"Let me help you with research-backed insights:\n\n{support_content}\n\n"
+    support_response = f"Here's some additional information to help you:\n\n{support_content}\n\n"
     support_response += (
         "When you're ready, choose the Draft quick action so I can assemble a full answer using these insights. "
         "After I share the draft, you'll be able to Accept or Modify it."
@@ -4465,7 +5047,7 @@ async def generate_support_content(history, business_context, current_question="
     11. CITES SOURCES throughout the response when referencing data or statistics
     
     Structure your response with:
-        **Research-Backed Insights for {industry.upper()}**
+        **Additional Information for {question_topic.upper() if question_topic and question_topic != 'business planning' else industry.upper()}**
     [Key findings from research with citations]
     
     **Understanding the Question**
@@ -4490,6 +5072,14 @@ async def generate_support_content(history, business_context, current_question="
     ⚠️ CRITICAL WORD LIMIT: Your response MUST be exactly 150 words or less. Be concise and focused. Do not exceed 150 words.
     REMEMBER: This is a {industry.upper()} business - keep all examples, insights, and recommendations relevant to {industry.upper()}.
     CITE YOUR SOURCES throughout the response using the research findings provided.
+    
+    ⚠️ DO NOT include:
+    - "Follow-up prompts:" or follow-up questions
+    - Additional questions for the user
+    - "Would you like to explore..." or similar prompts
+    - Thought starters or tips
+    - "Ready to proceed?" or "Shall we continue?" or similar
+    Just provide the informational content itself.
     """
     
     try:
@@ -4525,21 +5115,25 @@ async def handle_draft_more_command(reply, history, session_data=None):
     # Extract business context for verification
     business_context = extract_business_context_from_history(history)
     
-    # Get current question context for more targeted responses
-    current_question = get_current_question_context(history, session_data)
+    # Get current question context - use canonical question to avoid content bleed
+    current_question = ""
+    if session_data and session_data.get("asked_q"):
+        canonical = get_question_objective(session_data.get("asked_q", ""))
+        if canonical:
+            current_question = canonical
+        else:
+            current_question = get_current_question_context(history, session_data)
+            current_question = _extract_topline_question(current_question)
+    else:
+        current_question = get_current_question_context(history, session_data)
+        current_question = _extract_topline_question(current_question)
     
     # Generate additional content based on current question
     additional_content = await generate_additional_draft_content(history, business_context, current_question)
     
     # Use consistent format with "Here's a draft" to trigger button detection
+    # NOTE: Do NOT append thought starters to draft responses - they introduce irrelevant context
     draft_more_response = f"Here's a draft for you:\n\n{additional_content}\n\n"
-    
-    thought_starter = None
-    if session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
-        current_tag = session_data.get("asked_q")
-        thought_starter = get_thought_starter_for_tag(current_tag)
-    if thought_starter:
-        draft_more_response += f"🧠 Thought Starter: {thought_starter}\n"
     
     return draft_more_response
 
@@ -4607,6 +5201,14 @@ async def generate_additional_draft_content(history, business_context, current_q
     
     Make this draft MORE creative, MORE detailed, and MORE strategic than a standard response. Think outside the box!
     REMEMBER: This is a {industry.upper()} business - all enhanced content must be relevant to {industry.upper()}.
+    
+    ⚠️ DO NOT include:
+    - "Follow-up prompts:" or follow-up questions
+    - Additional questions for the user
+    - "Would you like to explore..." or similar prompts
+    - Thought starters or tips
+    - "Ready to proceed?" or "Shall we continue?" or similar
+    Just provide the draft content itself.
     """
     
     try:
@@ -6224,56 +6826,114 @@ async def generate_dynamic_business_question(
 
 """
     
-    question_prompt = f"""{critical_context_warning}Generate a dynamic, tailored business plan question for {business_identifier}{industry_context}{business_type_context}{location_context}.
+    # Get the EXACT canonical question text from the questionnaire
+    canonical_questions = {
+        "BUSINESS_PLAN.01": "Describe your business idea in detail.",
+        "BUSINESS_PLAN.02": "What product or service will you offer?",
+        "BUSINESS_PLAN.03": "What makes your product or service unique compared to others in the market?",
+        "BUSINESS_PLAN.04": "What is the current stage of your business (e.g., idea, currently building, ready for launch)?",
+        "BUSINESS_PLAN.05": "Business Name (if decided):",
+        "BUSINESS_PLAN.06": "What industry does your business fall into (e.g., technology, trades, retail, food services, etc.)?",
+        "BUSINESS_PLAN.07": "What are your short-term (6 months to 1 year) business goals?",
+        "BUSINESS_PLAN.08": "Who is your target customer? Describe their demographics (age, gender, location, income level, etc.).",
+        "BUSINESS_PLAN.09": "Where will your business products or services be available for purchase?",
+        "BUSINESS_PLAN.10": "What problem(s) are you solving for your target customers?",
+        "BUSINESS_PLAN.11": "Now I will do some initial research to help you understand who are some competitors for your business.",
+        "BUSINESS_PLAN.12": "Next I'll look into trends that are currently affecting your industry, and how do they impact your business.",
+        "BUSINESS_PLAN.13": "Using all this information, how do you plan to differentiate your business to stand out from other businesses to entice customers?",
+        "BUSINESS_PLAN.14": "Where will your business be located (e.g., online, physical store, both)?",
+        "BUSINESS_PLAN.15": "What kind of facilities or resources will you need to operate (e.g., office space, warehouse, equipment)?",
+        "BUSINESS_PLAN.16": "What will be your primary method of delivering your product/service (e.g., shipping, in-person services, digital downloads)?",
+        "BUSINESS_PLAN.17": "Based on what you've input so far, here are some suggested short-term operational needs (e.g., hiring initial staff, securing space) to launch your business:",
+        "BUSINESS_PLAN.18": "Business Mission Statement (What are your core values and mission?):",
+        "BUSINESS_PLAN.19": "How do you plan to market your business (e.g., social media, email marketing, partnerships)?",
+        "BUSINESS_PLAN.20": "Will you hire a sales team, contract with a marketing firm, self-market, or use some other method to market your business?",
+        "BUSINESS_PLAN.21": "What is your unique selling proposition (USP) to help potential customers quickly/easily understand the value of your business?",
+        "BUSINESS_PLAN.22": "What promotional strategies will you use to launch your business (e.g., discounts, events, online campaigns)?",
+        "BUSINESS_PLAN.23": "Based on what you've told me so far, here are some suggested short-term marketing needs (e.g., advertising budget, building an online presence). Is there anything else you'd like to add?",
+        "BUSINESS_PLAN.24": "What type of business structure will you have (e.g., LLC, sole proprietorship, corporation)?",
+        "BUSINESS_PLAN.25": "Have you registered your business name?",
+        "BUSINESS_PLAN.26": "Based on what you've told me, here are the permits and/or licenses you will need to operate legally. Please evaluate to confirm if this looks correct or if you have any questions:",
+        "BUSINESS_PLAN.27": "Based on what you've told me, here are some suggested insurance policies you may need (e.g., liability, property). Please evaluate to confirm if this looks correct or if you have any questions:",
+        "BUSINESS_PLAN.28": "How do you plan to ensure adherence to these requirements to keep your business compliant (e.g., hiring a lawyer, software)?",
+        "BUSINESS_PLAN.29": "How will your business make money (e.g., direct sales, subscriptions, advertising)?",
+        "BUSINESS_PLAN.30": "What is your pricing strategy?",
+        "BUSINESS_PLAN.31": "How will you keep track of your business financials and accounting?",
+        "BUSINESS_PLAN.32": "What is your initial funding source (e.g., personal savings, loans, investors)?",
+        "BUSINESS_PLAN.33": "What are your financial goals for the first year (e.g., revenue, break-even point)?",
+        "BUSINESS_PLAN.34": "Based on what you've told me so far, here are the general main costs associated with starting your business (e.g., production, marketing, salaries). Is there anything else I should add?",
+        "BUSINESS_PLAN.35": "What are your plans for scaling your business in the future?",
+        "BUSINESS_PLAN.36": "What are your long-term (2-5 years) business goals?",
+        "BUSINESS_PLAN.37": "What are your long-term operational needs (e.g., expanding facilities, adding more staff)?",
+        "BUSINESS_PLAN.38": "What are your long-term financial needs (e.g., funding for expansion, new product development)?",
+        "BUSINESS_PLAN.39": "What are your long-term marketing goals (e.g., brand partnerships, influencer collaborations)?",
+        "BUSINESS_PLAN.40": "What will be your approach to expanding product/service lines or entering new markets?",
+        "BUSINESS_PLAN.41": "What are your long-term administrative goals (e.g., maintaining legal compliance, financial audits)?",
+        "BUSINESS_PLAN.42": "Here are some suggested contingency plans for potential challenges or obstacles your business may face, as well as suggestions for how you may navigate them:",
+        "BUSINESS_PLAN.43": "How will you adapt if your market conditions change or new competitors enter the market?",
+        "BUSINESS_PLAN.44": "Will you seek additional funding to expand? If so, what sources and for what purposes?",
+        "BUSINESS_PLAN.45": "Now that we've covered all aspects of your business plan, what is your overall vision for where you see this business in 5 years?"
+    }
+    
+    canonical_question_text = canonical_questions.get(question_tag, "")
+    
+    # Auto-suggest questions where Angel MUST generate content first (not ask user to answer)
+    auto_suggest_tags = ["BUSINESS_PLAN.17", "BUSINESS_PLAN.23", "BUSINESS_PLAN.26", "BUSINESS_PLAN.27", "BUSINESS_PLAN.34", "BUSINESS_PLAN.35", "BUSINESS_PLAN.42"]
+    is_auto_suggest = question_tag in auto_suggest_tags
+    
+    auto_suggest_instruction = ""
+    if is_auto_suggest:
+        auto_suggest_instruction = f"""
+⚠️ AUTO-SUGGEST QUESTION: This is NOT a regular question. You MUST:
+1. Generate specific, detailed suggestions/content based on the user's previous answers
+2. Present your suggestions clearly with bullet points or numbered lists
+3. End by asking "Is there anything else you'd like to add or modify?"
+4. Do NOT just ask the question and wait for user input - YOU must provide the initial content
+5. Use information from previous answers to make suggestions specific and relevant
+6. Do NOT add "Follow-up prompts:", sub-questions, or additional questions after your suggestions
+7. Do NOT add thought starters - the system handles those automatically
+8. Keep your response focused ONLY on the suggestions - no tangential topics
+"""
 
-QUESTION TOPIC: {topic}
+    question_prompt = f"""{critical_context_warning}You are asking the next question in the business plan questionnaire for {business_identifier}{industry_context}{business_type_context}{location_context}.
+
+EXACT QUESTION FROM QUESTIONNAIRE: "{canonical_question_text}"
 QUESTION TAG: {question_tag}
+{auto_suggest_instruction}
 
-CRITICAL REQUIREMENTS:
-1. The question MUST be specifically tailored to {business_identifier}'s business type and industry
-2. Use the industry name from KYC answers (e.g., "Chai Stall", "POS Development") - NOT the venture/session title
-3. For a restaurant/chai stall: ask about menu, service hours, dining capacity, kitchen equipment, food suppliers, etc.
-4. For a service business: ask about service offerings, timelines, client management, service delivery methods, etc.
-5. For a product business: ask about product features, manufacturing, inventory, distribution, etc.
-6. Include follow-up prompts that are relevant to the specific business type
-7. Use industry-specific terminology and examples
-8. Make the question conversational and natural
-9. Include the tag: [[Q:{question_tag}]]
-10. Add 1-2 thought-provoking follow-up questions if relevant
+⚠️ CRITICAL - YOU MUST USE THE EXACT QUESTION ABOVE AS YOUR TOPLINE QUESTION.
+You may add a brief acknowledgment of the user's previous answer (1-2 sentences max), but the TOPLINE QUESTION you ask MUST be the exact question from the questionnaire above, formatted in **bold**.
 
-EXAMPLES (use these as patterns, NOT exact text):
-- For a food service business asking about name: "What will you name your [industry]? If you haven't decided yet, what are your top 3-5 name options?"
-- For a restaurant asking about operations: "What are your service offering timelines? Will you offer all services (dine-in, takeout, delivery) upon opening, or will you add certain services at specific times after opening?"
-- For a service business asking about services: "What services will you offer initially? Will you start with a full suite of services or launch with core offerings and expand later?"
-- For a retail business asking about location: "What are your space requirements for your [business type]? Do you need display areas, storage, fitting rooms, or a back office?"
-
-IMPORTANT: Replace [industry] and [business type] with the ACTUAL industry and business type from the user's KYC answers. Do NOT use hardcoded examples like "Chai Stall" - use the actual industry name the user provided.
+Do NOT rephrase, summarize, or create your own version of the question.
+Do NOT add follow-up questions, sub-questions, thought starters, or hints.
+The system automatically adds thought starters - do NOT generate your own.
 
 {business_info_summary}
 
-Generate the question now:"""
+Generate the response now:"""
     
     if is_missing_question:
         question_prompt += "\n\nNOTE: This information was missing from the user's uploaded business plan. Mention this contextually."
     
     # Define formatting instruction for question generation
-    formatting_instruction = """
+    formatting_instruction = f"""
 FORMATTING REQUIREMENTS:
+- Start with [[Q:{question_tag}]] tag on its own line
+- Add a brief 1-2 sentence acknowledgment of the previous answer (if context available)
+- Then present the EXACT question from the questionnaire in **bold** on its own line
 - Use clear, conversational language
-- Include proper line breaks for readability (add blank line after question)
-- Keep questions concise but informative
-- Use the exact tag format: [[Q:QUESTION_TAG]]
 - Do NOT include "Question X" text - the UI displays it automatically
-- Format the main question text with **bold** markdown for emphasis
-- Add a blank line after the question for spacing
-- Keep follow-up prompts concise and on separate lines if needed
+- Do NOT add follow-up prompts, hints, "Thought Starter" lines, or sub-questions
+- Do NOT add "Follow-up prompts:" sections at the end
+- The system automatically adds thought starters - do NOT generate your own
+- Ask ONLY the one question specified - nothing more
 
 EXAMPLE FORMAT:
-[[Q:BUSINESS_PLAN.01]]
+[[Q:BUSINESS_PLAN.15]]
 
-**What will you name your POS Development business?**
+Great progress on your business plan!
 
-If you haven't settled on a name yet, what are your top 3-5 options?
+**What kind of facilities or resources will you need to operate (e.g., office space, warehouse, equipment)?**
 """
     
     response = await client.chat.completions.create(
@@ -6284,57 +6944,73 @@ If you haven't settled on a name yet, what are your top 3-5 options?
             {"role": "system", "content": formatting_instruction},
             {"role": "user", "content": question_prompt}
         ],
-        temperature=0.8,  # Higher temperature for more creative, tailored questions
+        temperature=0.4,  # Lower temperature to stick closer to questionnaire script
         max_tokens=500
     )
     
-    return response.choices[0].message.content
+    result = response.choices[0].message.content
+    # Post-processing: strip any follow-up prompts the AI may have added
+    result = _strip_followup_prompts(result)
+    return result
 
 async def generate_next_question(question_tag: str, session_data: dict) -> str:
     """Generate the next business planning question based on the question tag"""
     
-    # Business planning questions mapping
+    # Business planning questions mapping (aligned with constant.py 45 questions)
     business_plan_questions = {
-        "BUSINESS_PLAN.01": "What problem does your business solve?",
-        "BUSINESS_PLAN.02": "Who has this problem (your target market)?",
-        "BUSINESS_PLAN.03": "What is your solution (product or service)?",
-        "BUSINESS_PLAN.04": "How is your solution different from existing alternatives?",
-        "BUSINESS_PLAN.05": "What are your key features and benefits?",
-        "BUSINESS_PLAN.06": "What is your business model (how will you make money)?",
-        "BUSINESS_PLAN.07": "Who are your main competitors?",
-        "BUSINESS_PLAN.08": "What is your competitive advantage?",
-        "BUSINESS_PLAN.09": "What is your target market size?",
-        "BUSINESS_PLAN.10": "How will you reach your customers (marketing strategy)?",
-        "BUSINESS_PLAN.11": "What is your pricing strategy?",
-        "BUSINESS_PLAN.12": "What are your estimated startup costs?",
-        "BUSINESS_PLAN.13": "Where will your business be located? Why did you choose this location?",
-        "BUSINESS_PLAN.14": "What funding do you need and how will you get it?",
-        "BUSINESS_PLAN.15": "What are your key operational requirements?",
-        "BUSINESS_PLAN.16": "What equipment or technology do you need?",
-        "BUSINESS_PLAN.17": "Where will your business be located?",
-        "BUSINESS_PLAN.18": "What staff do you need initially?",
-        "BUSINESS_PLAN.19": "Who are your key suppliers and vendors?",
-        "BUSINESS_PLAN.20": "What legal requirements do you need to meet?",
-        "BUSINESS_PLAN.21": "Do you have any intellectual property or proprietary technology?",
-        "BUSINESS_PLAN.22": "What is your mission statement or tagline?",
-        "BUSINESS_PLAN.23": "What are your short-term goals (first 6 months)?",
-        "BUSINESS_PLAN.24": "What are your long-term goals (1-3 years)?",
-        "BUSINESS_PLAN.25": "What are the main risks and challenges you face?",
-        "BUSINESS_PLAN.26": "How will you measure success?",
-        "BUSINESS_PLAN.27": "What is your exit strategy (if applicable)?",
-        "BUSINESS_PLAN.28": "What support do you need to launch your business?"
+        "BUSINESS_PLAN.01": "Describe your business idea in detail.",
+        "BUSINESS_PLAN.02": "What product or service will you offer?",
+        "BUSINESS_PLAN.03": "What makes your product or service unique compared to others in the market?",
+        "BUSINESS_PLAN.04": "What is the current stage of your business?",
+        "BUSINESS_PLAN.05": "Business Name (if decided):",
+        "BUSINESS_PLAN.06": "What industry does your business fall into?",
+        "BUSINESS_PLAN.07": "What are your short-term (6 months to 1 year) business goals?",
+        "BUSINESS_PLAN.08": "Who is your target customer?",
+        "BUSINESS_PLAN.09": "Where will your business products or services be available for purchase?",
+        "BUSINESS_PLAN.10": "What problem(s) are you solving for your target customers?",
+        "BUSINESS_PLAN.11": "Now I will do some initial research to help you understand who are some competitors for your business.",
+        "BUSINESS_PLAN.12": "Next I'll look into trends that are currently affecting your industry.",
+        "BUSINESS_PLAN.13": "How do you plan to differentiate your business to stand out?",
+        "BUSINESS_PLAN.14": "Where will your business be located?",
+        "BUSINESS_PLAN.15": "What kind of facilities or resources will you need to operate?",
+        "BUSINESS_PLAN.16": "What will be your primary method of delivering your product/service?",
+        "BUSINESS_PLAN.17": "Here are some suggested short-term operational needs to launch your business.",
+        "BUSINESS_PLAN.18": "Business Mission Statement (What are your core values and mission?):",
+        "BUSINESS_PLAN.19": "How do you plan to market your business?",
+        "BUSINESS_PLAN.20": "Will you hire a sales team, contract with a marketing firm, self-market, or use some other method?",
+        "BUSINESS_PLAN.21": "What is your unique selling proposition (USP)?",
+        "BUSINESS_PLAN.22": "What promotional strategies will you use to launch your business?",
+        "BUSINESS_PLAN.23": "Here are some suggested short-term marketing needs. Is there anything else you'd like to add?",
+        "BUSINESS_PLAN.24": "What type of business structure will you have?",
+        "BUSINESS_PLAN.25": "Have you registered your business name?",
+        "BUSINESS_PLAN.26": "Here are the permits and/or licenses you will need to operate legally.",
+        "BUSINESS_PLAN.27": "Here are some suggested insurance policies you may need.",
+        "BUSINESS_PLAN.28": "How do you plan to ensure adherence to requirements to keep your business compliant?",
+        "BUSINESS_PLAN.29": "How will your business make money?",
+        "BUSINESS_PLAN.30": "What is your pricing strategy?",
+        "BUSINESS_PLAN.31": "How will you keep track of your business financials and accounting?",
+        "BUSINESS_PLAN.32": "What is your initial funding source?",
+        "BUSINESS_PLAN.33": "What are your financial goals for the first year?",
+        "BUSINESS_PLAN.34": "Here are the general main costs associated with starting your business.",
+        "BUSINESS_PLAN.35": "What are your plans for scaling your business in the future?",
+        "BUSINESS_PLAN.36": "What are your long-term (2-5 years) business goals?",
+        "BUSINESS_PLAN.37": "What are your long-term operational needs?",
+        "BUSINESS_PLAN.38": "What are your long-term financial needs?",
+        "BUSINESS_PLAN.39": "What are your long-term marketing goals?",
+        "BUSINESS_PLAN.40": "What will be your approach to expanding product/service lines or entering new markets?",
+        "BUSINESS_PLAN.41": "What are your long-term administrative goals?",
+        "BUSINESS_PLAN.42": "Here are some suggested contingency plans for potential challenges your business may face.",
+        "BUSINESS_PLAN.43": "How will you adapt if your market conditions change or new competitors enter the market?",
+        "BUSINESS_PLAN.44": "Will you seek additional funding to expand? If so, what sources and for what purposes?",
+        "BUSINESS_PLAN.45": "What is your overall vision for where you see this business in 5 years?"
     }
     
     # Get the question text
     question_text = business_plan_questions.get(question_tag, "Please provide additional information about your business.")
     
-    # Add the question tag
-    formatted_question = f"[[Q:{question_tag}]] {question_text}"
-    
-    # Add some context and encouragement
-    context = f"Great! I'm glad we're making progress.\n\nLet's continue by exploring another important aspect of your business.\n\n{question_text}\n\nConsider: What specific details would help clarify this aspect of your business?\nThink about: How does this relate to your overall business strategy?"
-    
-    return f"[[Q:{question_tag}]] {context}"
+    # Return clean formatted question without any extra guidance/hints
+    # The system automatically adds thought starters - do NOT add "Consider:", "Think about:", etc.
+    return f"[[Q:{question_tag}]]\n\n**{question_text}**"
 
 def generate_problem_solution_draft(business_context, history):
     """Generate a specific problem-solution draft based on business context"""
