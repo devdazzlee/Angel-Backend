@@ -131,7 +131,7 @@ class AppendicesIntegrationService:
         """Calculate section-specific progress"""
         
         sections = [
-            ("kyc_section", "KYC Intake Questionnaire", 100, "completed"),
+            ("kyc_section", "Getting to Know You", 100, "completed"),
             ("planning_section", "Business Plan Development", 100, "completed"),
             ("roadmap_section", "Launch Roadmap Creation", 75, "in_progress"),
             ("implementation_section", "Implementation Execution", 0, "pending")
@@ -373,7 +373,7 @@ class AppendicesIntegrationService:
         navigation_items = [
             NavigationItem(
                 id="kyc",
-                label="KYC Intake Questionnaire",
+                label="Getting to Know You",
                 phase="KYC",
                 status="completed",
                 description="Initial business information gathering",

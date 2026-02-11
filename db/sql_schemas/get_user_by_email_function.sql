@@ -47,3 +47,4 @@ GRANT EXECUTE ON FUNCTION get_user_by_email(TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION get_user_by_email(TEXT) TO service_role;
 
 
+

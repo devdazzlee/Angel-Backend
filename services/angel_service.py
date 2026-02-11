@@ -217,11 +217,11 @@ TAG_PROMPT = """CRITICAL: You MUST include a machine-readable tag in EVERY respo
 [[Q:<PHASE>.<NN>]] 
 
 Examples:
-- [[Q:KYC.01]] What's your name?
-- [[Q:KYC.02]] What is your preferred communication style?
+- [[Q:KYC.01]] What's your name and preferred name or nickname?
+- [[Q:KYC.02]] Have you started a business before?
+- [[Q:KYC.03]] What motivates you to start this business?
 - [[Q:BUSINESS_PLAN.01]] What is your business idea?
 - [[Q:BUSINESS_PLAN.19]] What is your revenue model?
-- [[Q:BUSINESS_PLAN.20]] How will you market your business?
 
 IMPORTANT RULES:
 1. The tag must be at the beginning of your question, before any other text
@@ -1659,7 +1659,7 @@ async def handle_kyc_completion(session_data, history):
     kyc_summary = await generate_kyc_summary(session_data, history)
     
     # Create the comprehensive transition message based on the DOCX document
-    transition_message = f"""🎉 **CONGRATULATIONS! You've officially completed the full Business Planning Phase with Angel inside Founderport!**
+    transition_message = f"""🎉 **CONGRATULATIONS! You've officially completed the Get to Know You phase with Angel inside Founderport!**
 
 You've defined your entrepreneurial profile and shared valuable insights about your experience, goals, and preferences — an incredible milestone in your entrepreneurial journey.
 
@@ -1697,15 +1697,15 @@ Your completed entrepreneurial profile will now be used to create a fully person
 
 The Business Planning phase is comprehensive and detailed. This ensures your final business plan is thorough and provides you with a strong starting point for launching your business. The more detailed answers you provide, the better I can help support you to bring your business to life.
 
-**"The best way to predict the future is to create it."** – Peter Drucker
+*"The best way to predict the future is to create it."* – Peter Drucker
 
 ## **Ready to Move Forward?**
 
 Once you're ready, we'll begin the Business Planning phase where we'll dive deep into every aspect of your business idea — from your product and market to finances and growth strategy.
 
-**Let's build the business of our dreams together!**
+**Let's build the business of your dreams together!**
 
-**"The way to get started is to quit talking and begin doing."** – Walt Disney
+*"The way to get started is to quit talking and begin doing."* – Walt Disney
     """
     
     # Check if we should show Accept/Modify buttons
@@ -1720,7 +1720,7 @@ Once you're ready, we'll begin the Business Planning phase where we'll dive deep
         "transition_phase": "KYC_TO_BUSINESS_PLAN",
         "patch_session": {
             "current_phase": "BUSINESS_PLAN_INTRO",  # Intermediate phase before actual questions
-            "asked_q": "KYC.20_ACK",  # Keep on KYC until user confirms ready
+            "asked_q": "KYC.06_ACK",  # Keep on KYC until user confirms ready
             "answered_count": session_data.get("answered_count", 0)
         },
         "show_accept_modify": button_detection.get("show_buttons", False),
@@ -2206,8 +2206,8 @@ Let's focus on answering the current question first.""",
         # Check if this looks like a rating response (numbers separated by commas)
         rating_pattern = r'^\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+$'
         if re.match(rating_pattern, user_content.strip()):
-            # Only allow rating responses for KYC.07 (skills rating question)
-            if asked_q != "KYC.07":
+            # Only allow rating responses for KYC.05 (skills rating question)
+            if asked_q != "KYC.05":
                 return {
                     "reply": f"""I see you've provided a rating response, but the current question is asking about something different.
 
@@ -2296,7 +2296,7 @@ Let's continue with the current question.
     
     # Validate that asked_q is in the correct format and sequence
     if current_phase == "KYC":
-        if not asked_q.startswith("KYC.") and asked_q != "KYC.19_ACK":
+        if not asked_q.startswith("KYC.") and asked_q != "KYC.06_ACK":
             return {
                 "reply": f"""I need to ensure we're following the proper KYC sequence. Please provide an answer to the current KYC question so we can continue systematically building your business profile.
 
@@ -2937,10 +2937,10 @@ DO NOT repeat "{asked_q}" - the user has already answered it.
         if "." in asked_q:
             try:
                 current_num = int(asked_q.split(".")[1])
-                # Prevent going beyond KYC.20 (last KYC question)
-                if current_phase == "KYC" and current_num >= 20:
-                    # Don't increment beyond 20 for KYC
-                    next_question_num = "20"
+                # Prevent going beyond KYC.06 (last KYC question)
+                if current_phase == "KYC" and current_num >= 6:
+                    # Don't increment beyond 06 for KYC
+                    next_question_num = "06"
                 else:
                     next_question_num = f"{current_num + 1:02d}"
             except (ValueError, IndexError):
@@ -4741,19 +4741,13 @@ def extract_business_context_from_history(history):
     for i, msg in enumerate(history):
         if msg["role"] == "assistant":
             content = msg["content"]
-            # KYC questions
-            if "[[Q:KYC.12]]" in content:  # Industry question (renumbered from KYC.11)
-                kyc_question_indices["industry"] = i
-                print(f"🔍 DEBUG - Found KYC.12 (industry question) at index {i}")
-            elif "[[Q:KYC.17]]" in content:  # Business structure question (renumbered from KYC.16)
+            # KYC questions (new sequential set: KYC.01-KYC.06)
+            if "[[Q:KYC.04]]" in content:  # "What kind of business are you trying to build?"
                 kyc_question_indices["business_type"] = i
-                print(f"🔍 DEBUG - Found KYC.17 (business type question) at index {i}")
-            elif "[[Q:KYC.10]]" in content:  # Business location question
-                kyc_question_indices["location"] = i
-                print(f"🔍 DEBUG - Found KYC.10 (business location question) at index {i}")
-            elif "[[Q:KYC.11]]" in content:  # Business offering location question
-                kyc_question_indices["offering_location"] = i
-                print(f"🔍 DEBUG - Found KYC.11 (business offering location question) at index {i}")
+                print(f"🔍 DEBUG - Found KYC.04 (business type question) at index {i}")
+            elif "[[Q:KYC.03]]" in content:  # "What motivates you to start this business?"
+                kyc_question_indices["motivation"] = i
+                print(f"🔍 DEBUG - Found KYC.03 (motivation question) at index {i}")
             # Business Plan Question 1 - Business Name (HIGHEST PRIORITY)
             elif "[[Q:BUSINESS_PLAN.01]]" in content or "[[Q:BP.01]]" in content:
                 kyc_question_indices["business_name"] = i
@@ -4769,11 +4763,8 @@ def extract_business_context_from_history(history):
             
             # Check if this is a response to a KYC or BP question (HIGHEST PRIORITY - weight 100)
             is_bp_name_answer = "business_name" in kyc_question_indices and i == kyc_question_indices["business_name"] + 1
-            is_kyc_industry_answer = "industry" in kyc_question_indices and i == kyc_question_indices["industry"] + 1
             is_kyc_business_type_answer = "business_type" in kyc_question_indices and i == kyc_question_indices["business_type"] + 1
-            is_kyc_location_answer = "location" in kyc_question_indices and i == kyc_question_indices["location"] + 1
-            is_kyc_offering_location_answer = "offering_location" in kyc_question_indices and i == kyc_question_indices["offering_location"] + 1
-            is_bp_sales_location_answer = "sales_location" in kyc_question_indices and i == kyc_question_indices["sales_location"] + 1
+            is_bp_sales_location_answer = "sales_location" in kyc_question_indices and i == kyc_question_indices.get("sales_location", -999) + 1
             
             # Extract business name from BP.01 answer (HIGHEST PRIORITY - weight 100)
             if is_bp_name_answer and len(content.strip()) > 2:
@@ -4787,34 +4778,12 @@ def extract_business_context_from_history(history):
                     context_weights["business_name"] = 100
                     print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: BP.01 business name answer (EXACT): '{business_name_answer}' (weight 100)")
             
-            # Extract industry from KYC.12 answer - Use user's EXACT answer (renumbered from KYC.11)
-            if is_kyc_industry_answer and len(content.strip()) > 2:
-                # Use the user's exact answer - no keyword matching, no hardcoding
-                industry_answer = content.strip()
-                business_context["industry"] = industry_answer
-                context_weights["industry"] = 100
-                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.12 industry answer (EXACT): '{industry_answer}' (weight 100)")
-            
-            # Extract business type from KYC.17 answer (HIGHEST PRIORITY) (renumbered from KYC.16)
+            # Extract business type from KYC.04 answer ("What kind of business are you trying to build?")
             if is_kyc_business_type_answer and len(content.strip()) > 2:
                 business_type_answer = content.strip()
                 business_context["business_type"] = business_type_answer
                 context_weights["business_type"] = 100
-                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.17 business type answer: '{business_type_answer}' (weight 100)")
-            
-            # Extract business location from KYC.10 answer (HIGHEST PRIORITY)
-            if is_kyc_location_answer and len(content.strip()) > 2:
-                location_answer = content.strip()
-                business_context["location"] = location_answer
-                context_weights["location"] = 100
-                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.10 business location answer: '{location_answer}' (weight 100)")
-            
-            # Extract business offering location from KYC.11 answer (HIGHEST PRIORITY)
-            if is_kyc_offering_location_answer and len(content.strip()) > 2:
-                offering_location_answer = content.strip()
-                business_context["offering_location"] = offering_location_answer
-                context_weights["offering_location"] = 100
-                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.11 business offering location answer: '{offering_location_answer}' (weight 100)")
+                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.04 business type answer: '{business_type_answer}' (weight 100)")
             
             # Extract sales location from BP.08 answer (HIGHEST PRIORITY)
             if is_bp_sales_location_answer and len(content.strip()) > 2:

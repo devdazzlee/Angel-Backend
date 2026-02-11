@@ -18,7 +18,7 @@ def smart_trim_history(history_list, max_lines=150):
     return trimmed
 
 TOTALS_BY_PHASE = {
-    "KYC": 6,  # Updated to 6 questions (kept only: 1, 3, 7, 14, 15, 17)
+    "KYC": 6,  # 6 sequential questions: KYC.01 through KYC.06
     "BUSINESS_PLAN": 45,  # Updated to 45 questions (9 sections restructured)
     "PLAN_TO_SUMMARY_TRANSITION": 1,  # Transition phase - show summary first
     "PLAN_TO_BUDGET_TRANSITION": 1,  # Transition phase - no questions, just waiting for user action
@@ -65,30 +65,19 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
             question_num = int(current_tag.split(".")[1])
             
             if current_phase == "KYC":
-                # For KYC, count COMPLETED questions (current question - 1)
-                kyc_completed_map = {1: 0, 3: 1, 7: 2, 14: 3, 15: 4, 17: 5}  # question_num -> completed_count
-                current_step = kyc_completed_map.get(question_num, max(kyc_completed_map.values()))  # Use max completed if unknown question
+                # KYC questions are now sequential: KYC.01 through KYC.06
+                # completed_count = question_num - 1 (current question hasn't been completed yet)
+                current_step = max(0, question_num - 1)
             else:
                 current_step = question_num
                 
             print(f"✅ Using tag-based calculation: tag={current_tag}, question_num={question_num}, current_step={current_step}")
         except (ValueError, IndexError):
-            # Fallback to answered_count if tag parsing fails
-            if current_phase == "KYC":
-                # For KYC, use the completed questions mapping as fallback
-                kyc_completed_map = {1: 0, 3: 1, 7: 2, 14: 3, 15: 4, 17: 5}  # question_num -> completed_count
-                current_step = kyc_completed_map.get(question_num, max(kyc_completed_map.values()))  # Use max completed if unknown
-            else:
-                current_step = answered_count
+            current_step = answered_count
             print(f"❌ Tag parsing failed, using fallback: {current_step}")
     else:
         # Fallback: Use answered_count if no valid tag
-        if current_phase == "KYC":
-            # For KYC, use the completed questions mapping as fallback
-            kyc_completed_map = {1: 0, 3: 1, 7: 2, 14: 3, 15: 4, 17: 5}  # question_num -> completed_count
-            current_step = kyc_completed_map.get(question_num, max(kyc_completed_map.values()))  # Use max completed if unknown
-        else:
-            current_step = answered_count
+        current_step = answered_count
         print(f"⚠️ No valid tag found, using fallback: {current_step}")
     
     # Get total for phase - handle missing phases gracefully
@@ -141,9 +130,8 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
             question_num = int(current_tag.split(".")[1])
             
             if current_phase == "KYC":
-                # For KYC, count completed questions using sequential mapping
-                kyc_sequential_map = {1: 0, 3: 1, 7: 2, 14: 3, 15: 4, 17: 5}  # question_num -> completed_count
-                current_step = kyc_sequential_map.get(question_num, max(kyc_sequential_map.values()))  # Use max completed if unknown
+                # KYC questions are now sequential: KYC.01 through KYC.06
+                current_step = max(0, question_num - 1)
             elif current_phase == "BUSINESS_PLAN":
                 # For Business Plan, add KYC total (6) to current question number
                 current_step = 6 + question_num
@@ -153,22 +141,11 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
                 
             print(f"✅ Combined calculation: phase={current_phase}, question_num={question_num}, current_step={current_step}")
         except (ValueError, IndexError):
-            # Fallback to answered_count if tag parsing fails
-            if current_phase == "KYC":
-                # For KYC, use max completed count as fallback
-                kyc_sequential_map = {1: 0, 3: 1, 7: 2, 14: 3, 15: 4, 17: 5}
-                current_step = kyc_sequential_map.get(question_num, max(kyc_sequential_map.values()))
-            else:
-                current_step = answered_count
+            current_step = answered_count
             print(f"❌ Tag parsing failed, using fallback: {current_step}")
     else:
         # Fallback: Use answered_count if no valid tag
-        if current_phase == "KYC":
-            # For KYC, use max completed count as fallback
-            kyc_sequential_map = {1: 0, 3: 1, 7: 2, 14: 3, 15: 4, 17: 5}
-            current_step = kyc_sequential_map.get(question_num, max(kyc_sequential_map.values()))
-        else:
-            current_step = answered_count
+        current_step = answered_count
         print(f"⚠️ No valid tag found, using fallback: {current_step}")
     
     # For KYC and Business Plan phases, use combined total (65)

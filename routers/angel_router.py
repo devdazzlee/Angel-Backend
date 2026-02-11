@@ -26,7 +26,7 @@ router = APIRouter(
     dependencies=[Depends(verify_auth_token)]
 )
 
-# Build a lookup of canonical question text keyed by tag (e.g., "KYC.10")
+# Build a lookup of canonical question text keyed by tag (e.g., "KYC.01")
 QUESTION_TEXT_MAP = dict(
     re.findall(r'\[\[Q:([A-Z_]+\.\d{2})]]\s*([^\n]+)', ANGEL_SYSTEM_PROMPT)
 )
@@ -550,15 +550,9 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         print(f"  - Last phase: {last_phase}, Last num: {last_num}")
         print(f"  - Current phase: {current_phase}, Current num: {current_num}")
         
-      # KYC-specific logic: handle non-sequential question progression
+      # KYC questions are now sequential (01-06), so standard +1 progression works
         if (current_phase == last_phase and int(current_num) == int(last_num) + 1) or \
-           (current_phase != last_phase and current_num == "01") or \
-           (current_phase == "KYC" and last_phase == "KYC" and 
-            ((last_num == "1" and current_num == "3") or
-             (last_num == "3" and current_num == "7") or
-             (last_num == "7" and current_num == "14") or
-             (last_num == "14" and current_num == "15") or
-             (last_num == "15" and current_num == "17"))):
+           (current_phase != last_phase and current_num == "01"):
             session["answered_count"] += 1
             print(f"✅ Incremented answered_count to {session['answered_count']}")
         else:
@@ -824,29 +818,21 @@ async def patch_session_context_from_response(session_id, response_content, tag,
         print(f"🔧 Skipping session context extraction for long response ({len(response_content)} chars)")
         return
     
-    # Extract key information based on KYC question
+    # Extract key information based on KYC question (new sequential set: KYC.01-KYC.06)
     updates = {}
     
-    if tag == "KYC.01":  # Name
+    if tag == "KYC.01":  # Name and preferred name
         updates["user_name"] = response_content.strip()
-    elif tag == "KYC.04":  # Work situation  
-        updates["employment_status"] = response_content.strip()
-    elif tag == "KYC.05":  # Business idea
-        updates["has_business_idea"] = "yes" in response_content.lower()
-        if updates["has_business_idea"]:
-            updates["business_idea_brief"] = response_content.strip()
-    elif tag == "KYC.08":  # Business type
-        updates["business_type"] = response_content.strip()
-    elif tag == "KYC.09":  # Motivation
+    elif tag == "KYC.02":  # Have you started a business before?
+        updates["has_business_experience"] = "yes" in response_content.lower()
+    elif tag == "KYC.03":  # What motivates you to start this business?
         updates["motivation"] = response_content.strip()
-    elif tag == "KYC.10":  # Business location
-        updates["location"] = response_content.strip()
-    elif tag == "KYC.11":  # Business offering location
-        updates["offering_location"] = response_content.strip()
-    elif tag == "KYC.12":  # Industry (renumbered from KYC.11)
-        updates["industry"] = response_content.strip()
-    elif tag == "KYC.07":  # Skills comfort level
+    elif tag == "KYC.04":  # What kind of business are you trying to build?
+        updates["business_type"] = response_content.strip()
+    elif tag == "KYC.05":  # Skills comfort level
         updates["skills_assessment"] = response_content.strip()
+    elif tag == "KYC.06":  # Greatest concern about starting a business
+        updates["biggest_concern"] = response_content.strip()
         
     # Update session with extracted information
     if updates:
