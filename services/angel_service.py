@@ -4043,7 +4043,7 @@ def get_question_topic(current_question):
     # Check for mission/tagline keywords
     if any(keyword in question_lower for keyword in ['mission statement', 'tagline', 'business tagline']):
         print("🔍 DEBUG - Detected mission statement topic")
-            return "mission statement"
+        return "mission statement"
     
     # INDUSTRY - must check BEFORE "product/service" to avoid false matches on "food services" etc.
     if any(keyword in question_lower for keyword in ['what industry', 'which industry', 'industry does your business', 'business fall into', 'business fall under', 'industry sector', 'primary industry']):
@@ -4135,8 +4135,8 @@ def get_question_topic(current_question):
         print("🔍 DEBUG - Detected legal requirements topic")
         return "legal requirements"
     
-        print("🔍 DEBUG - No specific topic detected, using default business planning")
-        return "business planning"
+    print("🔍 DEBUG - No specific topic detected, using default business planning")
+    return "business planning"
 
 async def generate_draft_content(history, business_context, current_question="", research_results=None):
     """Generate draft content based on conversation history and the current question topic"""
