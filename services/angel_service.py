@@ -759,7 +759,7 @@ Provide a comprehensive analysis with:
 4. **Competitive landscape**: Name actual competitors with specific strengths and weaknesses
 
 Format your response with clear sections and bullet points. Be specific and data-driven."""
-            timeout = 15.0  # Generous timeout for thorough research
+            timeout = 30.0  # Generous timeout for thorough research
             max_tokens = 1000  # Increased for comprehensive research
         
         response = await client.chat.completions.create(
@@ -796,7 +796,7 @@ Do NOT mention limitations or inability to browse - just provide the information
                 messages=[{"role": "user", "content": retry_prompt}],
                 temperature=0.3,
                 max_tokens=max_tokens,
-                timeout=10.0
+                timeout=25.0
             )
             search_results = retry_response.choices[0].message.content
             
@@ -2072,11 +2072,12 @@ What would you like to do?"""
 async def handle_budget_setup(session_data, history):
     """Handle the transition from Business Plan to Budget phase"""
     
-    # Extract business context
-    business_name = session_data.get("business_name") or session_data.get("business_idea_brief", "your business")
-    industry = session_data.get("industry", "your industry")
-    location = session_data.get("location", "your location")
-    business_type = session_data.get("business_type", "service")
+    # Extract business context (fields are nested under business_context in session_data)
+    saved_ctx = session_data.get("business_context") or {}
+    business_name = saved_ctx.get("business_name") or session_data.get("business_name") or session_data.get("business_idea_brief", "your business")
+    industry = saved_ctx.get("industry") or session_data.get("industry", "your industry")
+    location = saved_ctx.get("location") or session_data.get("location", "your location")
+    business_type = saved_ctx.get("business_type") or session_data.get("business_type", "service")
     
     # Generate estimated expenses based on business plan
     estimated_expenses = await generate_estimated_expenses_from_business_plan(session_data, history)
@@ -2138,10 +2139,11 @@ Once you provide your initial investment amount, I'll:
 async def generate_estimated_expenses_from_business_plan(session_data, history):
     """Generate estimated expenses based on business plan context using AI"""
     
-    business_name = session_data.get("business_name") or session_data.get("business_idea_brief", "your business")
-    industry = session_data.get("industry", "your industry")
-    location = session_data.get("location", "your location")
-    business_type = session_data.get("business_type", "service")
+    saved_ctx = session_data.get("business_context") or {}
+    business_name = saved_ctx.get("business_name") or session_data.get("business_name") or session_data.get("business_idea_brief", "your business")
+    industry = saved_ctx.get("industry") or session_data.get("industry", "your industry")
+    location = saved_ctx.get("location") or session_data.get("location", "your location")
+    business_type = saved_ctx.get("business_type") or session_data.get("business_type", "service")
     
     # Extract relevant business plan information from history
     business_plan_context = ""
@@ -3598,45 +3600,60 @@ CRITICAL INSTRUCTIONS:
             
             # Extract business context for targeted research
             business_context = extract_business_context_from_history(history)
+            # Merge session_data.business_context (nested dict) — only override
+            # if the session value is non-empty, so we don't wipe extracted data
             if session_data:
-                business_context.update({
-                    "industry": session_data.get("industry", ""),
-                    "location": session_data.get("location", ""),
-                    "business_name": session_data.get("business_name", ""),
-                    "business_type": session_data.get("business_type", "")
-                })
+                saved_ctx = session_data.get("business_context") or {}
+                for key in ("industry", "location", "business_name", "business_type"):
+                    val = saved_ctx.get(key, "")
+                    if val and (not business_context.get(key) or len(str(val)) > len(str(business_context.get(key, "")))):
+                        business_context[key] = val
             
-            industry = business_context.get("industry", "business")
+            industry = business_context.get("industry", "") or "business"
             location = business_context.get("location", "")
-            business_name = business_context.get("business_name", "your business")
-            business_type = business_context.get("business_type", "business")
+            business_name = business_context.get("business_name", "") or "your business"
+            business_type = business_context.get("business_type", "") or "business"
+            
+            print(f"🔍 Auto-research context: industry='{industry}', type='{business_type}', name='{business_name[:50]}', location='{location}'")
             current_year = datetime.now().year
             previous_year = current_year - 1
             
             try:
                 if detected_tag == "BUSINESS_PLAN.11":
                     # Competitor research - get REAL company names, not placeholders
-                    # Extract product/service info from history for better targeting
+                    # Extract product/service info from recent user answers
                     product_info = ""
-                    for h in history[-10:]:
-                        if h.get("answer") and len(h["answer"]) > 20:
-                            product_info = h["answer"][:100]
-                            break
+                    for h in reversed(history[-20:]):
+                        content_text = h.get("content", "") or h.get("answer", "")
+                        if h.get("role") == "user" and content_text and len(content_text) > 20:
+                            lower = content_text.lower()
+                            # Skip command words
+                            if lower.strip() not in ("accept", "draft", "modify", "yes", "no", "support", "scrapping"):
+                                product_info = content_text[:200]
+                                break
                     
-                    search_query = f"top 5 real companies competing in {industry} {business_type} sector {location} including their specific strengths weaknesses and market position"
+                    # Build a rich query using business idea + context
+                    business_idea = business_context.get("business_idea", "")
+                    # Prefer business_name if it contains a descriptive answer (not just the name)
+                    name_for_query = business_name if len(business_name) > 20 else ""
+                    context_for_query = name_for_query or product_info or business_idea or f"{industry} {business_type}"
+                    
+                    search_query = f"top 5 real companies competing with a business that does: {context_for_query[:200]}. Include their specific strengths, weaknesses, and market position in the {industry} sector"
+                    if location:
+                        search_query += f" in {location}"
                     print(f"🔍 Q11 competitor research query: {search_query}")
                     search_result = await conduct_web_search(search_query)
                     if _is_valid_research(search_result):
-                        reply_content += f"\n\n🔍 **Competitor Research Results for {business_name}:**\n\n{search_result}"
+                        reply_content += f"\n\n🔍 **Competitor Research Results:**\n\n{search_result}"
                         reply_content += f"\n\n*Research based on {industry} market data ({previous_year}-{current_year})*"
                         reply_content += "\n\nPlease review these findings. Is there anything you'd like me to adjust or explore further?"
                         auto_research_triggered = True
                         print(f"✅ Auto-research completed for Q11 - competitor analysis injected")
                     else:
                         # Secondary fallback with simpler query
-                        search_result = await conduct_web_search(
-                            f"major competitors in {industry} industry {location} market analysis"
-                        )
+                        fallback_query = f"major competitors for {business_type} SaaS AI automation workflow tools market analysis {current_year}"
+                        print(f"🔍 Q11 fallback query: {fallback_query}")
+                        search_result = await conduct_web_search(fallback_query)
                         if _is_valid_research(search_result):
                             reply_content += f"\n\n🔍 **Competitor Research:**\n\n{search_result}"
                             reply_content += "\n\nPlease review these findings. Is there anything you'd like me to adjust or explore further?"
