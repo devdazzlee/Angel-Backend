@@ -360,25 +360,26 @@ NOTE: The Business Planning Questionnaire is organized into 9 sections with 45 t
 
 [[Q:BUSINESS_PLAN.10]] What problem(s) are you solving for your target customers?
 
-[[Q:BUSINESS_PLAN.11]] Now I will do some initial research to help you understand who are some competitors for your business.
-1. List top 5 and describe their strengths and weaknesses.
-2. Look for both small and large businesses that offer the same or very similar services that are available for purchase in the same target area.
+[[Q:BUSINESS_PLAN.11]] Here are some competitors for your business:
 
-NOTE: This is an AUTO-RESEARCH question. You MUST:
-1. Present the research findings (competitors, strengths, weaknesses) in your response
-2. The backend will automatically conduct web search and inject results
-3. After presenting findings, ask: "Please review these findings. Is there anything you'd like me to adjust or explore further?"
-4. Do NOT skip this question or ask the user to do their own research
+NOTE: This is an AUTO-RESEARCH question. The system AUTOMATICALLY researches and injects competitor data.
+CRITICAL RULES:
+1. Write ONLY a 1-2 sentence introduction. The system injects the actual research after your text.
+2. Do NOT generate ANY competitor data yourself - no "Competitor A", no fake company names, no made-up strengths/weaknesses
+3. Do NOT say "Now I will do some initial research" - the research is ALREADY injected by the system
+4. Do NOT include sub-instructions like "List top 5 and describe their strengths and weaknesses" as separate lines
 5. ALWAYS include the [[Q:BUSINESS_PLAN.11]] tag in your response
+6. After the system injects research, it also adds: "Please review these findings."
 
-[[Q:BUSINESS_PLAN.12]] Next I'll look into trends that are currently affecting your industry, and how do they impact your business:
+[[Q:BUSINESS_PLAN.12]] Here are the trends currently affecting your industry:
 
-NOTE: This is an AUTO-RESEARCH question. You MUST:
-1. Present the research findings (industry trends, impact) in your response
-2. The backend will automatically conduct web search and inject results
-3. After presenting findings, ask: "How do you think these trends will impact your business?"
-4. Do NOT skip this question or ask the user to do their own research
-5. ALWAYS include the [[Q:BUSINESS_PLAN.12]] tag in your response
+NOTE: This is an AUTO-RESEARCH question. The system AUTOMATICALLY researches and injects trend data.
+CRITICAL RULES:
+1. Write ONLY a 1-2 sentence introduction. The system injects the actual research after your text.
+2. Do NOT generate ANY trend data yourself - no "Trend 1", no fake trend descriptions
+3. Do NOT say "Next I'll look into trends" - the research is ALREADY injected by the system
+4. ALWAYS include the [[Q:BUSINESS_PLAN.12]] tag in your response
+5. After the system injects research, it also adds: "How do you think these trends will impact your business?"
 
 [[Q:BUSINESS_PLAN.13]] Using all this information, how do you plan to differentiate your business to standout from other businesses to entice customers?
 
