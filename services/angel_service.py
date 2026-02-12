@@ -3362,7 +3362,6 @@ CRITICAL INSTRUCTIONS:
     reply_content = inject_missing_tag(reply_content, session_data)
     
     # CRITICAL: Enforce single-question rule - strip extra [[Q:...]] tags if AI generated multiple
-    import re
     all_tags = re.findall(r'\[\[Q:(BUSINESS_PLAN\.\d{2})\]\]', reply_content)
     if len(all_tags) > 1:
         print(f"⚠️ MULTI-QUESTION VIOLATION: AI generated {len(all_tags)} question tags: {all_tags}. Keeping only the first: {all_tags[0]}")
@@ -4338,7 +4337,6 @@ This data can help you craft a comprehensive answer for your {location} market."
         mentioned_staff = []
         staff_keywords = ['secretary', 'assistant', 'receptionist', 'office manager', 'bookkeeper', 'accountant', 'staff', 'employee', 'worker', 'help']
         
-        import re
         for msg in history:
             if msg.get('role') == 'user':
                 content = msg.get('content', '')
@@ -5395,7 +5393,6 @@ def extract_business_context_from_history(history):
                 print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: BP.08 sales location answer: '{sales_location_answer}' (weight 100)")
             
             # Extract previously mentioned staff (for context in future questions)
-            import re
             staff_keywords = ['secretary', 'assistant', 'receptionist', 'office manager', 'bookkeeper', 'accountant', 'staff', 'employee', 'worker']
             for keyword in staff_keywords:
                 # Pattern to match: (number)? (office )? (a/an )? keyword (s)?
@@ -7119,7 +7116,6 @@ def generate_staffing_needs_draft(business_context, history):
     
     # Also extract from history if not in business_context
     if not mentioned_staff:
-        import re
         staff_keywords = ['secretary', 'assistant', 'receptionist', 'office manager', 'bookkeeper', 'accountant', 'staff', 'employee', 'worker']
         for msg in history:
             if msg.get('role') == 'user':
