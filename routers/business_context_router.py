@@ -101,7 +101,7 @@ async def extract_business_context_from_history_api(
 ):
     """
     Extract business context from chat history when stored values are invalid (Unsure, Your Business, etc.)
-    This endpoint intelligently searches KYC and Business Plan chat history for actual business information.
+    This endpoint intelligently searches GKY and Business Plan chat history for actual business information.
     """
     
     user_id = request.state.user["id"]

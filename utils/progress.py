@@ -18,7 +18,7 @@ def smart_trim_history(history_list, max_lines=150):
     return trimmed
 
 TOTALS_BY_PHASE = {
-    "KYC": 6,  # 6 sequential questions: KYC.01 through KYC.06
+    "GKY": 6,  # 6 sequential questions: GKY.01 through GKY.06
     "BUSINESS_PLAN": 45,  # Updated to 45 questions (9 sections restructured)
     "PLAN_TO_SUMMARY_TRANSITION": 1,  # Transition phase - show summary first
     "PLAN_TO_BUDGET_TRANSITION": 1,  # Transition phase - no questions, just waiting for user action
@@ -57,19 +57,15 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
             "percent": 100
         }
     
-    phase_order = ["KYC", "BUSINESS_PLAN", "ROADMAP", "ROADMAP_GENERATED", "ROADMAP_TO_IMPLEMENTATION_TRANSITION", "IMPLEMENTATION"]
+    phase_order = ["GKY", "BUSINESS_PLAN", "ROADMAP", "ROADMAP_GENERATED", "ROADMAP_TO_IMPLEMENTATION_TRANSITION", "IMPLEMENTATION"]
     
     # Always use the current tag to determine the exact question number
+    # CRITICAL: "current_step" means "the question the user is currently ON"
+    # When the user sees Question 1, progress = 1 of 6 (not 0 of 6)
     if current_tag and current_tag.startswith(current_phase + "."):
         try:
             question_num = int(current_tag.split(".")[1])
-            
-            if current_phase == "KYC":
-                # KYC questions are now sequential: KYC.01 through KYC.06
-                # completed_count = question_num - 1 (current question hasn't been completed yet)
-                current_step = max(0, question_num - 1)
-            else:
-                current_step = question_num
+            current_step = question_num
                 
             print(f"✅ Using tag-based calculation: tag={current_tag}, question_num={question_num}, current_step={current_step}")
         except (ValueError, IndexError):
@@ -107,7 +103,7 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
 
 def calculate_combined_progress(current_phase: str, answered_count: int, current_tag: str = None) -> dict:
     """
-    Calculate combined progress for KYC + Business Plan phases (51 total questions).
+    Calculate combined progress for GKY + Business Plan phases (51 total questions).
     This provides an overall progress view that combines both phases.
     """
     print(f"🔍 Combined Progress Calculation Debug:")
@@ -117,24 +113,28 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
     
     # Define combined phase totals
     COMBINED_TOTALS = {
-        "KYC": 6,
+        "GKY": 6,
         "BUSINESS_PLAN": 45,
-        "COMBINED_KYC_BP": 51,  # 6 + 45 = 51 total questions
+        "COMBINED_GKY_BP": 51,  # 6 + 45 = 51 total questions
         "ROADMAP": 1,
         "IMPLEMENTATION": 10
     }
     
     # Calculate current step based on phase and question number
+    # For GKY: current_step = question being viewed (1-based, inclusive)
+    # For BP: current_step = total COMPLETED questions (GKY done + BP completed, exclusive of current)
     if current_tag and current_tag.startswith(current_phase + "."):
         try:
             question_num = int(current_tag.split(".")[1])
             
-            if current_phase == "KYC":
-                # KYC questions are now sequential: KYC.01 through KYC.06
-                current_step = max(0, question_num - 1)
+            if current_phase == "GKY":
+                # GKY: question_num directly (Q1 = step 1, Q6 = step 6)
+                current_step = question_num
             elif current_phase == "BUSINESS_PLAN":
-                # For Business Plan, add KYC total (6) to current question number
-                current_step = 6 + question_num
+                # For Business Plan: bp_completed = questions actually COMPLETED
+                # When user is ON Q1, they haven't completed it yet → 0 BP completed
+                # Combined step = all GKY (6) + BP questions completed (question_num - 1)
+                current_step = 6 + (question_num - 1)
             else:
                 # For other phases, use answered_count as fallback
                 current_step = answered_count
@@ -148,9 +148,9 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
         current_step = answered_count
         print(f"⚠️ No valid tag found, using fallback: {current_step}")
     
-    # For KYC and Business Plan phases, use combined total (65)
-    if current_phase in ["KYC", "BUSINESS_PLAN"]:
-        total_combined = COMBINED_TOTALS["COMBINED_KYC_BP"]
+    # For GKY and Business Plan phases, use combined total (65)
+    if current_phase in ["GKY", "BUSINESS_PLAN"]:
+        total_combined = COMBINED_TOTALS["COMBINED_GKY_BP"]
         print(f"  - Using combined total: {total_combined}")
         
         # Ensure current_step doesn't exceed combined total
@@ -162,8 +162,8 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
         print(f"  - calculated percent: {percent}")
         
         # Calculate phase-specific step for display
-        if current_phase == "KYC":
-            phase_specific_step = question_num if current_tag and current_tag.startswith("KYC.") else min(current_step, 6)
+        if current_phase == "GKY":
+            phase_specific_step = question_num if current_tag and current_tag.startswith("GKY.") else min(current_step, 6)
         elif current_phase == "BUSINESS_PLAN":
             phase_specific_step = question_num if current_tag and current_tag.startswith("BUSINESS_PLAN.") else max(0, current_step - 6)
         else:
@@ -172,13 +172,13 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
         result = {
             "phase": current_phase,
             "answered": current_step,  # Combined step (1-51)
-            "phase_answered": phase_specific_step,  # Phase-specific step (1-6 for KYC, 1-45 for BP)
+            "phase_answered": phase_specific_step,  # Phase-specific step (1-6 for GKY, 1-45 for BP)
             "total": total_combined,
             "percent": percent,
             "combined": True,  # Flag to indicate this is combined progress
             "phase_breakdown": {
-                "kyc_completed": min(current_step, 6),
-                "kyc_total": 6,
+                "gky_completed": min(current_step, 6),
+                "gky_total": 6,
                 "bp_completed": max(0, current_step - 6),
                 "bp_total": 45
             }

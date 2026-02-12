@@ -6,8 +6,8 @@ async def create_session(user_id: str, title: str):
         .insert({
             "user_id": user_id, 
             "title": title,
-            "current_phase": "KYC",
-            "asked_q": "KYC.01",
+            "current_phase": "GKY",
+            "asked_q": "GKY.01",
             "answered_count": 0
         }) \
         .execute()
@@ -27,8 +27,8 @@ async def get_session(session_id: str, user_id: str):
     if response.data:
         session = response.data
         # Ensure session has required fields with defaults
-        session.setdefault("current_phase", "KYC")
-        session.setdefault("asked_q", "KYC.01")
+        session.setdefault("current_phase", "GKY")
+        session.setdefault("asked_q", "GKY.01")
         session.setdefault("answered_count", 0)
         return session
     else:

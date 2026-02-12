@@ -491,7 +491,7 @@ async def save_found_info_to_history(
         print(f"  - Saved question numbers: {sorted([q['question_num'] for q in qa_pairs_to_save])}")
         
         # CRITICAL: Merge uploaded business_info into business_context
-        # This ensures the uploaded plan's business data overrides old KYC data
+        # This ensures the uploaded plan's business data overrides old GKY data
         if uploaded_business_info and isinstance(uploaded_business_info, dict):
             # Merge uploaded business info, giving precedence to uploaded data
             for key, value in uploaded_business_info.items():

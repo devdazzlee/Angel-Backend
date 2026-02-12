@@ -26,13 +26,13 @@ router = APIRouter(
     dependencies=[Depends(verify_auth_token)]
 )
 
-# Build a lookup of canonical question text keyed by tag (e.g., "KYC.01")
+# Build a lookup of canonical question text keyed by tag (e.g., "GKY.01")
 QUESTION_TEXT_MAP = dict(
     re.findall(r'\[\[Q:([A-Z_]+\.\d{2})]]\s*([^\n]+)', ANGEL_SYSTEM_PROMPT)
 )
 
 PHASE_SEQUENCE = [
-    "KYC",
+    "GKY",
     "BUSINESS_PLAN",
     "PLAN_TO_ROADMAP_TRANSITION",
     "ROADMAP",
@@ -152,7 +152,7 @@ async def chat_history(request: Request, session_id: str):
 
 @router.get("/sessions/{session_id}/business-context")
 async def get_business_context(session_id: str, request: Request):
-    """Return authoritative business context derived from KYC + Business Plan phases."""
+    """Return authoritative business context derived from GKY + Business Plan phases."""
     user_id = request.state.user["id"]
     session = await get_session(session_id, user_id)
     if not session:
@@ -210,7 +210,9 @@ async def sync_progress(request: Request, session_id: str, payload: SyncProgress
     user_id = request.state.user["id"]
     session = await get_session(session_id, user_id)
 
-    current_phase = session.get("current_phase", "KYC")
+    # Backward compat: normalize KYC → GKY for existing sessions
+    raw_phase = session.get("current_phase", "GKY")
+    current_phase = "GKY" if raw_phase == "KYC" else raw_phase
     current_phase_idx = _phase_index(current_phase)
     incoming_phase = payload.phase or current_phase
     incoming_phase_idx = _phase_index(incoming_phase)
@@ -234,7 +236,10 @@ async def sync_progress(request: Request, session_id: str, payload: SyncProgress
     }
 
     if payload.asked_q:
-        current_q_progress = _question_progress(session.get("asked_q"))
+        # Backward compat: normalize KYC.XX → GKY.XX
+        raw_asked = session.get("asked_q", "")
+        current_asked = raw_asked.replace("KYC.", "GKY.") if raw_asked and raw_asked.startswith("KYC.") else raw_asked
+        current_q_progress = _question_progress(current_asked)
         incoming_q_progress = _question_progress(payload.asked_q)
         # Allow update only if it moves forward (or if no previous question)
         if current_q_progress == (-1, -1) or incoming_q_progress >= current_q_progress:
@@ -294,6 +299,12 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     # Save user message
     await save_chat_message(session_id, user_id, "user", payload.content)
 
+    # Extract and store key GKY answers (motivation, business_type, etc.)
+    # so the transition message can personalize the recap.
+    current_tag = session.get("asked_q", "")
+    if current_tag:
+        await patch_session_context_from_response(session_id, payload.content, current_tag, session)
+
     # Get AI reply
     angel_response = await get_angel_reply({"role": "user", "content": payload.content}, history, session)
     
@@ -320,7 +331,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
 
     # CRITICAL: Don't save assistant reply to chat history if it's a transition
     # Transitions should show modals, not appear in chat
-    if transition_phase not in ["PLAN_TO_ROADMAP", "PLAN_TO_BUDGET", "PLAN_TO_SUMMARY", "KYC_TO_BUSINESS_PLAN", "ROADMAP_GENERATED", "BUDGET_SETUP"]:
+    if transition_phase not in ["PLAN_TO_ROADMAP", "PLAN_TO_BUDGET", "PLAN_TO_SUMMARY", "GKY_TO_BUSINESS_PLAN", "ROADMAP_GENERATED", "BUDGET_SETUP"]:
         # Also check if we're in PLAN_TO_ROADMAP_TRANSITION phase - don't save to chat
         current_phase = session.get("current_phase", "")
         if current_phase != "PLAN_TO_ROADMAP_TRANSITION":
@@ -373,26 +384,44 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
             }
         }
     
-    if transition_phase == "KYC_TO_BUSINESS_PLAN":
-        # Update session to transition phase
-        session["current_phase"] = "BUSINESS_PLAN"
+    if transition_phase == "GKY_TO_BUSINESS_PLAN":
+        # Keep session in intermediate phase — user must respond to transition
+        # message before we actually switch to BUSINESS_PLAN.
+        # handle_gky_completion already set patch_session to:
+        #   current_phase = "BUSINESS_PLAN_INTRO"
+        #   asked_q       = "GKY.06_ACK"
+        # The generic patch_session block above (line 340-342) already persisted
+        # that.  Just make sure the in-memory session matches:
+        session["current_phase"] = "BUSINESS_PLAN_INTRO"
+        session["asked_q"] = "GKY.06_ACK"
         await patch_session(session_id, {
-            "current_phase": "BUSINESS_PLAN",
-            "asked_q": "BUSINESS_PLAN.01",
-            "answered_count": 0
+            "current_phase": "BUSINESS_PLAN_INTRO",
+            "asked_q": "GKY.06_ACK",
         })
-        
-        # Return transition response
+
+        # Return progress showing GKY complete (6/6, 100%)
         return {
             "success": True,
-            "message": "KYC completed - transition to business plan",
+            "message": "GKY completed - showing transition message",
             "result": {
                 "reply": assistant_reply,
                 "progress": {
-                    "phase": "BUSINESS_PLAN",
-                    "answered": 0,
-                    "total": 2,
-                    "percent": 0
+                    "phase": "GKY",
+                    "answered": 6,
+                    "total": 6,
+                    "percent": 100,
+                    "asked_q": "GKY.06",
+                    "overall_progress": {
+                        "answered": 6,
+                        "total": 51,
+                        "percent": 12,
+                        "phase_breakdown": {
+                            "gky_completed": 6,
+                            "gky_total": 6,
+                            "bp_completed": 0,
+                            "bp_total": 45,
+                        }
+                    }
                 },
                 "web_search_status": web_search_status,
                 "immediate_response": immediate_response,
@@ -550,7 +579,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         print(f"  - Last phase: {last_phase}, Last num: {last_num}")
         print(f"  - Current phase: {current_phase}, Current num: {current_num}")
         
-      # KYC questions are now sequential (01-06), so standard +1 progression works
+      # GKY questions are now sequential (01-06), so standard +1 progression works
         if (current_phase == last_phase and int(current_num) == int(last_num) + 1) or \
            (current_phase != last_phase and current_num == "01"):
             session["answered_count"] += 1
@@ -683,8 +712,8 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     else:
         # If no tag found or command response, try to maintain current phase or set default
         if not session.get("current_phase"):
-            session["current_phase"] = "KYC"
-            print(f"📝 Set default phase to KYC")
+            session["current_phase"] = "GKY"
+            print(f"📝 Set default phase to GKY")
         
         if is_command_response:
             print(f"🔧 Command response - maintaining current session state without tag updates")
@@ -706,9 +735,9 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     phase_progress = calculate_phase_progress(current_phase, answered_count, current_tag)
     print(f"📊 Phase Progress Output: {phase_progress}")
     
-    # For KYC and Business Plan phases, also calculate combined progress (Overall Progress)
-    print(f"🔍 CHECKING PHASE: {current_phase} in ['KYC', 'BUSINESS_PLAN']: {current_phase in ['KYC', 'BUSINESS_PLAN']}")
-    if current_phase in ["KYC", "BUSINESS_PLAN"]:
+    # For GKY and Business Plan phases, also calculate combined progress (Overall Progress)
+    print(f"🔍 CHECKING PHASE: {current_phase} in ['GKY', 'BUSINESS_PLAN']: {current_phase in ['GKY', 'BUSINESS_PLAN']}")
+    if current_phase in ["GKY", "BUSINESS_PLAN"]:
         print(f"🔍 ENTERING COMBINED PROGRESS CALCULATION")
         combined_progress = calculate_combined_progress(current_phase, answered_count, current_tag)
         print(f"📊 Combined Progress Output (for Overall Progress): {combined_progress}")
@@ -718,8 +747,8 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
             "total": combined_progress["total"],
             "percent": combined_progress["percent"],
             "phase_breakdown": combined_progress.get("phase_breakdown", {
-                "kyc_completed": 0,
-                "kyc_total": 6,
+                "gky_completed": 0,
+                "gky_total": 6,
                 "bp_completed": 0,
                 "bp_total": 45
             })
@@ -795,7 +824,7 @@ def clean_reply_for_display(reply):
 def get_phase_display_name(phase):
     """Get user-friendly phase names"""
     phase_names = {
-        "KYC": "Getting to Know You",
+        "GKY": "Getting to Know You",
         "BUSINESS_PLAN": "Business Planning", 
         "ROADMAP": "Creating Your Roadmap",
         "IMPLEMENTATION": "Implementation & Launch"
@@ -803,7 +832,11 @@ def get_phase_display_name(phase):
     return phase_names.get(phase, phase)
 
 async def patch_session_context_from_response(session_id, response_content, tag, session):
-    """Extract and store key information from user responses"""
+    """Extract and store key GKY answers inside the business_context JSONB column.
+    
+    The chat_sessions table stores extra context in business_context (JSONB),
+    NOT as top-level columns.  We merge new keys into the existing JSON object.
+    """
     
     # Skip extraction if this is a command word (Accept, Modify, Draft, etc.)
     command_words = ["accept", "modify", "draft", "support", "scrapping", "scraping", "draft more", "ok", "okay", "yes", "no"]
@@ -818,27 +851,43 @@ async def patch_session_context_from_response(session_id, response_content, tag,
         print(f"🔧 Skipping session context extraction for long response ({len(response_content)} chars)")
         return
     
-    # Extract key information based on KYC question (new sequential set: KYC.01-KYC.06)
-    updates = {}
+    # Only extract from GKY questions
+    if not tag or not tag.startswith("GKY."):
+        return
+
+    # Extract key information based on GKY question (GKY.01-GKY.06)
+    new_fields = {}
     
-    if tag == "KYC.01":  # Name and preferred name
-        updates["user_name"] = response_content.strip()
-    elif tag == "KYC.02":  # Have you started a business before?
-        updates["has_business_experience"] = "yes" in response_content.lower()
-    elif tag == "KYC.03":  # What motivates you to start this business?
-        updates["motivation"] = response_content.strip()
-    elif tag == "KYC.04":  # What kind of business are you trying to build?
-        updates["business_type"] = response_content.strip()
-    elif tag == "KYC.05":  # Skills comfort level
-        updates["skills_assessment"] = response_content.strip()
-    elif tag == "KYC.06":  # Greatest concern about starting a business
-        updates["biggest_concern"] = response_content.strip()
+    if tag == "GKY.01":  # Name and preferred name
+        new_fields["user_name"] = response_content.strip()
+    elif tag == "GKY.02":  # Have you started a business before?
+        new_fields["has_business_experience"] = "yes" in response_content.lower()
+    elif tag == "GKY.03":  # What motivates you to start this business?
+        new_fields["motivation"] = response_content.strip()
+    elif tag == "GKY.04":  # What kind of business are you trying to build?
+        new_fields["business_type"] = response_content.strip()
+    elif tag == "GKY.05":  # Skills comfort level
+        new_fields["skills_assessment"] = response_content.strip()
+    elif tag == "GKY.06":  # Greatest concern about starting a business
+        new_fields["biggest_concern"] = response_content.strip()
         
-    # Update session with extracted information
-    if updates:
-        print(f"📝 Extracting session context: {list(updates.keys())}")
-        await patch_session(session_id, user_id, updates)
-        session.update(updates)
+    if not new_fields:
+        return
+
+    # Merge into existing business_context JSONB
+    existing_ctx = session.get("business_context") or {}
+    if not isinstance(existing_ctx, dict):
+        existing_ctx = {}
+    
+    merged_ctx = {**existing_ctx, **new_fields}
+    
+    print(f"📝 Extracting GKY context into business_context: {list(new_fields.keys())}")
+    await patch_session(session_id, {"business_context": merged_ctx})
+    
+    # Keep in-memory session consistent
+    session["business_context"] = merged_ctx
+    # Also mirror at top-level in session dict for easy access by _build_gky_recap
+    session.update(new_fields)
 
 @router.post("/sessions/{session_id}/command")
 async def handle_command(session_id: str, request: Request, payload: dict):
@@ -883,7 +932,7 @@ async def handle_command(session_id: str, request: Request, payload: dict):
         modify_prompt = f"The user wants to modify this response based on their feedback:\n\nOriginal: {draft_content}\n\nFeedback: {modification_feedback}\n\nPlease provide an improved version."
         
         session_context = {
-            "current_phase": session.get("current_phase", "KYC"),
+            "current_phase": session.get("current_phase", "GKY"),
             "industry": session.get("industry"),
             "location": session.get("location")
         }
@@ -922,7 +971,7 @@ async def go_back_to_previous_question(session_id: str, request: Request):
     
     # Get current phase and question
     current_tag = session.get("asked_q", "")
-    current_phase = session.get("current_phase", "KYC")
+    current_phase = session.get("current_phase", "GKY")
     answered_count = session.get("answered_count", 0)
     
     # Parse current question number
@@ -1178,7 +1227,7 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                         print(f"Warning: failed to save regenerated go-back reply: {save_error}")
                 
                 # Calculate progress
-                current_phase = updated_session.get("current_phase", "KYC")
+                current_phase = updated_session.get("current_phase", "GKY")
                 answered_count = updated_session.get("answered_count", 0)
                 current_tag = updated_session.get("asked_q", "")
                 
@@ -1234,13 +1283,13 @@ async def navigate_to_question(session_id: str, request: Request, payload: dict)
     
     user_id = request.state.user["id"]
     session = await get_session(session_id, user_id)
-    target_tag = payload.get("target_tag")  # e.g., "KYC.05"
+    target_tag = payload.get("target_tag")  # e.g., "GKY.05"
     
     if not target_tag:
         return {"success": False, "message": "Target question tag required"}
     
     # Validate target tag format
-    if not re.match(r'^(KYC|BUSINESS_PLAN|ROADMAP|IMPLEMENTATION)\.\d{2}$', target_tag):
+    if not re.match(r'^(GKY|BUSINESS_PLAN|ROADMAP|IMPLEMENTATION)\.\d{2}$', target_tag):
         return {"success": False, "message": "Invalid question tag format"}
     
     # Update session to target question

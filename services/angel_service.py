@@ -217,9 +217,9 @@ TAG_PROMPT = """CRITICAL: You MUST include a machine-readable tag in EVERY respo
 [[Q:<PHASE>.<NN>]] 
 
 Examples:
-- [[Q:KYC.01]] What's your name and preferred name or nickname?
-- [[Q:KYC.02]] Have you started a business before?
-- [[Q:KYC.03]] What motivates you to start this business?
+- [[Q:GKY.01]] What's your name and preferred name or nickname?
+- [[Q:GKY.02]] Have you started a business before?
+- [[Q:GKY.03]] What motivates you to start this business?
 - [[Q:BUSINESS_PLAN.01]] What is your business idea?
 - [[Q:BUSINESS_PLAN.19]] What is your revenue model?
 
@@ -643,7 +643,7 @@ async def should_show_accept_modify_buttons(ai_response: str, user_last_input: s
     # Show buttons if:
         # 1. It's a command response (Draft/Support/Scrapping), OR
     # 2. User provided an answer in Business Plan AND AI acknowledged it AND hasn't moved to next question yet, OR
-    # 3. It's a phase completion/transition (KYC completion, Business Plan completion, etc.)
+    # 3. It's a phase completion/transition (GKY completion, Business Plan completion, etc.)
     should_show = False
     
     # Check if this is a phase completion/transition
@@ -1065,8 +1065,8 @@ def suggest_draft_if_relevant(reply, session_data, user_input, history):
     if not history or not user_input:
         return reply
     
-    # Don't suggest draft in KYC phase
-    if session_data and session_data.get("current_phase") == "KYC":
+    # Don't suggest draft in GKY phase
+    if session_data and session_data.get("current_phase") == "GKY":
         return reply
     
     # Keywords that indicate the user might have already provided relevant information
@@ -1270,7 +1270,7 @@ async def add_critiquing_insights(reply, session_data=None, user_input=None):
     return remove_duplicate_paragraphs(enriched)
 
 def identify_support_areas(session_data, history):
-    """Proactively identify areas where the entrepreneur needs the most support based on KYC and business plan answers"""
+    """Proactively identify areas where the entrepreneur needs the most support based on GKY and business plan answers"""
     
     if not session_data or not history:
         return None
@@ -1728,13 +1728,16 @@ def inject_missing_tag(reply, session_data=None):
     is_guidance_message = any(indicator in reply for indicator in guidance_indicators)
     
     # Determine the question number to inject
-    current_phase = "KYC"  # Default
+    current_phase = "GKY"  # Default
     question_num = "01"    # Default
-    current_asked_q = "KYC.01"  # Default
+    current_asked_q = "GKY.01"  # Default
     
     if session_data:
-        current_phase = session_data.get("current_phase", "KYC")
-        current_asked_q = session_data.get("asked_q", "KYC.01")
+        # Backward compat: normalize KYC → GKY for existing sessions
+        raw_phase = session_data.get("current_phase", "GKY")
+        current_phase = "GKY" if raw_phase == "KYC" else raw_phase
+        raw_asked = session_data.get("asked_q", "GKY.01")
+        current_asked_q = raw_asked.replace("KYC.", "GKY.") if raw_asked and raw_asked.startswith("KYC.") else raw_asked
         if "." in current_asked_q:
             phase, num = current_asked_q.split(".")
             current_phase = phase
@@ -1770,102 +1773,140 @@ def inject_missing_tag(reply, session_data=None):
     
     return reply
 
-async def handle_kyc_completion(session_data, history):
+
+def _build_gky_recap(session_data: dict, history: list) -> str:
     """
-    Handle the transition from KYC completion to Business Planning Exercise
-    This is the missing transition that introduces the Business Planning phase
+    Build a concise, personalized recap of GKY answers using actual session data
+    and chat history.  Output is a bullet list the transition message can embed.
+    
+    GKY answers are stored inside session_data["business_context"] (JSONB).
+    We also check top-level keys for backward compat (in-memory session).
     """
-    
-    # Generate KYC summary insights
-    kyc_summary = await generate_kyc_summary(session_data, history)
-    
-    # Create the comprehensive transition message based on the DOCX document
-    transition_message = f"""🎉 **CONGRATULATIONS! You've officially completed the Get to Know You phase with Angel inside Founderport!**
+    # Merge business_context into a flat lookup for convenience
+    bctx = session_data.get("business_context") or {}
+    if not isinstance(bctx, dict):
+        bctx = {}
 
-You've defined your entrepreneurial profile and shared valuable insights about your experience, goals, and preferences — an incredible milestone in your entrepreneurial journey.
+    def _get(key: str):
+        """Look in top-level session first, then business_context."""
+        val = session_data.get(key)
+        if val is None:
+            val = bctx.get(key)
+        return val if val is not None else ""
 
-## **🧭 Recap of Your Accomplishments**
+    bullets: list[str] = []
 
-{kyc_summary}
+    # --- Motivation (GKY.03) ---
+    motivation = _get("motivation").strip().lower()
+    if motivation:
+        if any(w in motivation for w in ["money", "financ", "income", "profit", "wealth"]):
+            bullets.append("You're motivated to start a business primarily for financial reasons.")
+        elif any(w in motivation for w in ["passion", "love", "enjoy", "dream"]):
+            bullets.append("You're driven by a passion to turn something you love into a business.")
+        elif any(w in motivation for w in ["freedom", "independ", "flex"]):
+            bullets.append("You're seeking the freedom and independence that comes with running your own business.")
+        else:
+            bullets.append(f"Your motivation: {motivation[:120]}.")
 
-Angel now has everything needed to guide you through creating your comprehensive business plan.
+    # --- Business type (GKY.04) ---
+    btype = _get("business_type").strip().lower()
+    if btype:
+        if "small" in btype:
+            bullets.append("You're interested in building a small business.")
+        elif "scalable" in btype or "startup" in btype:
+            bullets.append("You're interested in building a scalable startup.")
+        elif "side" in btype or "hustle" in btype:
+            bullets.append("You're looking to start a side hustle.")
+        else:
+            bullets.append(f"You're looking to build a {btype} business.")
 
-## **⚙️ What Happens Next: Business Planning Phase**
+    # --- Experience (GKY.02) ---
+    has_exp = _get("has_business_experience")
+    if has_exp is False or (isinstance(has_exp, str) and has_exp.lower() in ["no", "false"]):
+        bullets.append("You are new to entrepreneurship and eager to learn as you go.")
+    elif has_exp is True or (isinstance(has_exp, str) and has_exp.lower() in ["yes", "true"]):
+        bullets.append("You have prior business experience to draw on.")
 
-Your completed entrepreneurial profile will now be used to create a fully personalized business planning experience. Here's what we'll build together:
+    # --- Biggest concern (GKY.06) ---
+    concern = _get("biggest_concern").strip()
+    if concern and len(concern) > 10:
+        bullets.append(f"Your biggest concern: {concern[:150]}.")
 
-**Your business plan will include:**
+    # Fallback if nothing was captured
+    if not bullets:
+        bullets = [
+            "You've shared valuable insights about your experience and goals.",
+            "You're ready to take a proactive approach to building your business.",
+        ]
 
-✅ A fully defined mission and vision statement
-✅ Market positioning, customer segments, and competitive differentiation
-✅ Clear pricing and financial projections
-✅ Comprehensive marketing, legal, and operational frameworks
-✅ Scalable growth and risk management strategies
+    return "\n".join(f"• {b}" for b in bullets)
 
-**How Angel Will Help:**
 
-📊 **Background Research** - I'll conduct research automatically to provide you with industry insights, competitive analysis, and market data
+async def handle_gky_completion(session_data, history):
+    """
+    Handle the transition from GKY completion to Business Planning Exercise.
+    Uses the client-approved transition message format — short, personalized,
+    with a clear call-to-action.
+    """
 
-💡 **Support** - When you're unsure or want deeper guidance on any question
+    # Build personalized GKY recap from actual user answers
+    gky_recap = _build_gky_recap(session_data, history)
 
-✍️ **Scrapping** - When you have rough ideas that need polishing
+    # Client-approved transition message (concise + personalized)
+    transition_message = f"""🎉 Fantastic! We've completed your entrepreneurial profile. Here's what I've learned about you and your goals:
 
-📝 **Draft** - When you want me to create complete responses based on what I've learned about your business
+{gky_recap}
 
-🎯 **Proactive Guidance** - I'll provide both supportive encouragement and constructive coaching at every step
+Now we're moving into the exciting **Business Planning** phase! This is where we'll dive deep into every aspect of your business idea. I'll be asking detailed questions about your product, market, finances, and strategy.
 
-## **🎯 Before We Continue**
+During this phase, I'll be conducting research in the background to provide you with industry insights, competitive analysis, and market data to enrich your business plan. Don't worry - this happens automatically and securely.
 
-The Business Planning phase is comprehensive and detailed. This ensures your final business plan is thorough and provides you with a strong starting point for launching your business. The more detailed answers you provide, the better I can help support you to bring your business to life.
-
-*"The best way to predict the future is to create it."* – Peter Drucker
-
-## **Ready to Move Forward?**
-
-Once you're ready, we'll begin the Business Planning phase where we'll dive deep into every aspect of your business idea — from your product and market to finances and growth strategy.
+As we go through each question, I'll provide both supportive encouragement and constructive coaching to help you think through each aspect thoroughly. Remember, this comprehensive approach ensures your final business plan is detailed and provides you with a strong starting point of information that will help you launch your business. The more detailed answers you provide, the better I can help support you to bring your business to life.
 
 **Let's build the business of your dreams together!**
 
-*"The way to get started is to quit talking and begin doing."* – Walt Disney
+*"The way to get started is to quit talking and begin doing."* – **Walt Disney**
+
+**Are you ready to dive into your business planning?**
     """
     
     # Check if we should show Accept/Modify buttons
     button_detection = await should_show_accept_modify_buttons(
-        user_last_input="KYC completion",
+        user_last_input="GKY completion",
         ai_response=transition_message,
         session_data=session_data
     )
     
     return {
         "reply": transition_message,
-        "transition_phase": "KYC_TO_BUSINESS_PLAN",
+        "transition_phase": "GKY_TO_BUSINESS_PLAN",
         "patch_session": {
             "current_phase": "BUSINESS_PLAN_INTRO",  # Intermediate phase before actual questions
-            "asked_q": "KYC.06_ACK",  # Keep on KYC until user confirms ready
+            "asked_q": "GKY.06_ACK",  # Keep on GKY until user confirms ready
             "answered_count": session_data.get("answered_count", 0)
         },
         "show_accept_modify": button_detection.get("show_buttons", False),
         "awaiting_confirmation": True  # Signal that we need user to confirm before starting questions
     }
 
-async def generate_kyc_summary(session_data, history):
-    """Generate a summary of KYC insights for the transition"""
-    # Extract key KYC answers from history
-    kyc_insights = []
+async def generate_gky_summary(session_data, history):
+    """Generate a summary of GKY insights for the transition"""
+    # Extract key GKY answers from history
+    gky_insights = []
     
     for msg in history:
-        if msg.get('role') == 'assistant' and '[[Q:KYC.' in msg.get('content', ''):
-            # This is a KYC question - look for the answer
+        if msg.get('role') == 'assistant' and '[[Q:GKY.' in msg.get('content', ''):
+            # This is a GKY question - look for the answer
             question_content = msg.get('content', '')
             # Try to find corresponding user answer in history
             for user_msg in history:
                 if user_msg.get('role') == 'user':
                     answer = user_msg.get('content', '').strip()
                     if len(answer) > 10 and answer.lower() not in ['support', 'draft', 'scrapping', 'accept', 'modify']:
-                        kyc_insights.append(answer[:150])  # Take first 150 chars of each answer
+                        gky_insights.append(answer[:150])  # Take first 150 chars of each answer
     
     # Generate summary using the last few meaningful insights
-    recent_insights = kyc_insights[-5:] if kyc_insights else []
+    recent_insights = gky_insights[-5:] if gky_insights else []
     
     if not recent_insights:
         return """**Your Entrepreneurial Profile Summary:**
@@ -2287,7 +2328,7 @@ def validate_question_answer(user_msg, session_data, history):
     """
     Enhanced validation with critiquing behaviors - challenge superficial answers
     and push for deeper thinking and specificity.
-    Validate that user is not trying to skip questions in KYC and Business Plan phases
+    Validate that user is not trying to skip questions in GKY and Business Plan phases
     """
     if not session_data:
         return None
@@ -2296,11 +2337,11 @@ def validate_question_answer(user_msg, session_data, history):
     asked_q = session_data.get("asked_q", "")
     
     # Don't validate during initial startup (when asked_q is empty or initial)
-    if not asked_q or asked_q in ["", "KYC.01", "BUSINESS_PLAN.01"]:
+    if not asked_q or asked_q in ["", "GKY.01", "BUSINESS_PLAN.01"]:
         return None
     
-    # Only validate for KYC and Business Plan phases
-    if current_phase not in ["KYC", "BUSINESS_PLAN"]:
+    # Only validate for GKY and Business Plan phases
+    if current_phase not in ["GKY", "BUSINESS_PLAN"]:
         return None
     
     # Extract content from user_msg (could be dict or string)
@@ -2313,11 +2354,11 @@ def validate_question_answer(user_msg, session_data, history):
     user_msg_lower = user_content.lower().strip()
     
     # Commands that are allowed (these don't skip questions, they help answer them)
-    # In KYC phase, disable all helper commands to force direct answers
-    if current_phase == "KYC":
+    # In GKY phase, disable all helper commands to force direct answers
+    if current_phase == "GKY":
         blocked_commands = ["draft", "support", "scrapping:", "kickstart", "who do i contact?"]
         
-        # Block these commands in KYC phase
+        # Block these commands in GKY phase
         if any(user_msg_lower.startswith(cmd) for cmd in blocked_commands):
             # CRITICAL: Include the current question tag so the system knows what question to display
             return {
@@ -2376,7 +2417,7 @@ For now, please share your thoughts directly about the current question.
             return None
         
         # Only block truly unrelated questions
-        if current_phase == "KYC":
+        if current_phase == "GKY":
             help_message = """Please provide a direct answer to help me understand your situation better."""
         else:
             help_message = """If you need help with the current question, you can use:
@@ -2396,16 +2437,16 @@ Let's focus on answering the current question first.""",
         }
     
     # Check if user is providing rating responses to non-rating questions
-    if current_phase == "KYC":
+    if current_phase == "GKY":
         # Check if this looks like a rating response (numbers separated by commas)
         rating_pattern = r'^\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+$'
         if re.match(rating_pattern, user_content.strip()):
-            # Only allow rating responses for KYC.05 (skills rating question)
-            if asked_q != "KYC.05":
+            # Only allow rating responses for GKY.05 (skills rating question)
+            if asked_q != "GKY.05":
                 return {
                     "reply": f"""I see you've provided a rating response, but the current question is asking about something different.
 
-We're currently on question {asked_q.split('.')[1] if '.' in asked_q else 'unknown'} which asks: "{asked_q.replace('KYC.', '')}"
+We're currently on question {asked_q.split('.')[1] if '.' in asked_q else 'unknown'} which asks: "{asked_q.replace('GKY.', '')}"
 
 Please provide an answer that directly addresses the current question instead of rating responses.""",
                     "web_search_status": {"is_searching": False, "query": None, "completed": False}
@@ -2413,8 +2454,8 @@ Please provide an answer that directly addresses the current question instead of
     
     # Check for very short or empty responses that might indicate skipping
     if len(user_content.strip()) < 3 and user_msg_lower not in ["yes", "no", "y", "n", "ok", "okay"]:
-        # Different messages for KYC vs other phases
-        if current_phase == "KYC":
+        # Different messages for GKY vs other phases
+        if current_phase == "GKY":
             return {
                 "reply": f"""I need a bit more information to help you effectively. Please provide a more detailed answer to the current question.
 
@@ -2450,11 +2491,11 @@ def validate_session_state(session_data, history):
     answered_count = session_data.get("answered_count", 0)
     
     # Don't validate during initial startup (when asked_q is empty or initial)
-    if not asked_q or asked_q in ["", "KYC.01", "BUSINESS_PLAN.01"]:
+    if not asked_q or asked_q in ["", "GKY.01", "BUSINESS_PLAN.01"]:
         return None
     
-    # Only validate for KYC and Business Plan phases
-    if current_phase not in ["KYC", "BUSINESS_PLAN"]:
+    # Only validate for GKY and Business Plan phases
+    if current_phase not in ["GKY", "BUSINESS_PLAN"]:
         return None
     
     # Calculate expected answered count based on history
@@ -2464,7 +2505,7 @@ def validate_session_state(session_data, history):
     # Only trigger if there's a major discrepancy (more than 2 questions behind)
     if answered_count < expected_answered_count - 2:
         # Create phase-specific message
-        if current_phase == "KYC":
+        if current_phase == "GKY":
             help_message = """Please provide a complete answer to the current question so we can continue building your comprehensive business plan."""
         else:
             help_message = """If you need help with the current question, you can use:
@@ -2489,8 +2530,8 @@ Let's continue with the current question.
         }
     
     # Validate that asked_q is in the correct format and sequence
-    if current_phase == "KYC":
-        if not asked_q.startswith("KYC.") and asked_q != "KYC.06_ACK":
+    if current_phase == "GKY":
+        if not asked_q.startswith("GKY.") and asked_q != "GKY.06_ACK":
             return {
                 "reply": f"""I need to ensure we're following the proper Get to Know You sequence. Please provide an answer to the current question so we can continue systematically building your business profile.
 
@@ -2540,7 +2581,7 @@ async def get_angel_reply(user_msg, history, session_data=None):
         logger.warning(f"Could not fetch user preferences for feedback intensity: {e}")
         feedback_intensity = 5  # Default to moderate
     
-    # KYC completion check removed - now triggered immediately after final answer
+    # GKY completion check removed - now triggered immediately after final answer
     
     # DISABLED: Question validation - let the AI model handle skip attempts and flow naturally
     # The AI model is trained to guide users appropriately without hardcoded validation blocking
@@ -2560,8 +2601,8 @@ async def get_angel_reply(user_msg, history, session_data=None):
     
     # Define formatting instruction at the top to avoid UnboundLocalError
     # Get current phase and question info for Business Plan numbering
-    current_phase = session_data.get("current_phase", "KYC") if session_data else "KYC"
-    asked_q = session_data.get("asked_q", "KYC.01") if session_data else "KYC.01"
+    current_phase = session_data.get("current_phase", "GKY") if session_data else "GKY"
+    asked_q = session_data.get("asked_q", "GKY.01") if session_data else "GKY.01"
     
     # Get feedback intensity guidance text
     intensity_guidance = _get_feedback_intensity_guidance(feedback_intensity)
@@ -2709,7 +2750,7 @@ Do NOT include question numbers, progress percentages, or step counts in your re
                 print(f"⚠️ Error checking missing questions from session: {e}")
         
         # Get current phase to maintain state on refresh
-        current_phase = session_data.get("current_phase", "KYC") if session_data else "KYC"
+        current_phase = session_data.get("current_phase", "GKY") if session_data else "GKY"
         
         # If we're in ROADMAP or PLAN_TO_ROADMAP_TRANSITION phase, maintain that state
         if current_phase in ["ROADMAP", "PLAN_TO_ROADMAP_TRANSITION", "ROADMAP_TO_IMPLEMENTATION_TRANSITION"]:
@@ -2736,7 +2777,11 @@ Do NOT include question numbers, progress percentages, or step counts in your re
                 # Generate dynamic, context-aware question
                 return await generate_dynamic_business_question(current_tag, session_data, history)
         
-        # Default to "hi" for KYC or initial phases
+        # If user refreshes while on the transition message, re-show it
+        elif current_phase == "BUSINESS_PLAN_INTRO":
+            return await handle_gky_completion(session_data, history)
+
+        # Default to "hi" for GKY or initial phases
         user_msg["content"] = "hi"
 
     user_content = user_msg["content"].strip()
@@ -2833,20 +2878,38 @@ Do NOT include question numbers, progress percentages, or step counts in your re
                 }
             }
     
-    # Check if user just answered the final KYC question BEFORE generating AI response
-    if session_data and session_data.get("current_phase") == "KYC":
+    # ── Handle BUSINESS_PLAN_INTRO phase ──
+    # User responded to the GKY-completion / transition message.
+    # Now we switch to BUSINESS_PLAN and return the first BP question.
+    if session_data and session_data.get("current_phase") == "BUSINESS_PLAN_INTRO":
+        print("🎯 User responded to GKY transition message — starting Business Planning phase with Q1")
+        bp_q1 = await generate_dynamic_business_question("BUSINESS_PLAN.01", session_data, history)
+        return {
+            "reply": bp_q1,
+            "web_search_status": {"is_searching": False, "query": None},
+            "immediate_response": None,
+            "patch_session": {
+                "current_phase": "BUSINESS_PLAN",
+                "asked_q": "BUSINESS_PLAN.01",
+                "answered_count": 0,
+            },
+        }
+
+    # Check if user just answered the final GKY question BEFORE generating AI response
+    # GKY has 6 questions (GKY.01 through GKY.06) — trigger completion on the last one
+    if session_data and session_data.get("current_phase") == "GKY":
         current_tag = session_data.get("asked_q", "")
-        if current_tag and current_tag.startswith("KYC."):
+        if current_tag and current_tag.startswith("GKY."):
             try:
                 question_num = int(current_tag.split(".")[1])
-                # Check if user just answered the final question (19) with any response
-                if (question_num >= 19 and 
+                # Check if user just answered the final GKY question (06)
+                if (question_num >= 6 and 
                     not current_tag.endswith("_ACK") and
                     len(user_content.strip()) > 0):
                     
-                    print(f"🎯 User answered final KYC question ({question_num}) - triggering completion immediately BEFORE AI response")
-                    # Trigger completion immediately after acknowledgment
-                    return await handle_kyc_completion(session_data, history)
+                    print(f"🎯 User answered final GKY question ({question_num}) - triggering completion immediately BEFORE AI response")
+                    # Trigger completion immediately — use the hardcoded template, NOT the AI
+                    return await handle_gky_completion(session_data, history)
             except (ValueError, IndexError):
                 pass
     
@@ -3115,8 +3178,8 @@ Do NOT include question numbers, progress percentages, or step counts in your re
     
     # Add session context to help AI maintain state
     if session_data:
-        current_phase = session_data.get("current_phase", "KYC")
-        asked_q = session_data.get("asked_q", "KYC.01")
+        current_phase = session_data.get("current_phase", "GKY")
+        asked_q = session_data.get("asked_q", "GKY.01")
         answered_count = session_data.get("answered_count", 0)
         
         # CRITICAL: After Draft/Support commands, ensure AI remembers the current question
@@ -3159,9 +3222,9 @@ DO NOT repeat "{asked_q}" - the user has already answered it.
         if "." in asked_q:
             try:
                 current_num = int(asked_q.split(".")[1])
-                # Prevent going beyond KYC.06 (last KYC question)
-                if current_phase == "KYC" and current_num >= 6:
-                    # Don't increment beyond 06 for KYC
+                # Prevent going beyond GKY.06 (last GKY question)
+                if current_phase == "GKY" and current_num >= 6:
+                    # Don't increment beyond 06 for GKY
                     next_question_num = "06"
                 else:
                     next_question_num = f"{current_num + 1:02d}"
@@ -3351,8 +3414,8 @@ CRITICAL INSTRUCTIONS:
     # Handle remaining commands (kickstart, contact) that weren't processed earlier
     current_phase = session_data.get("current_phase", "") if session_data else ""
     
-    if current_phase != "KYC":
-        # Only process remaining commands outside of KYC phase
+    if current_phase != "GKY":
+        # Only process remaining commands outside of GKY phase
         if user_content.lower() == "kickstart":
             reply_content = handle_kickstart_command(reply_content, history, session_data)
         elif user_content.lower() == "who do i contact?":
@@ -3717,7 +3780,7 @@ CRITICAL:
         session_data
         and history
         and session_data.get("current_phase") in [
-            "KYC",
+            "GKY",
             "BUSINESS_PLAN",
             "PLAN_TO_ROADMAP_TRANSITION",
             "ROADMAP",
@@ -5336,21 +5399,21 @@ def extract_business_context_from_history(history):
     # NO MORE HARDCODED OVERRIDES - Let AI naturally detect business type from conversation
     # Removed plumbing-specific override logic - system now works for ALL business types dynamically
     
-    # First pass: Identify KYC and Business Plan questions to prioritize their answers
-    kyc_question_indices = {}
+    # First pass: Identify GKY and Business Plan questions to prioritize their answers
+    gky_question_indices = {}
     for i, msg in enumerate(history):
         if msg["role"] == "assistant":
             content = msg["content"]
-            # KYC questions (new sequential set: KYC.01-KYC.06)
-            if "[[Q:KYC.04]]" in content:  # "What kind of business are you trying to build?"
-                kyc_question_indices["business_type"] = i
-                print(f"🔍 DEBUG - Found KYC.04 (business type question) at index {i}")
-            elif "[[Q:KYC.03]]" in content:  # "What motivates you to start this business?"
-                kyc_question_indices["motivation"] = i
-                print(f"🔍 DEBUG - Found KYC.03 (motivation question) at index {i}")
+            # GKY questions (new sequential set: GKY.01-GKY.06)
+            if "[[Q:GKY.04]]" in content:  # "What kind of business are you trying to build?"
+                gky_question_indices["business_type"] = i
+                print(f"🔍 DEBUG - Found GKY.04 (business type question) at index {i}")
+            elif "[[Q:GKY.03]]" in content:  # "What motivates you to start this business?"
+                gky_question_indices["motivation"] = i
+                print(f"🔍 DEBUG - Found GKY.03 (motivation question) at index {i}")
             # Business Plan Question 1 - Business Name (HIGHEST PRIORITY)
             elif "[[Q:BUSINESS_PLAN.01]]" in content or "[[Q:BP.01]]" in content:
-                kyc_question_indices["business_name"] = i
+                gky_question_indices["business_name"] = i
                 print(f"🔍 DEBUG - Found BP.01 (business name question) at index {i}")
     
     # Extract from all messages (not just recent ones)
@@ -5361,10 +5424,10 @@ def extract_business_context_from_history(history):
             
             print(f"🔍 DEBUG - Message {i}: {content[:100]}...")
             
-            # Check if this is a response to a KYC or BP question (HIGHEST PRIORITY - weight 100)
-            is_bp_name_answer = "business_name" in kyc_question_indices and i == kyc_question_indices["business_name"] + 1
-            is_kyc_business_type_answer = "business_type" in kyc_question_indices and i == kyc_question_indices["business_type"] + 1
-            is_bp_sales_location_answer = "sales_location" in kyc_question_indices and i == kyc_question_indices.get("sales_location", -999) + 1
+            # Check if this is a response to a GKY or BP question (HIGHEST PRIORITY - weight 100)
+            is_bp_name_answer = "business_name" in gky_question_indices and i == gky_question_indices["business_name"] + 1
+            is_gky_business_type_answer = "business_type" in gky_question_indices and i == gky_question_indices["business_type"] + 1
+            is_bp_sales_location_answer = "sales_location" in gky_question_indices and i == gky_question_indices.get("sales_location", -999) + 1
             
             # Extract business name from BP.01 answer (HIGHEST PRIORITY - weight 100)
             if is_bp_name_answer and len(content.strip()) > 2:
@@ -5378,12 +5441,12 @@ def extract_business_context_from_history(history):
                     context_weights["business_name"] = 100
                     print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: BP.01 business name answer (EXACT): '{business_name_answer}' (weight 100)")
             
-            # Extract business type from KYC.04 answer ("What kind of business are you trying to build?")
-            if is_kyc_business_type_answer and len(content.strip()) > 2:
+            # Extract business type from GKY.04 answer ("What kind of business are you trying to build?")
+            if is_gky_business_type_answer and len(content.strip()) > 2:
                 business_type_answer = content.strip()
                 business_context["business_type"] = business_type_answer
                 context_weights["business_type"] = 100
-                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: KYC.04 business type answer: '{business_type_answer}' (weight 100)")
+                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: GKY.04 business type answer: '{business_type_answer}' (weight 100)")
             
             # Extract sales location from BP.08 answer (HIGHEST PRIORITY)
             if is_bp_sales_location_answer and len(content.strip()) > 2:
@@ -5466,7 +5529,7 @@ def extract_business_context_from_history(history):
                             print(f"🔍 DEBUG - Found direct business name: {potential_name} (weight 50)")
             
             # Extract industry from natural conversation - use exact user words, no keyword lists
-            # Only as fallback if KYC answer not available (weight < 100)
+            # Only as fallback if GKY answer not available (weight < 100)
             if context_weights["industry"] < 50:
                 # Look for business/industry mentions in user's own words
                 if any(phrase in content_lower for phrase in ["business", "company", "startup", "industry", "service"]):
@@ -5477,7 +5540,7 @@ def extract_business_context_from_history(history):
                         context_weights["industry"] = 20
                         print(f"🔍 DEBUG - Using user's exact description as industry: '{content.strip()[:50]}' (weight 20)")
             
-            # Extract location information - Only if not from KYC (weight < 100)
+            # Extract location information - Only if not from GKY (weight < 100)
             if context_weights["location"] < 100:
                 # Look for location mentions
                 if any(phrase in content_lower for phrase in ["located in", "based in", "karachi", "lahore", "islamabad", "city", "location"]):
@@ -5500,7 +5563,7 @@ def extract_business_context_from_history(history):
                                 context_weights["location"] = 50
                                 print(f"🔍 DEBUG - Found location from pattern: {potential_location} (weight 50)")
             
-            # Extract business type - Only if not from KYC (weight < 100)
+            # Extract business type - Only if not from GKY (weight < 100)
             if context_weights["business_type"] < 100:
                 # Look for business type mentions
                 if any(phrase in content_lower for phrase in ["business type", "type of business", "startup", "company", "corporation", "llc", "partnership"]):
@@ -6688,12 +6751,12 @@ async def generate_dynamic_business_question(
     Returns:
         Formatted question string with tag
     """
-    # Extract business context from KYC history (prioritize KYC answers over session title)
+    # Extract business context from GKY history (prioritize GKY answers over session title)
     extracted_context = {}
     if history:
         extracted_context = extract_business_context_from_history(history)
     
-    # Merge: For uploaded plans, prioritize session business_context; otherwise, KYC-extracted context takes priority
+    # Merge: For uploaded plans, prioritize session business_context; otherwise, GKY-extracted context takes priority
     # NEVER use session title as business name - it's just a venture label, not the actual business name
     business_context = session_data.get("business_context", {}) or {}
     if not isinstance(business_context, dict):
@@ -6710,7 +6773,7 @@ async def generate_dynamic_business_question(
         business_name = business_context.get("business_name") or extracted_context.get("business_name") or ""
         mission = business_context.get("mission") or business_context.get("tagline") or extracted_context.get("mission") or ""
     else:
-        # For normal flow, prioritize extracted context from KYC over stored business_context
+        # For normal flow, prioritize extracted context from GKY over stored business_context
         industry = extracted_context.get("industry") or business_context.get("industry") or ""
         business_type = extracted_context.get("business_type") or business_context.get("business_type") or ""
         location = extracted_context.get("location") or business_context.get("location") or ""
@@ -6797,9 +6860,9 @@ async def generate_dynamic_business_question(
             business_info_summary = f"\n\nBased on what you've shared so far:\n" + "\n".join(f"- {ans}" for ans in recent_answers[-3:])  # Last 3 answers
     
     # Create dynamic question prompt
-    # Use industry name as the primary identifier if available (from KYC or uploaded plan)
+    # Use industry name as the primary identifier if available (from GKY or uploaded plan)
     if industry:
-        business_identifier = industry  # Use industry from KYC/uploaded plan (e.g., "Chai Stall", "Software Development")
+        business_identifier = industry  # Use industry from GKY/uploaded plan (e.g., "Chai Stall", "Software Development")
     elif business_name and business_name != "your business":
         business_identifier = business_name
     else:
@@ -6815,7 +6878,7 @@ async def generate_dynamic_business_question(
         critical_context_warning = f"""
 ⚠️ CRITICAL CONTEXT - This business is in the {industry} INDUSTRY - ALL guidance must be 100% specific to {industry}.
 - The user uploaded a business plan for a {industry} business
-- Use the business information from the uploaded plan, NOT from KYC answers
+- Use the business information from the uploaded plan, NOT from GKY answers
 - Business Name: {business_name if business_name and business_name != "your business" else "From uploaded plan"}
 - Location: {location if location else "From uploaded plan"}
 - Industry: {industry}

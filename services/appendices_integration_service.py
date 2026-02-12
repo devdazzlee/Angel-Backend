@@ -113,8 +113,8 @@ class AppendicesIntegrationService:
         
         # This would typically query your database for actual progress
         # For now, we'll simulate progress calculation
-        phases_completed = 2  # KYC, Business Plan
-        total_phases = 4  # KYC, Business Plan, Roadmap, Implementation
+        phases_completed = 2  # GKY, Business Plan
+        total_phases = 4  # GKY, Business Plan, Roadmap, Implementation
         
         progress_percent = int((phases_completed / total_phases) * 100)
         
@@ -131,7 +131,7 @@ class AppendicesIntegrationService:
         """Calculate section-specific progress"""
         
         sections = [
-            ("kyc_section", "Getting to Know You", 100, "completed"),
+            ("gky_section", "Getting to Know You", 100, "completed"),
             ("planning_section", "Business Plan Development", 100, "completed"),
             ("roadmap_section", "Launch Roadmap Creation", 75, "in_progress"),
             ("implementation_section", "Implementation Execution", 0, "pending")
@@ -372,9 +372,9 @@ class AppendicesIntegrationService:
         
         navigation_items = [
             NavigationItem(
-                id="kyc",
+                id="gky",
                 label="Getting to Know You",
-                phase="KYC",
+                phase="GKY",
                 status="completed",
                 description="Initial business information gathering",
                 tasks=["business_info", "industry_analysis", "market_research"]
