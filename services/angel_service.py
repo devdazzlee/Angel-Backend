@@ -2321,7 +2321,7 @@ def validate_question_answer(user_msg, session_data, history):
         if any(user_msg_lower.startswith(cmd) for cmd in blocked_commands):
             # CRITICAL: Include the current question tag so the system knows what question to display
             return {
-                "reply": f"""I understand you'd like to use helper tools, but during the KYC phase, it's important that you provide direct answers to help me understand your background and goals.
+                "reply": f"""I understand you'd like to use helper tools, but during the Get to Know You phase, it's important that you provide direct answers to help me understand your background and goals.
 
 Please provide a direct answer to the current question. This will help me personalize your experience and provide the most relevant guidance for your specific situation.
 
@@ -2492,13 +2492,13 @@ Let's continue with the current question.
     if current_phase == "KYC":
         if not asked_q.startswith("KYC.") and asked_q != "KYC.06_ACK":
             return {
-                "reply": f"""I need to ensure we're following the proper KYC sequence. Please provide an answer to the current KYC question so we can continue systematically building your business profile.
+                "reply": f"""I need to ensure we're following the proper Get to Know You sequence. Please provide an answer to the current question so we can continue systematically building your business profile.
 
-Each question in the KYC phase is designed to help me understand your background, experience, and goals. Skipping questions would prevent me from providing you with the most relevant and personalized guidance.
+Each question in the Get to Know You phase is designed to help me understand your background, experience, and goals. Skipping questions would prevent me from providing you with the most relevant and personalized guidance.
 
 Please provide a detailed answer to the current question. This will help me personalize your experience and provide the most relevant guidance for your specific situation.
 
-Let's continue with the current KYC question.""",
+Let's continue with the current question.""",
                 "web_search_status": {"is_searching": False, "query": None, "completed": False}
             }
     
