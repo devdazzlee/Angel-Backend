@@ -12,18 +12,25 @@ import uuid
 
 supabase = create_supabase_client()
 
-# Pydantic models for budget items (copied from budget_router.py)
+
+# ── Pydantic Models ──────────────────────────────────────────────────────────
+
 class BudgetItemCreate(BaseModel):
-    id: Optional[str] = None # Added for non-destructive updates
+    id: Optional[str] = None
     name: str
     category: str  # 'expense' or 'revenue'
-    estimated_amount: float
+    subcategory: Optional[str] = None  # 'startup_cost', 'operating_expense', 'payroll', 'cogs', 'revenue'
+    estimated_amount: float = 0
     actual_amount: Optional[float] = None
+    estimated_price: Optional[float] = None  # revenue items: unit price
+    estimated_volume: Optional[int] = None    # revenue items: unit count
     description: Optional[str] = None
     is_custom: Optional[bool] = True
+    is_selected: Optional[bool] = True
+
 
 class RevenueStreamSave(BaseModel):
-    id: str
+    id: Optional[str] = None
     name: str
     estimatedPrice: float
     estimatedVolume: int
@@ -31,19 +38,16 @@ class RevenueStreamSave(BaseModel):
     isSelected: bool
     isCustom: bool
     category: str = "revenue"
+    description: Optional[str] = None
 
-class BudgetItemFromRevenue(BaseModel):
-    name: str
-    category: str = "revenue"
-    estimated_amount: float
-    is_custom: Optional[bool] = False
 
 class BudgetCreate(BaseModel):
     session_id: str
     initial_investment: float
-    total_estimated_expenses: float
-    total_estimated_revenue: float
-    items: List[Dict[str, Any]]
+    total_estimated_expenses: float = 0
+    total_estimated_revenue: float = 0
+    items: List[Dict[str, Any]] = []
+
 
 class BudgetUpdate(BaseModel):
     initial_investment: Optional[float] = None
@@ -52,434 +56,485 @@ class BudgetUpdate(BaseModel):
     total_actual_expenses: Optional[float] = None
     total_actual_revenue: Optional[float] = None
 
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _recalculate_and_update_totals(budget_id: str):
+    """Recalculate totals from budget_items and update the budgets row."""
+    items_response = supabase.table("budget_items").select(
+        "estimated_amount, actual_amount, category"
+    ).eq("budget_id", budget_id).execute()
+    items = items_response.data if items_response.data else []
+
+    total_estimated_expenses = sum(i["estimated_amount"] for i in items if i["category"] == "expense")
+    total_estimated_revenue = sum(i["estimated_amount"] for i in items if i["category"] == "revenue")
+    total_actual_expenses = sum(i.get("actual_amount", 0) or 0 for i in items if i["category"] == "expense")
+    total_actual_revenue = sum(i.get("actual_amount", 0) or 0 for i in items if i["category"] == "revenue")
+
+    supabase.table("budgets").update({
+        "total_estimated_expenses": total_estimated_expenses,
+        "total_estimated_revenue": total_estimated_revenue,
+        "total_actual_expenses": total_actual_expenses,
+        "total_actual_revenue": total_actual_revenue,
+        "updated_at": datetime.now().isoformat()
+    }).eq("id", budget_id).execute()
+
+
+def _get_full_budget(budget_id: str) -> Dict[str, Any]:
+    """Return a full budget dict with its items."""
+    budget_response = supabase.table("budgets").select("*").eq("id", budget_id).execute()
+    budget = budget_response.data[0]
+    items_response = supabase.table("budget_items").select("*").eq("budget_id", budget_id).order("created_at").execute()
+    budget["items"] = items_response.data if items_response.data else []
+    return budget
+
+
+def _ensure_budget_exists(user_id: str, session_id: str, initial_investment: float = 0) -> str:
+    """
+    Return the budget_id for a session, creating the budget row if needed.
+    
+    Strategy:
+    1. Look for ANY budget for this session_id (regardless of user_id)
+    2. If found → adopt it (set user_id) and return its id
+    3. If not found → create a new one
+    
+    This guarantees exactly ONE budget per session. The UNIQUE constraint
+    on session_id in the DB prevents duplicates.
+    """
+    # Step 1: Find any budget for this session (don't filter by user_id to avoid duplicates)
+    budget_response = supabase.table("budgets").select("id, user_id").eq(
+        "session_id", session_id
+    ).execute()
+
+    if budget_response.data:
+        budget_row = budget_response.data[0]
+        budget_id = budget_row["id"]
+
+        # If user_id is missing or different, adopt it
+        if budget_row.get("user_id") != user_id:
+            print(f"⚠️ _ensure_budget_exists: Adopting budget_id={budget_id} (old user_id={budget_row.get('user_id')}) for user={user_id}")
+            supabase.table("budgets").update({
+                "user_id": user_id,
+                "updated_at": datetime.now().isoformat()
+            }).eq("id", budget_id).execute()
+        else:
+            print(f"🔍 _ensure_budget_exists: FOUND budget_id={budget_id} for session={session_id}")
+
+        return budget_id
+
+    # Step 2: No budget exists at all — create one
+    print(f"🆕 _ensure_budget_exists: Creating NEW budget for session={session_id}, user={user_id}")
+    new_budget = supabase.table("budgets").insert({
+        "session_id": session_id,
+        "user_id": user_id,
+        "initial_investment": initial_investment,
+        "total_estimated_expenses": 0,
+        "total_estimated_revenue": 0,
+        "total_actual_expenses": 0,
+        "total_actual_revenue": 0,
+        "created_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat()
+    }).execute()
+    budget_id = new_budget.data[0]["id"]
+    print(f"   → Created budget_id={budget_id}")
+    return budget_id
+
+
+# ── Service ──────────────────────────────────────────────────────────────────
+
 class BudgetService:
+
+    # ── READ ────────────────────────────────────────────────────────────────
+
     @staticmethod
     async def get_budget_data(user_id: str, session_id: str) -> Dict[str, Any]:
+        """
+        Get the budget for a session.  Uses _ensure_budget_exists so the
+        exact same budget_id is used everywhere (get, add, update, delete).
+        This prevents the "duplicate budget" bug where items are saved to one
+        budget row but a different (older) row is returned on page refresh.
+        """
         try:
-            # Get session to verify ownership
-            session_response = supabase.table("chat_sessions").select("id, user_id").eq("id", session_id).eq("user_id", user_id).execute()
-            
+            session_response = supabase.table("chat_sessions").select("id, user_id").eq(
+                "id", session_id
+            ).eq("user_id", user_id).execute()
             if not session_response.data:
                 raise HTTPException(status_code=404, detail="Session not found")
-            
-            # Get budget
-            budget_response = supabase.table("budgets").select("*").eq("session_id", session_id).execute()
-            
-            if not budget_response.data:
-                # Return empty budget structure
-                return {
-                    "id": "",
-                    "session_id": session_id,
-                    "initial_investment": 0,
-                    "total_estimated_expenses": 0,
-                    "total_estimated_revenue": 0,
-                    "total_actual_expenses": 0,
-                    "total_actual_revenue": 0,
-                    "items": [],
-                    "created_at": datetime.now().isoformat(),
-                    "updated_at": datetime.now().isoformat()
-                }
-            
-            budget = budget_response.data[0]
-            
-            # Get budget items
-            items_response = supabase.table("budget_items").select("*").eq("budget_id", budget["id"]).order("created_at").execute()
-            budget["items"] = items_response.data if items_response.data else []
-            
-            return budget
+
+            # Always use _ensure_budget_exists — same function used by add/update/delete.
+            # This guarantees we read the SAME budget that items are written to.
+            budget_id = _ensure_budget_exists(user_id, session_id)
+            result = _get_full_budget(budget_id)
+            print(f"📊 get_budget_data: session={session_id}, budget_id={budget_id}, items_count={len(result.get('items', []))}")
+            return result
         except HTTPException:
             raise
         except Exception as e:
             print(f"Error getting budget: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get budget: {str(e)}")
 
+    # ── CREATE / FULL SAVE ──────────────────────────────────────────────────
+
     @staticmethod
     async def create_or_update_budget(user_id: str, session_id: str, budget_data: BudgetCreate) -> Dict[str, Any]:
         try:
-            # Verify session ownership
-            session_response = supabase.table("chat_sessions").select("id, user_id").eq("id", session_id).eq("user_id", user_id).execute()
-            
+            session_response = supabase.table("chat_sessions").select("id, user_id").eq(
+                "id", session_id
+            ).eq("user_id", user_id).execute()
             if not session_response.data:
                 raise HTTPException(status_code=404, detail="Session not found")
-            
-            # Check if budget exists
-            existing_budget_response = supabase.table("budgets").select("id").eq("session_id", session_id).execute()
-            
-            budget_payload = {
-                "session_id": session_id,
-                "user_id": user_id,
-                "initial_investment": budget_data.initial_investment,
-                "total_estimated_expenses": budget_data.total_estimated_expenses,
-                "total_estimated_revenue": budget_data.total_estimated_revenue,
-                "total_actual_expenses": 0,
-                "total_actual_revenue": 0,
-                "updated_at": datetime.now().isoformat()
-            }
-            
-            if existing_budget_response.data:
-                # Update existing budget
-                budget_id = existing_budget_response.data[0]["id"]
-                supabase.table("budgets").update(budget_payload).eq("id", budget_id).execute()
-            else:
-                # Create new budget
-                budget_payload["created_at"] = datetime.now().isoformat()
-                budget_response = supabase.table("budgets").insert(budget_payload).execute()
-                budget_id = budget_response.data[0]["id"]
 
-            # Handle budget items non-destructively
-            existing_budget_items_response = supabase.table("budget_items").select("id, name, category, estimated_amount, actual_amount, description, is_custom").eq("budget_id", budget_id).execute()
-            existing_budget_items = {item["id"]: item for item in existing_budget_items_response.data}
+            budget_id = _ensure_budget_exists(user_id, session_id, budget_data.initial_investment)
 
-            incoming_item_ids = {item["id"] for item in budget_data.items if item.get("id")} # IDs of items sent from frontend
-
-            items_to_insert = []
-            items_to_update = []
-            all_current_items_for_totals = [] # To store all items after CUD for total recalculation
-
-            for item_data_from_frontend in budget_data.items:
-                item_id = item_data_from_frontend.get("id")
-                prepared_item_data = {
-                    "budget_id": budget_id,
-                    "name": item_data_from_frontend.get("name", ""),
-                    "category": item_data_from_frontend.get("category", "expense"),
-                    "estimated_amount": item_data_from_frontend.get("estimated_amount", 0),
-                    "actual_amount": item_data_from_frontend.get("actual_amount"),
-                    "description": item_data_from_frontend.get("description"),
-                    "is_custom": item_data_from_frontend.get("is_custom", True),
-                    "updated_at": datetime.now().isoformat()
-                }
-
-                if item_id and item_id in existing_budget_items:
-                    # Item exists, prepare for update
-                    items_to_update.append({"id": item_id, **prepared_item_data})
-                    # Add to all_current_items_for_totals with its ID
-                    all_current_items_for_totals.append({"id": item_id, **prepared_item_data})
-                    del existing_budget_items[item_id] # Mark as processed
-                else:
-                    # New item, prepare for insert
-                    items_to_insert.append({
-                        "created_at": datetime.now().isoformat(),
-                        **prepared_item_data
-                    })
-                    # New items will get an ID after insert, for now include them for total recalculation
-                    all_current_items_for_totals.append(prepared_item_data)
-            
-            # Items remaining in existing_budget_items were not in the incoming items, so they should be deleted
-            items_to_delete_ids = list(existing_budget_items.keys())
-
-            # Perform database operations
-            if items_to_insert:
-                inserted_items_response = supabase.table("budget_items").insert(items_to_insert).execute()
-                # Add newly inserted items (with their generated IDs) to all_current_items_for_totals
-                if inserted_items_response.data:
-                    for item in inserted_items_response.data:
-                        # Find the corresponding item in all_current_items_for_totals and update its ID
-                        for i, current_item in enumerate(all_current_items_for_totals):
-                            # This assumes that the order of insertion response matches the request if no ID was provided.
-                            # A more robust solution might involve matching by name/other fields if IDs aren't returned in order.
-                            if not current_item.get("id"):
-                                all_current_items_for_totals[i]["id"] = item["id"]
-                                break
-
-            for update_item in items_to_update:
-                item_id = update_item.pop("id")
-                supabase.table("budget_items").update(update_item).eq("id", item_id).execute()
-
-            if items_to_delete_ids:
-                supabase.table("budget_items").delete().in_("id", items_to_delete_ids).execute()
-            
-            # Recalculate totals based on all_current_items_for_totals
-            total_estimated_expenses = sum(i["estimated_amount"] for i in all_current_items_for_totals if i["category"] == "expense")
-            total_estimated_revenue = sum(i["estimated_amount"] for i in all_current_items_for_totals if i["category"] == "revenue")
-            total_actual_expenses = sum(i.get("actual_amount", 0) or 0 for i in all_current_items_for_totals if i["category"] == "expense")
-            total_actual_revenue = sum(i.get("actual_amount", 0) or 0 for i in all_current_items_for_totals if i["category"] == "revenue")
-
+            # Update the budget header
             supabase.table("budgets").update({
-                "total_estimated_expenses": total_estimated_expenses,
-                "total_estimated_revenue": total_estimated_revenue,
-                "total_actual_expenses": total_actual_expenses,
-                "total_actual_revenue": total_actual_revenue,
+                "initial_investment": budget_data.initial_investment,
                 "updated_at": datetime.now().isoformat()
             }).eq("id", budget_id).execute()
 
-            # Get updated budget
-            budget_response = supabase.table("budgets").select("*").eq("id", budget_id).execute()
-            budget = budget_response.data[0]
-            
-            items_response = supabase.table("budget_items").select("*").eq("budget_id", budget_id).order("created_at").execute()
-            budget["items"] = items_response.data if items_response.data else []
-            
-            return budget
+            # NON-DESTRUCTIVE item sync — insert new items, update known items.
+            # NEVER delete items here. Deletion only happens via the explicit
+            # DELETE /budget/items/{item_id} endpoint. This prevents race conditions
+            # where a stale frontend state could accidentally remove recently-added items.
+            existing_items_response = supabase.table("budget_items").select("*").eq("budget_id", budget_id).execute()
+            existing_items = {item["id"]: item for item in existing_items_response.data}
+
+            items_to_insert = []
+            items_to_update = []
+
+            for item_data in budget_data.items:
+                item_id = item_data.get("id")
+                prepared = {
+                    "budget_id": budget_id,
+                    "name": item_data.get("name", ""),
+                    "category": item_data.get("category", "expense"),
+                    "subcategory": item_data.get("subcategory"),
+                    "estimated_amount": item_data.get("estimated_amount", 0),
+                    "actual_amount": item_data.get("actual_amount"),
+                    "estimated_price": item_data.get("estimated_price"),
+                    "estimated_volume": item_data.get("estimated_volume"),
+                    "description": item_data.get("description"),
+                    "is_custom": item_data.get("is_custom", True),
+                    "is_selected": item_data.get("is_selected", True),
+                    "updated_at": datetime.now().isoformat()
+                }
+
+                if item_id and item_id in existing_items:
+                    items_to_update.append({"id": item_id, **prepared})
+                else:
+                    items_to_insert.append({
+                        "created_at": datetime.now().isoformat(),
+                        **prepared
+                    })
+
+            if items_to_insert:
+                supabase.table("budget_items").insert(items_to_insert).execute()
+            for upd in items_to_update:
+                uid = upd.pop("id")
+                supabase.table("budget_items").update(upd).eq("id", uid).execute()
+
+            _recalculate_and_update_totals(budget_id)
+            return _get_full_budget(budget_id)
         except HTTPException:
             raise
         except Exception as e:
             print(f"Error saving budget: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to save budget: {str(e)}")
 
+    # ── ADD ITEM ────────────────────────────────────────────────────────────
+
     @staticmethod
     async def add_budget_item(user_id: str, session_id: str, item: BudgetItemCreate) -> Dict[str, Any]:
         try:
-            # Get budget
-            budget_response = supabase.table("budgets").select("id").eq("session_id", session_id).eq("user_id", user_id).execute()
-            
-            if not budget_response.data:
-                raise HTTPException(status_code=404, detail="Budget not found")
-            
-            budget_id = budget_response.data[0]["id"]
-            
-            # Insert item
+            budget_id = _ensure_budget_exists(user_id, session_id)
+
             item_data = {
                 "budget_id": budget_id,
                 "name": item.name,
                 "category": item.category,
+                "subcategory": item.subcategory,
                 "estimated_amount": item.estimated_amount,
                 "actual_amount": item.actual_amount,
+                "estimated_price": item.estimated_price,
+                "estimated_volume": item.estimated_volume,
                 "description": item.description,
                 "is_custom": item.is_custom,
+                "is_selected": item.is_selected if item.is_selected is not None else True,
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat()
             }
-            
-            item_response = supabase.table("budget_items").insert(item_data).execute()
-            new_item = item_response.data[0]
-            
-            # Update budget totals
-            items_response = supabase.table("budget_items").select("estimated_amount, actual_amount, category").eq("budget_id", budget_id).execute()
-            items = items_response.data if items_response.data else []
-            
-            total_estimated_expenses = sum(i["estimated_amount"] for i in items if i["category"] == "expense")
-            total_estimated_revenue = sum(i["estimated_amount"] for i in items if i["category"] == "revenue")
-            total_actual_expenses = sum(i.get("actual_amount", 0) or 0 for i in items if i["category"] == "expense")
-            total_actual_revenue = sum(i.get("actual_amount", 0) or 0 for i in items if i["category"] == "revenue")
-            
-            supabase.table("budgets").update({
-                "total_estimated_expenses": total_estimated_expenses,
-                "total_estimated_revenue": total_estimated_revenue,
-                "total_actual_expenses": total_actual_expenses,
-                "total_actual_revenue": total_actual_revenue,
-                "updated_at": datetime.now().isoformat()
-            }).eq("id", budget_id).execute()
-            
-            # Get updated budget
-            budget_response = supabase.table("budgets").select("*").eq("id", budget_id).execute()
-            budget = budget_response.data[0]
-            
-            items_response = supabase.table("budget_items").select("*").eq("budget_id", budget_id).order("created_at").execute()
-            budget["items"] = items_response.data if items_response.data else []
-            
-            return budget
+
+            insert_response = supabase.table("budget_items").insert(item_data).execute()
+            print(f"✅ add_budget_item: budget_id={budget_id}, item_name={item.name}, inserted_id={insert_response.data[0]['id'] if insert_response.data else 'NONE'}")
+            _recalculate_and_update_totals(budget_id)
+            full = _get_full_budget(budget_id)
+            print(f"   → Returning budget with {len(full.get('items', []))} items")
+            return full
         except HTTPException:
             raise
         except Exception as e:
             print(f"Error adding budget item: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to add budget item: {str(e)}")
 
+    # ── UPDATE ITEM ─────────────────────────────────────────────────────────
+
     @staticmethod
     async def update_budget_item(user_id: str, session_id: str, item_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            # Verify budget ownership
-            budget_response = supabase.table("budgets").select("id").eq("session_id", session_id).eq("user_id", user_id).execute()
-            
-            if not budget_response.data:
-                raise HTTPException(status_code=404, detail="Budget not found")
-            
-            budget_id = budget_response.data[0]["id"]
-            
-            # Update item
-            updates["updated_at"] = datetime.now().isoformat()
-            supabase.table("budget_items").update(updates).eq("id", item_id).eq("budget_id", budget_id).execute()
-            
-            # Update budget totals
-            items_response = supabase.table("budget_items").select("estimated_amount, actual_amount, category").eq("budget_id", budget_id).execute()
-            items = items_response.data if items_response.data else []
-            
-            total_estimated_expenses = sum(i["estimated_amount"] for i in items if i["category"] == "expense")
-            total_estimated_revenue = sum(i["estimated_amount"] for i in items if i["category"] == "revenue")
-            total_actual_expenses = sum(i.get("actual_amount", 0) or 0 for i in items if i["category"] == "expense")
-            total_actual_revenue = sum(i.get("actual_amount", 0) or 0 for i in items if i["category"] == "revenue")
-            
-            supabase.table("budgets").update({
-                "total_estimated_expenses": total_estimated_expenses,
-                "total_estimated_revenue": total_estimated_revenue,
-                "total_actual_expenses": total_actual_expenses,
-                "total_actual_revenue": total_actual_revenue,
-                "updated_at": datetime.now().isoformat()
-            }).eq("id", budget_id).execute()
-            
-            # Get updated budget
-            budget_response = supabase.table("budgets").select("*").eq("id", budget_id).execute()
-            budget = budget_response.data[0]
-            
-            items_response = supabase.table("budget_items").select("*").eq("budget_id", budget_id).order("created_at").execute()
-            budget["items"] = items_response.data if items_response.data else []
-            
-            return budget
+            budget_id = _ensure_budget_exists(user_id, session_id)
+
+            allowed_fields = {
+                "name", "category", "subcategory",
+                "estimated_amount", "actual_amount",
+                "estimated_price", "estimated_volume",
+                "description", "is_custom", "is_selected"
+            }
+            safe_updates = {k: v for k, v in updates.items() if k in allowed_fields}
+            safe_updates["updated_at"] = datetime.now().isoformat()
+
+            supabase.table("budget_items").update(safe_updates).eq(
+                "id", item_id
+            ).eq("budget_id", budget_id).execute()
+
+            _recalculate_and_update_totals(budget_id)
+            return _get_full_budget(budget_id)
         except HTTPException:
             raise
         except Exception as e:
             print(f"Error updating budget item: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to update budget item: {str(e)}")
 
+    # ── DELETE ITEM ─────────────────────────────────────────────────────────
+
     @staticmethod
     async def delete_budget_item(user_id: str, session_id: str, item_id: str) -> Dict[str, Any]:
         try:
-            # Verify budget ownership
-            budget_response = supabase.table("budgets").select("id").eq("session_id", session_id).eq("user_id", user_id).execute()
-            
-            if not budget_response.data:
-                raise HTTPException(status_code=404, detail="Budget not found")
-            
-            budget_id = budget_response.data[0]["id"]
-            
-            # Delete item
-            supabase.table("budget_items").delete().eq("id", item_id).eq("budget_id", budget_id).execute()
-            
-            # Update budget totals
-            items_response = supabase.table("budget_items").select("estimated_amount, actual_amount, category").eq("budget_id", budget_id).execute()
-            items = items_response.data if items_response.data else []
-            
-            total_estimated_expenses = sum(i["estimated_amount"] for i in items if i["category"] == "expense")
-            total_estimated_revenue = sum(i["estimated_amount"] for i in items if i["category"] == "revenue")
-            total_actual_expenses = sum(i.get("actual_amount", 0) or 0 for i in items if i["category"] == "expense")
-            total_actual_revenue = sum(i.get("actual_amount", 0) or 0 for i in items if i["category"] == "revenue")
-            
-            supabase.table("budgets").update({
-                "total_estimated_expenses": total_estimated_expenses,
-                "total_estimated_revenue": total_estimated_revenue,
-                "total_actual_expenses": total_actual_expenses,
-                "total_actual_revenue": total_actual_revenue,
-                "updated_at": datetime.now().isoformat()
-            }).eq("id", budget_id).execute()
-            
-            # Get updated budget
-            budget_response = supabase.table("budgets").select("*").eq("id", budget_id).execute()
-            budget = budget_response.data[0]
-            
-            items_response = supabase.table("budget_items").select("*").eq("budget_id", budget_id).order("created_at").execute()
-            budget["items"] = items_response.data if items_response.data else []
-            
-            return budget
+            budget_id = _ensure_budget_exists(user_id, session_id)
+
+            supabase.table("budget_items").delete().eq(
+                "id", item_id
+            ).eq("budget_id", budget_id).execute()
+
+            _recalculate_and_update_totals(budget_id)
+            return _get_full_budget(budget_id)
         except HTTPException:
             raise
         except Exception as e:
             print(f"Error deleting budget item: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to delete budget item: {str(e)}")
 
+    # ── UPDATE BUDGET HEADER (initial_investment etc.) ──────────────────────
+
+    @staticmethod
+    async def update_budget_header(user_id: str, session_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            budget_id = _ensure_budget_exists(user_id, session_id)
+
+            allowed = {"initial_investment"}
+            safe = {k: v for k, v in updates.items() if k in allowed}
+            safe["updated_at"] = datetime.now().isoformat()
+
+            supabase.table("budgets").update(safe).eq("id", budget_id).execute()
+            return _get_full_budget(budget_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"Error updating budget header: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to update budget: {str(e)}")
+
+    # ── SAVE REVENUE STREAMS ───────────────────────────────────────────────
+
+    @staticmethod
+    async def save_revenue_streams(user_id: str, session_id: str, revenue_streams: List[RevenueStreamSave]):
+        try:
+            budget_id = _ensure_budget_exists(user_id, session_id)
+
+            # Get existing revenue items
+            existing_response = supabase.table("budget_items").select("id, name").eq(
+                "budget_id", budget_id
+            ).eq("category", "revenue").execute()
+            existing = {item["id"]: item for item in existing_response.data}
+
+            items_to_insert = []
+            items_to_update = []
+            processed_ids = set()
+
+            for stream in revenue_streams:
+                item_payload = {
+                    "name": stream.name,
+                    "category": "revenue",
+                    "subcategory": "revenue",
+                    "estimated_amount": stream.revenueProjection,
+                    "estimated_price": stream.estimatedPrice,
+                    "estimated_volume": stream.estimatedVolume,
+                    "actual_amount": None,
+                    "description": stream.description or "Revenue stream",
+                    "is_custom": stream.isCustom,
+                    "is_selected": stream.isSelected,
+                    "updated_at": datetime.now().isoformat()
+                }
+
+                if stream.id and stream.id in existing:
+                    items_to_update.append({"id": stream.id, **item_payload})
+                    processed_ids.add(stream.id)
+                else:
+                    items_to_insert.append({
+                        "budget_id": budget_id,
+                        "created_at": datetime.now().isoformat(),
+                        **item_payload
+                    })
+
+            # Delete revenue items no longer present
+            ids_to_delete = [k for k in existing if k not in processed_ids]
+
+            if items_to_insert:
+                supabase.table("budget_items").insert(items_to_insert).execute()
+            for upd in items_to_update:
+                uid = upd.pop("id")
+                supabase.table("budget_items").update(upd).eq("id", uid).execute()
+            if ids_to_delete:
+                supabase.table("budget_items").delete().in_("id", ids_to_delete).execute()
+
+            _recalculate_and_update_totals(budget_id)
+
+            # Return saved items so frontend can sync IDs
+            saved_items = supabase.table("budget_items").select("*").eq(
+                "budget_id", budget_id
+            ).eq("category", "revenue").order("created_at").execute()
+
+            return {
+                "success": True, 
+                "message": "Revenue streams saved successfully.",
+                "result": saved_items.data if saved_items.data else []
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"Error saving revenue streams: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save revenue streams: {str(e)}")
+
+    # ── GET REVENUE STREAMS (from DB) ──────────────────────────────────────
+
+    @staticmethod
+    async def get_revenue_streams(user_id: str, session_id: str) -> List[Dict[str, Any]]:
+        try:
+            # Use _ensure_budget_exists for consistency — same budget_id everywhere
+            budget_id = _ensure_budget_exists(user_id, session_id)
+            items_response = supabase.table("budget_items").select("*").eq(
+                "budget_id", budget_id
+            ).eq("category", "revenue").order("created_at").execute()
+
+            return items_response.data if items_response.data else []
+        except Exception as e:
+            print(f"Error getting revenue streams: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to get revenue streams: {str(e)}")
+
+    # ── BUDGET SUMMARY ─────────────────────────────────────────────────────
+
     @staticmethod
     async def get_budget_summary(user_id: str, session_id: str) -> Dict[str, Any]:
         try:
-            # Get budget
-            budget_response = supabase.table("budgets").select("*").eq("session_id", session_id).eq("user_id", user_id).execute()
-            
+            # Use _ensure_budget_exists for consistency — same budget_id everywhere
+            budget_id = _ensure_budget_exists(user_id, session_id)
+            budget_response = supabase.table("budgets").select("*").eq("id", budget_id).execute()
+
             if not budget_response.data:
                 return {
-                    "total_estimated": 0,
-                    "total_actual": 0,
-                    "estimated_expenses": 0,
-                    "estimated_revenue": 0,
-                    "actual_expenses": 0,
-                    "actual_revenue": 0,
+                    "total_estimated": 0, "total_actual": 0,
+                    "estimated_expenses": 0, "estimated_revenue": 0,
+                    "actual_expenses": 0, "actual_revenue": 0,
                     "variance": 0
                 }
-            
-            budget = budget_response.data[0]
-            
-            total_estimated = budget["total_estimated_expenses"] + budget["total_estimated_revenue"]
-            total_actual = (budget.get("total_actual_expenses", 0) or 0) + (budget.get("total_actual_revenue", 0) or 0)
-            variance = total_actual - total_estimated
-            
+
+            b = budget_response.data[0]
+            total_estimated = b["total_estimated_expenses"] + b["total_estimated_revenue"]
+            total_actual = (b.get("total_actual_expenses", 0) or 0) + (b.get("total_actual_revenue", 0) or 0)
+
             return {
                 "total_estimated": total_estimated,
                 "total_actual": total_actual,
-                "estimated_expenses": budget["total_estimated_expenses"],
-                "estimated_revenue": budget["total_estimated_revenue"],
-                "actual_expenses": budget.get("actual_expenses", 0) or 0,
-                "actual_revenue": budget.get("actual_revenue", 0) or 0,
-                "variance": variance
+                "estimated_expenses": b["total_estimated_expenses"],
+                "estimated_revenue": b["total_estimated_revenue"],
+                "actual_expenses": b.get("total_actual_expenses", 0) or 0,
+                "actual_revenue": b.get("total_actual_revenue", 0) or 0,
+                "variance": total_actual - total_estimated
             }
         except Exception as e:
             print(f"Error getting budget summary: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get budget summary: {str(e)}")
 
+    # ── AI GENERATION ──────────────────────────────────────────────────────
+
     @staticmethod
     def parse_estimated_expenses(estimated_expenses_text: str) -> List[BudgetItemCreate]:
         items: List[BudgetItemCreate] = []
         lines = estimated_expenses_text.split('\n')
-        expense_category_map = {
-            'startup costs': 'expense',  # Frontend used 'startup_cost', but backend BudgetItemCreate category is 'expense'
-            'monthly operating expenses': 'expense', # and is classified as 'operating_expense' in the frontend.
-            'monthly payroll': 'expense', # and is classified as 'payroll' in the frontend.
-            'monthly cogs': 'expense' # and is classified as 'cogs' in the frontend.
+
+        # Map header keywords to (category, subcategory)
+        category_map = {
+            'startup costs': ('expense', 'startup_cost'),
+            'monthly operating expenses': ('expense', 'operating_expense'),
+            'monthly payroll': ('expense', 'payroll'),
+            'monthly cogs': ('expense', 'cogs'),
         }
 
-        current_category_key: Optional[str] = None
+        current_cat = 'expense'
+        current_sub: Optional[str] = None
+
         for line in lines:
-            trimmed_line = line.strip()
-            if not trimmed_line:
+            trimmed = line.strip()
+            if not trimmed:
                 continue
 
-            # Check for category headers
-            matched_category = None
-            for key in expense_category_map.keys():
-                if trimmed_line.lower().startswith(f'**{key}**'):
-                    matched_category = key
+            matched = None
+            for key, (cat, sub) in category_map.items():
+                if trimmed.lower().startswith(f'**{key}**'):
+                    matched = key
+                    current_cat = cat
+                    current_sub = sub
                     break
-            
-            if matched_category:
-                current_category_key = matched_category
+            if matched:
                 continue
 
-            # Attempt to parse line as a budget item
-            # Example format: "- Item Name: $Amount (Description)" or "- Item Name: $Amount"
-            match = re.match(r'^-?\s*(.+?):\s*\$([\d,.]+)(?:\s*\((.+?)\))?$', trimmed_line)
-            if match and current_category_key:
+            match = re.match(r'^-?\s*(.+?):\s*\$([\d,.]+)(?:\s*\((.+?)\))?$', trimmed)
+            if match and current_sub:
                 name = match.group(1).strip()
                 try:
                     amount = float(match.group(2).replace(',', ''))
                 except ValueError:
                     amount = 0.0
                 description = match.group(3).strip() if match.group(3) else None
-                
-                # Assign actual category based on parsed header, but `BudgetItemCreate` only uses 'expense' or 'revenue'
-                # The more granular classification (startup_cost, operating_expense, etc.) happens on the frontend
-                # based on derived IDs or item names. Here, we just set 'expense'.
-                category = expense_category_map[current_category_key]
 
-                items.append(
-                    BudgetItemCreate(
-                        id=str(uuid.uuid4()), # Generate a UUID for the item ID
-                        name=name,
-                        category=category,
-                        estimated_amount=amount,
-                        actual_amount=None,
-                        description=description,
-                        is_custom=False, # AI generated
-                    )
-                )
+                items.append(BudgetItemCreate(
+                    id=str(uuid.uuid4()),
+                    name=name,
+                    category=current_cat,
+                    subcategory=current_sub,
+                    estimated_amount=amount,
+                    actual_amount=None,
+                    description=description,
+                    is_custom=False,
+                ))
         return items
 
     @staticmethod
     async def generate_initial_expenses(user_id: str, session_id: str) -> List[BudgetItemCreate]:
         try:
-            # Get session to verify ownership
-            session_response = supabase.table("chat_sessions").select("*").eq("id", session_id).eq("user_id", user_id).execute()
-            
+            session_response = supabase.table("chat_sessions").select("*").eq(
+                "id", session_id
+            ).eq("user_id", user_id).execute()
             if not session_response.data:
                 raise HTTPException(status_code=404, detail="Session not found")
-            
+
             session = session_response.data[0]
-            
-            # Get chat history
-            history_response = supabase.table("chat_messages").select("*").eq("session_id", session_id).order("created_at").execute()
-            history = [{"role": msg.get("role"), "content": msg.get("content", "")} for msg in (history_response.data or [])]
-            
-            # Generate estimated expenses raw text
-            estimated_expenses_text = await generate_estimated_expenses_from_business_plan(session, history)
-            
-            # Parse the raw text into structured BudgetItemCreate objects
-            parsed_items = BudgetService.parse_estimated_expenses(estimated_expenses_text)
-            
-            return parsed_items
+            history_response = supabase.table("chat_messages").select("*").eq(
+                "session_id", session_id
+            ).order("created_at").execute()
+            history = [{"role": m.get("role"), "content": m.get("content", "")} for m in (history_response.data or [])]
+
+            estimated_text = await generate_estimated_expenses_from_business_plan(session, history)
+            return BudgetService.parse_estimated_expenses(estimated_text)
         except HTTPException:
             raise
         except Exception as e:
@@ -489,96 +544,14 @@ class BudgetService:
     @staticmethod
     async def generate_initial_revenue_streams(user_id: str, session_id: str) -> List[RevenueStreamInitial]:
         try:
-            # Get session to extract business_type
             session_data = await get_session(session_id, user_id)
             if not session_data:
                 raise HTTPException(status_code=404, detail="Session not found")
-            
-            business_type = (session_data.get("business_context") or {}).get("business_type") or session_data.get("business_type", "Startup")
 
-            # Generate revenue streams based on business_type
-            initial_streams = await generate_initial_revenue_streams(business_type)
-            
-            return initial_streams
+            business_type = (session_data.get("business_context") or {}).get("business_type") or session_data.get("business_type", "Startup")
+            return await generate_initial_revenue_streams(business_type)
         except HTTPException:
             raise
         except Exception as e:
             print(f"Error generating revenue streams: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to generate revenue streams: {str(e)}")
-
-    @staticmethod
-    async def save_revenue_streams(user_id: str, session_id: str, revenue_streams: List[RevenueStreamSave]):
-        try:
-            # 1. Verify session ownership and get budget_id
-            budget_response = supabase.table("budgets").select("id").eq("session_id", session_id).eq("user_id", user_id).execute()
-            if not budget_response.data:
-                raise HTTPException(status_code=404, detail="Budget not found for this session.")
-            budget_id = budget_response.data[0]["id"]
-
-            # Get existing revenue items
-            existing_revenue_items_response = supabase.table("budget_items").select("id, name, estimated_amount").eq("budget_id", budget_id).eq("category", "revenue").execute()
-            existing_revenue_items = {item["id"]: item for item in existing_revenue_items_response.data}
-
-            incoming_stream_ids = {stream.id for stream in revenue_streams if stream.isSelected}
-
-            items_to_insert = []
-            items_to_update = []
-            
-            total_estimated_revenue = 0.0
-
-            for stream in revenue_streams:
-                if stream.isSelected:
-                    # Prepare item data
-                    item_data = {
-                        "name": stream.name,
-                        "category": "revenue",
-                        "estimated_amount": stream.revenueProjection,
-                        "actual_amount": None, # No actuals for estimated streams yet
-                        "description": "Generated revenue stream",
-                        "is_custom": stream.isCustom,
-                        "updated_at": datetime.now().isoformat()
-                    }
-
-                    if stream.id and stream.id in existing_revenue_items:
-                        # Item exists, prepare for update
-                        items_to_update.append({"id": stream.id, **item_data})
-                        del existing_revenue_items[stream.id] # Mark as processed
-                    else:
-                        # New item, prepare for insert
-                        items_to_insert.append({
-                            "budget_id": budget_id,
-                            "created_at": datetime.now().isoformat(),
-                            **item_data
-                        })
-                    total_estimated_revenue += stream.revenueProjection
-            
-            # Items remaining in existing_revenue_items were not in the incoming selected streams, so they should be deleted
-            items_to_delete_ids = list(existing_revenue_items.keys())
-
-            # Perform database operations
-            if items_to_insert:
-                supabase.table("budget_items").insert(items_to_insert).execute()
-            
-            for update_item in items_to_update:
-                item_id = update_item.pop("id")
-                supabase.table("budget_items").update(update_item).eq("id", item_id).execute()
-
-            if items_to_delete_ids:
-                supabase.table("budget_items").delete().in_("id", items_to_delete_ids).execute()
-            
-            # 5. Update the total_estimated_revenue in the main budget entry
-            supabase.table("budgets").update({
-                "total_estimated_revenue": total_estimated_revenue,
-                "updated_at": datetime.now().isoformat()
-            }).eq("id", budget_id).execute()
-
-            return {
-                "success": True,
-                "message": "Revenue streams and budget updated successfully."
-            }
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"Error saving revenue streams: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to save revenue streams: {str(e)}")
