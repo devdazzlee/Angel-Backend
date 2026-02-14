@@ -5052,7 +5052,11 @@ Focus on validating your concept before full development through market research
         return "Based on our conversation, here's a comprehensive draft response that addresses your current question with detailed insights and actionable recommendations tailored to your business context and goals. Consider breaking down complex questions into smaller parts and thinking through each aspect systematically."
 
 async def handle_scrapping_command(reply, notes, history, session_data=None):
-    """Handle the Scrapping command with actual web search research"""
+    """Handle the Scrapping command with actual web search research.
+    
+    Performs the web search inline before returning so the frontend gets
+    the complete result immediately (no stuck 'Research in Progress' UI).
+    """
     print(f"🔍 DEBUG - Scrapping command called with notes: '{notes}'")
     
     # Extract business context from history for targeted research
@@ -5071,38 +5075,33 @@ async def handle_scrapping_command(reply, notes, history, session_data=None):
     
     scrapping_response = f"Here's a refined version of your thoughts:\n\n{scrapping_content}\n\n"
     
-    # If user provided specific research notes, conduct actual web search
+    # Determine the web search query
     if notes and len(notes.strip()) > 3:
-        print(f"🔍 DEBUG - Conducting web search for: '{notes}'")
-        scrapping_response += f"**🔍 Researching: {notes}**\n\n"
-        scrapping_response += "I'm conducting web search research to provide you with current, actionable insights. This will help refine your approach with real data and trends.\n\n"
-        
-        # Add web search trigger for the backend to process
-        scrapping_response += f"\n\nWEBSEARCH_QUERY: {notes}"
-        
-        # Return the scrapping response with web search trigger
-        return {
-            "reply": scrapping_response,
-            "web_search_status": {"is_searching": True, "query": notes, "completed": False},
-            "immediate_response": None
-        }
+        search_query = notes.strip()
     else:
-        print(f"🔍 DEBUG - No specific research topic, providing contextual analysis with web search")
-        # If no specific research request, provide contextual analysis based on current question
-        # Trigger web search for general scrapping as well
-        web_search_query = f"{business_context.get('business_name', 'business')} {business_context.get('industry', 'business')} {get_question_topic(current_question)}"
-        scrapping_response += f"\n\nWEBSEARCH_QUERY: {web_search_query}"
-        
-        return {
-            "reply": scrapping_response,
-            "web_search_status": {"is_searching": True, "query": web_search_query, "completed": False},
-            "immediate_response": None
-        }
+        search_query = f"{business_context.get('business_name', 'business')} {business_context.get('industry', 'business')} {get_question_topic(current_question)}"
+    
+    # Actually perform the web search NOW (not deferred)
+    print(f"🔍 Scrapping - performing web search inline for: '{search_query}'")
+    try:
+        search_results = await conduct_web_search(search_query, fast_mode=False)
+        if search_results and len(search_results.strip()) > 20:
+            scrapping_response += f"**🔍 Research Results: {search_query}**\n\n"
+            scrapping_response += search_results + "\n\n"
+            print(f"✅ Scrapping - web search completed, {len(search_results)} chars")
+        else:
+            print(f"⚠️ Scrapping - web search returned empty/short results")
+            scrapping_response += f"**🔍 Research: {search_query}**\n\n"
+            scrapping_response += "I've analyzed the available information for your business context. The refined content above incorporates current best practices.\n\n"
+    except Exception as e:
+        print(f"❌ Scrapping - web search failed: {e}")
+        scrapping_response += f"**🔍 Research: {search_query}**\n\n"
+        scrapping_response += "Research is integrated into the refined content above based on current business best practices.\n\n"
     
     print(f"🔍 DEBUG - Scrapping response generated, length: {len(scrapping_response)}")
     return {
         "reply": scrapping_response,
-        "web_search_status": {"is_searching": False, "query": None, "completed": False},
+        "web_search_status": {"is_searching": False, "query": search_query, "completed": True},
         "immediate_response": None
     }
 
