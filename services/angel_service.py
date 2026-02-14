@@ -3203,6 +3203,114 @@ Do NOT include question numbers, progress percentages, or step counts in your re
                 "show_accept_modify": False
             }
         
+        # CRITICAL FIX: When user Accepts a Draft/Support response on a section-ending
+        # question (Q4, Q7, Q13, etc.), we must still show the section summary.
+        # The Draft command returns early and never reaches the section summary check,
+        # so we catch it here on the subsequent Accept.
+        section_boundary_info = check_for_section_summary(current_tag, session_data, history)
+        if section_boundary_info:
+            # Check if the LAST assistant message was already a section summary
+            # (to avoid infinite loop: summary → Accept → summary → Accept → ...)
+            last_assistant_content = ""
+            for msg in reversed(history[-8:]):
+                if msg.get('role') == 'assistant':
+                    last_assistant_content = msg.get('content', '')
+                    break
+            
+            # Detect if the last message was a section summary
+            summary_markers = ["Section Complete", "section complete", "Summary of Your Information", "Ready to Continue"]
+            last_was_summary = any(marker in last_assistant_content for marker in summary_markers)
+            
+            # Detect which command type preceded this Accept (for logging)
+            preceding_command = "unknown"
+            for msg in reversed(history[-8:]):
+                if msg.get('role') == 'user':
+                    cmd = (msg.get('content', '') or '').lower().strip()
+                    if cmd in ['draft', 'draft more', 'draft answer']:
+                        preceding_command = "Draft"
+                    elif cmd in ['scrapping', 'scraping'] or cmd.startswith('scrapping:'):
+                        preceding_command = "Scrapping"
+                    elif cmd == 'support':
+                        preceding_command = "Support"
+                    break
+            
+            if not last_was_summary:
+                print(f"🎯 ACCEPT on section boundary Q{section_boundary_info['trigger_question']} after {preceding_command} - last msg was NOT a summary, generating section summary now")
+                
+                # Extract section Q&A pairs for comprehensive summary
+                section_qa_context = _extract_section_qa_pairs(
+                    history,
+                    section_boundary_info['trigger_question'],
+                    section_boundary_info['section_name']
+                )
+                
+                summary_instruction = f"""
+IMPORTANT: You have just completed the "{section_boundary_info['section_name']}" section. 
+You MUST provide a comprehensive section summary that covers ALL inputs from this entire section, not just the last question.
+
+HERE ARE ALL THE USER'S ANSWERS FOR THIS SECTION:
+{section_qa_context}
+
+You MUST summarize ALL of the above inputs in your summary. Do NOT only reference the most recent answer.
+
+Provide the summary in this EXACT format:
+
+🎯 **{section_boundary_info['section_name']} Section Complete**
+
+**Summary of Your Information:**
+[Recap ALL key information the user provided across EVERY question in this section. Include specific details, names, numbers, and choices they mentioned.]
+
+**Educational Insights:**
+[Provide 2-3 valuable business insights specifically related to {section_boundary_info['section_name']}]
+
+**Critical Considerations:**
+[Highlight 2-3 important watchouts and things to consider based on their specific answers]
+
+**Ready to Continue?**
+Please confirm that this information is accurate before we move to the next section. You can either accept this summary and continue, or let me know what you'd like to modify.
+
+[[ACCEPT_MODIFY_BUTTONS]]
+
+CRITICAL: 
+- End your response with [[ACCEPT_MODIFY_BUTTONS]] to trigger the Accept/Modify buttons
+- Do NOT ask the next question immediately
+- Do NOT include any question tags like [[Q:BUSINESS_PLAN.XX]] in this response
+- Do NOT include any "Thought Starter:", "Consider:", "Think about:", or similar guidance hints
+- This is a SUMMARY only - no follow-up questions or hints
+- Your summary MUST reference ALL answers from this section, not just the last one
+"""
+                # Build messages for summary generation
+                summary_msgs = [{"role": "system", "content": ANGEL_SYSTEM_PROMPT}]
+                extended_history = history[-30:] if len(history) > 30 else history
+                summary_msgs.extend(extended_history)
+                summary_msgs.append({"role": "user", "content": "Accept"})
+                summary_msgs.append({"role": "system", "content": summary_instruction})
+                
+                response = await client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=summary_msgs,
+                    temperature=0.7,
+                    max_tokens=1200,
+                    stream=False
+                )
+                reply_content = response.choices[0].message.content
+                
+                # Strip any question tags to prevent asked_q from updating
+                reply_content = re.sub(r'\[\[Q:[A-Z_]+\.\d+\]\]', '', reply_content)
+                # Clean the [[ACCEPT_MODIFY_BUTTONS]] tag (for display)
+                reply_content = reply_content.replace("[[ACCEPT_MODIFY_BUTTONS]]", "").strip()
+                
+                print(f"🔒 Section summary generated via Accept path - keeping asked_q at {current_tag}")
+                
+                return {
+                    "reply": reply_content,
+                    "web_search_status": {"is_searching": False, "query": None, "completed": False},
+                    "immediate_response": None,
+                    "show_accept_modify": True
+                }
+            else:
+                print(f"✅ Accept on section boundary Q{section_boundary_info['trigger_question']} after {preceding_command} - last msg WAS a summary, proceeding to next question")
+        
         # Let other Accept commands pass through to normal AI processing
         pass
     
