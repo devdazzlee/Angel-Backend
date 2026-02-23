@@ -475,8 +475,8 @@ class BudgetService:
         category_map = {
             'startup costs': ('expense', 'startup_cost'),
             'monthly operating expenses': ('expense', 'operating_expense'),
-            'monthly payroll': ('expense', 'payroll'),
-            'monthly cogs': ('expense', 'cogs'),
+            'monthly payroll': ('expense', 'operating_expense'),
+            'monthly cogs': ('expense', 'operating_expense'),
         }
 
         current_cat = 'expense'

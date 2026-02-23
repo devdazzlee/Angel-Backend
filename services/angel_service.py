@@ -2155,7 +2155,7 @@ async def generate_estimated_expenses_from_business_plan(session_data, history):
             for msg in recent_messages
         ])
     
-    prompt = f"""You are a financial planning expert. Based on the following business plan information, generate a realistic list of estimated monthly expenses for Year 1.
+    prompt = f"""You are a financial planning expert. Based on the following business plan information, generate a realistic budget for Year 1 organized into two sections: Startup Costs and Monthly Operating Expenses.
 
 BUSINESS CONTEXT:
 - Business Name: {business_name}
@@ -2163,34 +2163,36 @@ BUSINESS CONTEXT:
 - Location: {location}
 - Business Type: {business_type}
 
-BUSINESS PLAN INFORMATION:
+BUSINESS PLAN INFORMATION (from the user's business planning exercise):
 {business_plan_context[:3000]}
 
-REQUIREMENTS:
-1. Generate 6-10 realistic expense categories specific to this {industry} business
-2. Provide monthly estimated amounts (in USD) appropriate for {location}
-3. Include industry-specific expenses (e.g., inventory for retail, equipment for manufacturing, licenses for regulated industries)
-4. Adjust amounts based on location cost of living
-5. Format as a clear list with category names and estimated monthly amounts
+CRITICAL INSTRUCTIONS:
+1. Carefully read the business plan information above to extract SPECIFIC costs the user has discussed
+2. Use actual numbers, business details, and plans mentioned in the conversation
+3. Generate realistic amounts appropriate for {location} and the {industry} industry
+4. Include industry-specific expenses relevant to this specific business
 
-FORMAT YOUR RESPONSE AS:
-- **Category Name 1**: $X,XXX/month - Brief description
-- **Category Name 2**: $X,XXX/month - Brief description
-- etc.
+FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS (with these exact section headers):
 
-Be specific to {industry} and realistic for {location}. Include common expenses like:
-- Rent/Office Space (if applicable)
-- Salaries/Staffing
-- Marketing & Advertising
-- Utilities
-- Software & Technology
-- Insurance
-- Legal & Accounting
-- Inventory/Supplies (if applicable)
-- Equipment/Maintenance (if applicable)
-- Other industry-specific expenses
+**Startup Costs**
+- Business Registration & Licenses: $X,XXX (One-time filing and license fees)
+- Equipment & Tools: $X,XXX (Initial equipment purchases)
+- [Add 4-8 more startup cost line items specific to this business]
 
-Return ONLY the formatted list, no additional text."""
+**Monthly Operating Expenses**
+- Rent / Workspace: $X,XXX (Monthly rent or co-working)
+- Marketing & Advertising: $X,XXX (Monthly marketing budget)
+- Software Subscriptions: $X,XXX (Tools and platforms)
+- Insurance: $X,XXX (Monthly business insurance)
+- Founder Compensation: $X,XXX (Owner's monthly draw)
+- [Add 4-8 more monthly operating expense line items specific to this business]
+
+IMPORTANT:
+- Extract actual costs and plans from the business plan conversation above
+- For Startup Costs: include one-time pre-launch expenses (registration, equipment, branding, initial inventory, etc.)
+- For Monthly Operating Expenses: include ALL recurring monthly costs (rent, salaries, payroll, contractors, marketing, software, utilities, COGS, materials, etc.)
+- Amounts must be realistic for {location}
+- Return ONLY the formatted list with the two section headers, no additional text."""
 
     try:
         response = await client.chat.completions.create(
@@ -2200,25 +2202,32 @@ Return ONLY the formatted list, no additional text."""
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            max_tokens=800
+            max_tokens=1500
         )
         
         estimated_expenses = response.choices[0].message.content.strip()
         return estimated_expenses
     except Exception as e:
         print(f"Error generating estimated expenses: {e}")
-        # Fallback to generic expenses
-        return f"""Based on your {industry} business in {location}, here are typical Year 1 monthly expenses:
+        return f"""**Startup Costs**
+- Business Registration & Licenses: $500 (Filing fees and permits)
+- Legal & Accounting Setup: $1,500 (Initial legal and accounting services)
+- Equipment & Tools: $3,000 (Essential equipment for {industry})
+- Branding & Design: $1,000 (Logo, business cards, initial branding)
+- Website & Software Setup: $2,000 (Website development and initial software)
+- Insurance (Initial Policy): $800 (First insurance premium)
+- Office / Workspace Setup: $2,000 (Furnishing and setup costs)
 
-- **Rent/Office Space**: $1,500-$3,000/month - Office or retail space rental
-- **Salaries/Staffing**: $3,000-$8,000/month - Employee wages and benefits
-- **Marketing & Advertising**: $500-$2,000/month - Marketing campaigns and promotions
-- **Utilities**: $200-$500/month - Electricity, water, internet, phone
-- **Software & Technology**: $200-$800/month - Software licenses and tech tools
-- **Insurance**: $300-$600/month - Business insurance premiums
-- **Legal & Accounting**: $200-$500/month - Legal and accounting services
-- **Inventory/Supplies**: $500-$2,000/month - Product inventory or supplies
-- **Equipment/Maintenance**: $200-$1,000/month - Equipment purchase and maintenance"""
+**Monthly Operating Expenses**
+- Rent / Workspace: $1,500 (Monthly office or workspace rental)
+- Utilities & Internet: $300 (Electricity, water, internet)
+- Software Subscriptions: $400 (Monthly software and tools)
+- Marketing & Advertising: $1,000 (Monthly marketing budget)
+- Insurance (Monthly): $200 (Ongoing insurance premiums)
+- Accounting & Bookkeeping: $300 (Monthly financial services)
+- Founder Compensation: $4,000 (Owner's monthly draw)
+- Phone & Communications: $100 (Business phone and communications)
+- Miscellaneous / Buffer: $500 (Unexpected expenses buffer)"""
 
 async def generate_business_plan_summary(session_data, history):
     """Generate a comprehensive summary of the business plan"""
@@ -6150,42 +6159,42 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     YOUR OUTPUT MUST START WITH EXACTLY THIS TEXT (NO EXCEPTIONS):
     
-    ## Scene 1 - Executive Summary & Business Overview
+    ## Section 1 - Executive Summary & Business Overview
     
     ### Business Plan Summary Table
     
     | Section | Highlights |
     |---------|------------|
     
-    YOU MUST HAVE EXACTLY 8 SCENES WITH THESE EXACT HEADERS:
-    1. ## Scene 1 - Executive Summary & Business Overview
-    2. ## Scene 2 - Company Description & Business Model
-    3. ## Scene 3 - Market Analysis & Research
-    4. ## Scene 4 - Competitive Analysis
-    5. ## Scene 5 - Product/Service Offering
-    6. ## Scene 6 - Marketing & Sales Strategy
-    7. ## Scene 7 - Financial Projections & Funding
-    8. ## Scene 8 - Operations, Risk Management & Implementation Timeline
+    YOU MUST HAVE EXACTLY 8 SECTIONS WITH THESE EXACT HEADERS:
+    1. ## Section 1 - Executive Summary & Business Overview
+    2. ## Section 2 - Company Description & Business Model
+    3. ## Section 3 - Market Analysis & Research
+    4. ## Section 4 - Competitive Analysis
+    5. ## Section 5 - Product/Service Offering
+    6. ## Section 6 - Marketing & Sales Strategy
+    7. ## Section 7 - Financial Projections & Funding
+    8. ## Section 8 - Operations, Risk Management & Implementation Timeline
     
     FORBIDDEN - DO NOT USE:
-    ❌ "Executive Summary" (without "Scene 1 -")
-    ❌ "Company Description" (without "Scene 2 -")
+    ❌ "Executive Summary" (without "Section 1 -")
+    ❌ "Company Description" (without "Section 2 -")
     ❌ Any traditional section headers
     
     NOW GENERATE THE BUSINESS PLAN:
     
-    Generate a COMPREHENSIVE, DETAILED, and PROFESSIONAL business plan document in EXACTLY 8 SCENES with TABLES based on the following conversation history and extensive research.
+    Generate a COMPREHENSIVE, DETAILED, and PROFESSIONAL business plan document in EXACTLY 8 SECTIONS with TABLES based on the following conversation history and extensive research.
     
     **CRITICAL REQUIREMENTS**:
-    1. This MUST be structured as exactly 8 scenes (Scene 1 through Scene 8) - NO MORE, NO LESS
-    2. Each scene MUST start with at least one table in markdown format
+    1. This MUST be structured as exactly 8 sections (Section 1 through Section 8) - NO MORE, NO LESS
+    2. Each section MUST start with at least one table in markdown format
     3. After each table, provide 2-3 detailed paragraphs expanding on the table content
     4. Extract ALL information from the conversation history - use ACTUAL data, NOT placeholders
     5. Reference and align with "Business Plan Deep Research Questions V2" to ensure comprehensive coverage
     6. Use the user's answers from the conversation history as the foundation
     7. Enhance with research-driven insights to create a professional, investor-ready document
-    8. Format as a professional business plan with clear scene headers (## Scene X - Title)
-    9. Each scene should be 2-3 pages of content when formatted (tables + detailed paragraphs)
+    8. Format as a professional business plan with clear section headers (## Section X - Title)
+    9. Each section should be 2-3 pages of content when formatted (tables + detailed paragraphs)
     10. Total document should be 15-20 pages when formatted
     
     **Session Data**:
@@ -6213,11 +6222,11 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     **Reference Document**: Business Plan Deep Research Questions V2
     
-    **MANDATORY FORMAT - 8 SCENES WITH TABLES**:
+    **MANDATORY FORMAT - 8 SECTIONS WITH TABLES**:
     
     You MUST structure the business plan as 8 distinct scenes, each with tables. Follow this exact format:
     
-    ## Scene 1 - Executive Summary & Business Overview
+    ## Section 1 - Executive Summary & Business Overview
     
     ### Business Plan Summary Table
     
@@ -6234,7 +6243,7 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     [Then provide detailed paragraphs expanding on each section above]
     
-    ## Scene 2 - Company Description & Business Model
+    ## Section 2 - Company Description & Business Model
     
     ### Company Overview Table
     
@@ -6264,7 +6273,7 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     [Then provide detailed paragraphs expanding on each section above]
     
-    ## Scene 3 - Market Analysis & Research
+    ## Section 3 - Market Analysis & Research
     
     ### Market Research Findings Table
     
@@ -6287,7 +6296,7 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     [Then provide detailed paragraphs expanding on each section above]
     
-    ## Scene 4 - Competitive Analysis
+    ## Section 4 - Competitive Analysis
     
     ### Competitive Landscape Table
     
@@ -6308,7 +6317,7 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     [Then provide detailed paragraphs expanding on each section above]
     
-    ## Scene 5 - Product/Service Offering
+    ## Section 5 - Product/Service Offering
     
     ### Product/Service Features Table
     
@@ -6328,7 +6337,7 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     [Then provide detailed paragraphs expanding on each section above]
     
-    ## Scene 6 - Marketing & Sales Strategy
+    ## Section 6 - Marketing & Sales Strategy
     
     ### Marketing Channels Table
     
@@ -6349,7 +6358,7 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     [Then provide detailed paragraphs expanding on each section above]
     
-    ## Scene 7 - Financial Projections & Funding
+    ## Section 7 - Financial Projections & Funding
     
     ### Financial Projections Table (3-5 Years)
     
@@ -6373,7 +6382,7 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     [Then provide detailed paragraphs expanding on each section above]
     
-    ## Scene 8 - Operations, Risk Management & Implementation Timeline
+    ## Section 8 - Operations, Risk Management & Implementation Timeline
     
     ### Operations Structure Table
     
@@ -6411,31 +6420,31 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     ⚠️ **YOU MUST FOLLOW THIS EXACT STRUCTURE - NO EXCEPTIONS**:
     
-    1. **MANDATORY**: Create EXACTLY 8 scenes (Scene 1 through Scene 8) - NO MORE, NO LESS
-    2. **MANDATORY**: Each scene MUST start with a markdown table (use the exact table structure shown in the template above)
+    1. **MANDATORY**: Create EXACTLY 8 sections (Section 1 through Section 8) - NO MORE, NO LESS
+    2. **MANDATORY**: Each section MUST start with a markdown table (use the exact table structure shown in the template above)
     3. **MANDATORY**: After each table, provide 2-3 detailed paragraphs expanding on the table content
-    4. **MANDATORY**: Scene titles must be EXACTLY:
-       - "## Scene 1 - Executive Summary & Business Overview"
-       - "## Scene 2 - Company Description & Business Model"
-       - "## Scene 3 - Market Analysis & Research"
-       - "## Scene 4 - Competitive Analysis"
-       - "## Scene 5 - Product/Service Offering"
-       - "## Scene 6 - Marketing & Sales Strategy"
-       - "## Scene 7 - Financial Projections & Funding"
-       - "## Scene 8 - Operations, Risk Management & Implementation Timeline"
+    4. **MANDATORY**: Section titles must be EXACTLY:
+       - "## Section 1 - Executive Summary & Business Overview"
+       - "## Section 2 - Company Description & Business Model"
+       - "## Section 3 - Market Analysis & Research"
+       - "## Section 4 - Competitive Analysis"
+       - "## Section 5 - Product/Service Offering"
+       - "## Section 6 - Marketing & Sales Strategy"
+       - "## Section 7 - Financial Projections & Funding"
+       - "## Section 8 - Operations, Risk Management & Implementation Timeline"
     5. **MANDATORY**: Extract ALL information from the conversation history - replace ALL [Extract from conversation] placeholders with ACTUAL data
     6. **MANDATORY**: Use actual business name: {session_data.get('business_name', 'Your Business')}
     7. **MANDATORY**: Use actual industry: {session_data.get('industry', 'General Business')}
     8. **MANDATORY**: Use actual location: {session_data.get('location', 'United States')}
     9. **MANDATORY**: All tables must be properly formatted markdown tables with | separators
-    10. **MANDATORY**: DO NOT create traditional sections like "Executive Summary", "Company Description", etc. - ONLY use Scene 1-8 format
-    11. **MANDATORY**: DO NOT create sections beyond Scene 8 - the document MUST end after Scene 8
-    12. **MANDATORY**: Each scene should be 2-3 pages of content when formatted (tables + detailed paragraphs)
+    10. **MANDATORY**: DO NOT create traditional sections like "Executive Summary", "Company Description", etc. - ONLY use Section 1-8 format
+    11. **MANDATORY**: DO NOT create sections beyond Section 8 - the document MUST end after Section 8
+    12. **MANDATORY**: Each section should be 2-3 pages of content when formatted (tables + detailed paragraphs)
     13. **MANDATORY**: The total document should be 15-20 pages when formatted
     
     **OUTPUT FORMAT EXAMPLE**:
     ```
-    ## Scene 1 - Executive Summary & Business Overview
+    ## Section 1 - Executive Summary & Business Overview
     
     ### Business Plan Summary Table
     
@@ -6447,7 +6456,7 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     [2-3 detailed paragraphs here]
     
-    ## Scene 2 - Company Description & Business Model
+    ## Section 2 - Company Description & Business Model
     
     ### Company Overview Table
     
@@ -6458,27 +6467,27 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     [2-3 detailed paragraphs here]
     
-    [Continue for all 8 scenes]
+    [Continue for all 8 sections]
     ```
     
     **DO NOT OUTPUT**:
     - Traditional section headers like "Executive Summary", "Company Description", etc.
-    - Paragraphs without tables at the start of each scene
-    - More or fewer than 8 scenes
-    - Any content after Scene 8
+    - Paragraphs without tables at the start of each section
+    - More or fewer than 8 sections
+    - Any content after Section 8
     
     **IMPORTANT**: This must be a COMPLETE, PROFESSIONAL business plan document that could be presented to investors, banks, or partners. It should be comprehensive, well-researched, and demonstrate deep understanding of the business opportunity.
     
-    **LENGTH REQUIREMENT**: This document MUST be extensive and detailed. Aim for 15,000-25,000 words (approximately 15-20 pages when formatted). Each scene should have substantial content with:
-    - Tables at the start of each scene (as shown in template)
+    **LENGTH REQUIREMENT**: This document MUST be extensive and detailed. Aim for 15,000-25,000 words (approximately 15-20 pages when formatted). Each section should have substantial content with:
+    - Tables at the start of each section (as shown in template)
     - 2-3 detailed paragraphs after each table
     - Specific examples and data from conversation history
     - Comprehensive analysis
     - Professional formatting
     
-    **CRITICAL**: Do NOT create a brief summary. This is the FULL, COMPLETE business plan artifact in 8-scene table format. Every scene must be thoroughly developed with extensive detail.
+    **CRITICAL**: Do NOT create a brief summary. This is the FULL, COMPLETE business plan artifact in 8-section table format. Every section must be thoroughly developed with extensive detail.
     
-    Generate the complete business plan now in EXACTLY 8 scenes with tables. Make it comprehensive and detailed:
+    Generate the complete business plan now in EXACTLY 8 sections with tables. Make it comprehensive and detailed:
     """
     
     print(f"📝 Generating comprehensive business plan artifact (this may take 30-60 seconds)...")
@@ -6487,44 +6496,44 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     try:
         # Add system message to enforce format - MAXIMUM STRICTNESS
-        system_message = """You are a business plan generator. You MUST output documents in EXACTLY 8 scenes with tables.
+        system_message = """You are a business plan generator. You MUST output documents in EXACTLY 8 sections with tables.
 
 ⚠️⚠️⚠️ CRITICAL - YOUR OUTPUT WILL BE REJECTED IF IT DOESN'T MATCH THIS EXACT FORMAT ⚠️⚠️⚠️
 
 MANDATORY OUTPUT FORMAT - NO EXCEPTIONS:
 
 Your output MUST start with EXACTLY this text:
-## Scene 1 - Executive Summary & Business Overview
+## Section 1 - Executive Summary & Business Overview
 
 ### Business Plan Summary Table
 
 | Section | Highlights |
 |---------|------------|
 
-You MUST have EXACTLY these 8 scene headers (copy them EXACTLY):
-1. ## Scene 1 - Executive Summary & Business Overview
-2. ## Scene 2 - Company Description & Business Model
-3. ## Scene 3 - Market Analysis & Research
-4. ## Scene 4 - Competitive Analysis
-5. ## Scene 5 - Product/Service Offering
-6. ## Scene 6 - Marketing & Sales Strategy
-7. ## Scene 7 - Financial Projections & Funding
-8. ## Scene 8 - Operations, Risk Management & Implementation Timeline
+You MUST have EXACTLY these 8 section headers (copy them EXACTLY):
+1. ## Section 1 - Executive Summary & Business Overview
+2. ## Section 2 - Company Description & Business Model
+3. ## Section 3 - Market Analysis & Research
+4. ## Section 4 - Competitive Analysis
+5. ## Section 5 - Product/Service Offering
+6. ## Section 6 - Marketing & Sales Strategy
+7. ## Section 7 - Financial Projections & Funding
+8. ## Section 8 - Operations, Risk Management & Implementation Timeline
 
 ABSOLUTELY FORBIDDEN - DO NOT USE:
-❌ "Executive Summary" (without "Scene 1 -")
-❌ "Company Description" (without "Scene 2 -")
-❌ "Market Analysis" (without "Scene 3 -")
-❌ Any section header that doesn't start with "## Scene X -"
+❌ "Executive Summary" (without "Section 1 -")
+❌ "Company Description" (without "Section 2 -")
+❌ "Market Analysis" (without "Section 3 -")
+❌ Any section header that doesn't start with "## Section X -"
 
-If your output doesn't start with "## Scene 1 - Executive Summary & Business Overview", it will be REJECTED and you will be asked to regenerate.
+If your output doesn't start with "## Section 1 - Executive Summary & Business Overview", it will be REJECTED and you will be asked to regenerate.
 
-Each scene MUST:
+Each section MUST:
 - Start with the exact header format shown above
 - Have at least one markdown table immediately after the header
 - Include 2-3 detailed paragraphs after the table
 
-Generate the business plan NOW starting with "## Scene 1 - Executive Summary & Business Overview"."""
+Generate the business plan NOW starting with "## Section 1 - Executive Summary & Business Overview"."""
         
         response = await client.chat.completions.create(
             model="gpt-4o",
@@ -6542,18 +6551,18 @@ Generate the business plan NOW starting with "## Scene 1 - Executive Summary & B
         print(f"🔍 First 500 chars of generated artifact: {artifact_content[:500]}")
         
         # STRICT VALIDATION - Reject old format completely
-        starts_with_scene_1 = artifact_content.strip().startswith("## Scene 1 - Executive Summary & Business Overview")
-        scene_count = artifact_content.count("## Scene ")
-        has_scene_1 = "## Scene 1" in artifact_content
-        has_scene_8 = "## Scene 8" in artifact_content
+        starts_with_scene_1 = artifact_content.strip().startswith("## Section 1 - Executive Summary & Business Overview")
+        scene_count = artifact_content.count("## Section ")
+        has_scene_1 = "## Section 1" in artifact_content
+        has_scene_8 = "## Section 8" in artifact_content
         has_tables = "|" in artifact_content and "---" in artifact_content
         has_old_format = ("## Executive Summary" in artifact_content or 
-                         ("Executive Summary" in artifact_content and "## Scene 1" not in artifact_content) or
-                         ("Company Description" in artifact_content and "## Scene 2" not in artifact_content))
+                         ("Executive Summary" in artifact_content and "## Section 1" not in artifact_content) or
+                         ("Company Description" in artifact_content and "## Section 2" not in artifact_content))
         
         print(f"🔍 Validation: starts_with_scene_1={starts_with_scene_1}, scene_count={scene_count}, has_scene_1={has_scene_1}, has_scene_8={has_scene_8}, has_tables={has_tables}, has_old_format={has_old_format}")
         
-        # REJECT if it doesn't start with Scene 1 or has old format
+        # REJECT if it doesn't start with Section 1 or has old format
         if not artifact_content or len(artifact_content) < 5000 or not starts_with_scene_1 or scene_count != 8 or not has_scene_1 or not has_scene_8 or has_old_format:
             print(f"⚠️ Warning: Generated artifact doesn't match required format")
             print(f"   - Length: {len(artifact_content) if artifact_content else 0} characters")
@@ -6566,37 +6575,37 @@ Generate the business plan NOW starting with "## Scene 1 - Executive Summary & B
             ⚠️⚠️⚠️ CRITICAL FORMAT VALIDATION - YOUR OUTPUT WILL BE REJECTED IF IT DOESN'T MATCH ⚠️⚠️⚠️
             
             **YOUR OUTPUT MUST START WITH THIS EXACT TEXT**:
-            ## Scene 1 - Executive Summary & Business Overview
+            ## Section 1 - Executive Summary & Business Overview
             
             ### Business Plan Summary Table
             
             | Section | Highlights |
             |---------|------------|
             
-            **YOU MUST HAVE EXACTLY 8 SCENES**:
-            Scene 1 - Executive Summary & Business Overview
-            Scene 2 - Company Description & Business Model
-            Scene 3 - Market Analysis & Research
-            Scene 4 - Competitive Analysis
-            Scene 5 - Product/Service Offering
-            Scene 6 - Marketing & Sales Strategy
-            Scene 7 - Financial Projections & Funding
-            Scene 8 - Operations, Risk Management & Implementation Timeline
+            **YOU MUST HAVE EXACTLY 8 SECTIONS**:
+            Section 1 - Executive Summary & Business Overview
+            Section 2 - Company Description & Business Model
+            Section 3 - Market Analysis & Research
+            Section 4 - Competitive Analysis
+            Section 5 - Product/Service Offering
+            Section 6 - Marketing & Sales Strategy
+            Section 7 - Financial Projections & Funding
+            Section 8 - Operations, Risk Management & Implementation Timeline
             
             **FORBIDDEN - DO NOT INCLUDE**:
-            ❌ "Executive Summary" (without "Scene 1 -")
-            ❌ "Company Description" (without "Scene 2 -")
-            ❌ "Market Analysis" (without "Scene 3 -")
-            ❌ Any section that doesn't start with "## Scene X -"
+            ❌ "Executive Summary" (without "Section 1 -")
+            ❌ "Company Description" (without "Section 2 -")
+            ❌ "Market Analysis" (without "Section 3 -")
+            ❌ Any section that doesn't start with "## Section X -"
             
             **REQUIRED - YOU MUST INCLUDE**:
-            ✅ Each scene header must be "## Scene X - [Title]"
-            ✅ Each scene must have at least one markdown table immediately after the header
+            ✅ Each section header must be "## Section X - [Title]"
+            ✅ Each section must have at least one markdown table immediately after the header
             ✅ Tables must use | separators
             ✅ After each table, include 2-3 detailed paragraphs
             
-            If your output doesn't start with "## Scene 1 - Executive Summary & Business Overview", it will be rejected.
-            Generate the business plan NOW following this EXACT format. Start with Scene 1.
+            If your output doesn't start with "## Section 1 - Executive Summary & Business Overview", it will be rejected.
+            Generate the business plan NOW following this EXACT format. Start with Section 1.
             """
             response = await client.chat.completions.create(
                 model="gpt-4o",
@@ -6610,21 +6619,21 @@ Generate the business plan NOW starting with "## Scene 1 - Executive Summary & B
             artifact_content = response.choices[0].message.content
             
             # Final validation
-            final_scene_count = artifact_content.count("## Scene ")
-            final_has_scene_1 = "## Scene 1" in artifact_content
-            final_has_scene_8 = "## Scene 8" in artifact_content
+            final_scene_count = artifact_content.count("## Section ")
+            final_has_scene_1 = "## Section 1" in artifact_content
+            final_has_scene_8 = "## Section 8" in artifact_content
             final_has_tables = "|" in artifact_content and "---" in artifact_content
             final_has_old_format = ("## Executive Summary" in artifact_content or 
-                                   ("Executive Summary" in artifact_content and "## Scene 1" not in artifact_content))
+                                   ("Executive Summary" in artifact_content and "## Section 1" not in artifact_content))
             
             print(f"🔍 Final validation: scene_count={final_scene_count}, has_scene_1={final_has_scene_1}, has_scene_8={final_has_scene_8}, has_tables={final_has_tables}, has_old_format={final_has_old_format}")
             print(f"🔍 First 500 chars of final artifact: {artifact_content[:500]}")
             
             if final_scene_count != 8 or not final_has_scene_1 or not final_has_scene_8 or final_has_old_format:
-                print(f"⚠️ WARNING: Final artifact still doesn't match 8-scene format!")
+                print(f"⚠️ WARNING: Final artifact still doesn't match 8-section format!")
                 print(f"   - Scene count: {final_scene_count} (expected 8)")
-                print(f"   - Has Scene 1: {final_has_scene_1}")
-                print(f"   - Has Scene 8: {final_has_scene_8}")
+                print(f"   - Has Section 1: {final_has_scene_1}")
+                print(f"   - Has Section 8: {final_has_scene_8}")
                 print(f"   - Has old format: {final_has_old_format}")
                 # Force one more regeneration with even stricter prompt
                 print("🔄 Attempting final regeneration with maximum strictness...")
@@ -6632,7 +6641,7 @@ Generate the business plan NOW starting with "## Scene 1 - Executive Summary & B
                 
                 ⚠️⚠️⚠️ CRITICAL - YOUR OUTPUT MUST START WITH EXACTLY THIS TEXT ⚠️⚠️⚠️
                 
-                ## Scene 1 - Executive Summary & Business Overview
+                ## Section 1 - Executive Summary & Business Overview
                 
                 ### Business Plan Summary Table
                 
@@ -6640,21 +6649,21 @@ Generate the business plan NOW starting with "## Scene 1 - Executive Summary & B
                 |---------|------------|
                 | **Mission & Vision** | [ACTUAL DATA FROM CONVERSATION] |
                 
-                DO NOT use "Executive Summary" without "Scene 1 -"
-                DO NOT use "Company Description" without "Scene 2 -"
+                DO NOT use "Executive Summary" without "Section 1 -"
+                DO NOT use "Company Description" without "Section 2 -"
                 DO NOT use any traditional section headers
                 
-                You MUST have exactly 8 scenes:
-                - Scene 1 - Executive Summary & Business Overview
-                - Scene 2 - Company Description & Business Model
-                - Scene 3 - Market Analysis & Research
-                - Scene 4 - Competitive Analysis
-                - Scene 5 - Product/Service Offering
-                - Scene 6 - Marketing & Sales Strategy
-                - Scene 7 - Financial Projections & Funding
-                - Scene 8 - Operations, Risk Management & Implementation Timeline
+                You MUST have exactly 8 sections:
+                - Section 1 - Executive Summary & Business Overview
+                - Section 2 - Company Description & Business Model
+                - Section 3 - Market Analysis & Research
+                - Section 4 - Competitive Analysis
+                - Section 5 - Product/Service Offering
+                - Section 6 - Marketing & Sales Strategy
+                - Section 7 - Financial Projections & Funding
+                - Section 8 - Operations, Risk Management & Implementation Timeline
                 
-                Start generating NOW with "## Scene 1 - Executive Summary & Business Overview"
+                Start generating NOW with "## Section 1 - Executive Summary & Business Overview"
                 """
                 final_response = await client.chat.completions.create(
                     model="gpt-4o",
@@ -6669,34 +6678,34 @@ Generate the business plan NOW starting with "## Scene 1 - Executive Summary & B
                 print(f"🔍 Ultra-strict regeneration: First 500 chars: {artifact_content[:500]}")
                 
                 # Final check - if still wrong, raise error
-                ultra_starts_with_scene_1 = artifact_content.strip().startswith("## Scene 1 - Executive Summary & Business Overview")
+                ultra_starts_with_scene_1 = artifact_content.strip().startswith("## Section 1 - Executive Summary & Business Overview")
                 ultra_has_old = (
                     "## Executive Summary" in artifact_content or 
-                    ("Executive Summary" in artifact_content and "## Scene 1" not in artifact_content) or
-                    ("## Company Description" in artifact_content and "## Scene 2" not in artifact_content) or
-                    ("## Market Analysis" in artifact_content and "## Scene 3" not in artifact_content)
+                    ("Executive Summary" in artifact_content and "## Section 1" not in artifact_content) or
+                    ("## Company Description" in artifact_content and "## Section 2" not in artifact_content) or
+                    ("## Market Analysis" in artifact_content and "## Section 3" not in artifact_content)
                 )
                 
                 if not ultra_starts_with_scene_1 or ultra_has_old:
                     print(f"❌ CRITICAL ERROR: Even ultra-strict regeneration failed!")
-                    print(f"   Output starts with Scene 1: {ultra_starts_with_scene_1}")
+                    print(f"   Output starts with Section 1: {ultra_starts_with_scene_1}")
                     print(f"   Has old format: {ultra_has_old}")
-                    raise Exception("AI failed to generate business plan in required 8-scene table format after multiple attempts. The output is in the old format which is COMPLETELY FORBIDDEN. Old format has been removed from the system.")
+                    raise Exception("AI failed to generate business plan in required 8-section table format after multiple attempts. The output is in the old format which is COMPLETELY FORBIDDEN. Old format has been removed from the system.")
             
             if not final_has_tables:
                 print(f"⚠️ WARNING: Final artifact may not have proper table formatting")
         
         # FINAL VALIDATION - Reject old format completely before returning
-        final_starts_with_scene_1 = artifact_content.strip().startswith("## Scene 1 - Executive Summary & Business Overview")
+        final_starts_with_scene_1 = artifact_content.strip().startswith("## Section 1 - Executive Summary & Business Overview")
         final_has_old_format_check = (
             "## Executive Summary" in artifact_content or 
-            ("Executive Summary" in artifact_content and "## Scene 1" not in artifact_content) or
-            ("## Company Description" in artifact_content and "## Scene 2" not in artifact_content)
+            ("Executive Summary" in artifact_content and "## Section 1" not in artifact_content) or
+            ("## Company Description" in artifact_content and "## Section 2" not in artifact_content)
         )
         
         if not final_starts_with_scene_1 or final_has_old_format_check:
             print(f"❌ FINAL REJECTION: Artifact is in old format - COMPLETELY FORBIDDEN")
-            raise Exception("Business plan artifact is in old format which is COMPLETELY FORBIDDEN. Old format has been removed from the system. Only 8-scene table format is supported.")
+            raise Exception("Business plan artifact is in old format which is COMPLETELY FORBIDDEN. Old format has been removed from the system. Only 8-section table format is supported.")
         
         artifact_length = len(artifact_content) if artifact_content else 0
         print(f"✅ Business Plan Artifact generated: {artifact_length} characters (~{artifact_length // 2000} pages)")
