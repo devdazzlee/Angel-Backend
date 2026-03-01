@@ -474,6 +474,7 @@ class BudgetService:
         # Map header keywords to (category, subcategory)
         category_map = {
             'startup costs': ('expense', 'startup_cost'),
+            'monthly revenue projection': ('revenue', 'revenue'),
             'monthly operating expenses': ('expense', 'operating_expense'),
             'monthly payroll': ('expense', 'operating_expense'),
             'monthly cogs': ('expense', 'operating_expense'),

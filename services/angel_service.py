@@ -7,7 +7,16 @@ import asyncio
 from datetime import datetime
 from functools import lru_cache
 from typing import Optional, Dict, List, Any
-from utils.constant import ANGEL_SYSTEM_PROMPT
+from utils.constant import (
+    ANGEL_SYSTEM_PROMPT,
+    AFFIRMATION_SCALE,
+    CONSTRUCTIVE_FEEDBACK_SCALE,
+    DEFAULT_AFFIRMATION_INTENSITY,
+    DEFAULT_CONSTRUCTIVE_FEEDBACK_INTENSITY,
+    CONFIDENCE_THRESHOLD,
+    CONFIDENCE_MAX_RETRIES,
+    BUSINESS_TYPE_GROUNDING_PROMPT,
+)
 import logging
 from schemas.budget_schemas import RevenueStreamInitial
 
@@ -219,7 +228,7 @@ TAG_PROMPT = """CRITICAL: You MUST include a machine-readable tag in EVERY respo
 Examples:
 - [[Q:GKY.01]] What's your name and preferred name or nickname?
 - [[Q:GKY.02]] Have you started a business before?
-- [[Q:GKY.03]] What motivates you to start this business?
+- [[Q:GKY.03]] What kind of business are you trying to build?
 - [[Q:BUSINESS_PLAN.01]] What is your business idea?
 - [[Q:BUSINESS_PLAN.19]] What is your revenue model?
 
@@ -1866,19 +1875,7 @@ def _build_gky_recap(session_data: dict, history: list) -> str:
 
     bullets: list[str] = []
 
-    # --- Motivation (GKY.03) ---
-    motivation = _get("motivation").strip().lower()
-    if motivation:
-        if any(w in motivation for w in ["money", "financ", "income", "profit", "wealth"]):
-            bullets.append("You're motivated to start a business primarily for financial reasons.")
-        elif any(w in motivation for w in ["passion", "love", "enjoy", "dream"]):
-            bullets.append("You're driven by a passion to turn something you love into a business.")
-        elif any(w in motivation for w in ["freedom", "independ", "flex"]):
-            bullets.append("You're seeking the freedom and independence that comes with running your own business.")
-        else:
-            bullets.append(f"Your motivation: {motivation[:120]}.")
-
-    # --- Business type (GKY.04) ---
+    # --- Business type (GKY.03) ---
     btype = _get("business_type").strip().lower()
     if btype:
         if "small" in btype:
@@ -1897,7 +1894,7 @@ def _build_gky_recap(session_data: dict, history: list) -> str:
     elif has_exp is True or (isinstance(has_exp, str) and has_exp.lower() in ["yes", "true"]):
         bullets.append("You have prior business experience to draw on.")
 
-    # --- Biggest concern (GKY.06) ---
+    # --- Biggest concern (GKY.05) ---
     concern = _get("biggest_concern").strip()
     if concern and len(concern) > 10:
         bullets.append(f"Your biggest concern: {concern[:150]}.")
@@ -1952,7 +1949,7 @@ As we go through each question, I'll provide both supportive encouragement and c
         "transition_phase": "GKY_TO_BUSINESS_PLAN",
         "patch_session": {
             "current_phase": "BUSINESS_PLAN_INTRO",  # Intermediate phase before actual questions
-            "asked_q": "GKY.06_ACK",  # Keep on GKY until user confirms ready
+            "asked_q": "GKY.05_ACK",  # Keep on GKY until user confirms ready
             "answered_count": session_data.get("answered_count", 0)
         },
         "show_accept_modify": button_detection.get("show_buttons", False),
@@ -2155,7 +2152,7 @@ async def generate_estimated_expenses_from_business_plan(session_data, history):
             for msg in recent_messages
         ])
     
-    prompt = f"""You are a financial planning expert. Based on the following business plan information, generate a realistic budget for Year 1 organized into two sections: Startup Costs and Monthly Operating Expenses.
+    prompt = f"""You are a financial planning expert. Based on the following business plan information, generate a realistic Year 1 budget organized into three sections: Startup Costs, Monthly Revenue Projection, and Monthly Operating Expenses.
 
 BUSINESS CONTEXT:
 - Business Name: {business_name}
@@ -2167,17 +2164,22 @@ BUSINESS PLAN INFORMATION (from the user's business planning exercise):
 {business_plan_context[:3000]}
 
 CRITICAL INSTRUCTIONS:
-1. Carefully read the business plan information above to extract SPECIFIC costs the user has discussed
+1. Carefully read the business plan information above to extract SPECIFIC costs, revenue streams, and pricing the user has discussed
 2. Use actual numbers, business details, and plans mentioned in the conversation
 3. Generate realistic amounts appropriate for {location} and the {industry} industry
-4. Include industry-specific expenses relevant to this specific business
+4. Include industry-specific items relevant to this specific business
 
-FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS (with these exact section headers):
+FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS (with these exact section headers in this exact order):
 
 **Startup Costs**
 - Business Registration & Licenses: $X,XXX (One-time filing and license fees)
 - Equipment & Tools: $X,XXX (Initial equipment purchases)
 - [Add 4-8 more startup cost line items specific to this business]
+
+**Monthly Revenue Projection**
+- [Primary Revenue Stream Name]: $X,XXX (Description of this revenue source)
+- [Secondary Revenue Stream Name]: $X,XXX (Description of this revenue source)
+- [Add 2-5 more revenue streams specific to this business]
 
 **Monthly Operating Expenses**
 - Rent / Workspace: $X,XXX (Monthly rent or co-working)
@@ -2188,11 +2190,12 @@ FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS (with these exact section headers):
 - [Add 4-8 more monthly operating expense line items specific to this business]
 
 IMPORTANT:
-- Extract actual costs and plans from the business plan conversation above
+- Extract actual costs, pricing, and revenue details from the business plan conversation above
 - For Startup Costs: include one-time pre-launch expenses (registration, equipment, branding, initial inventory, etc.)
+- For Monthly Revenue Projection: include each revenue stream with realistic monthly projected amounts based on the user's pricing and target market
 - For Monthly Operating Expenses: include ALL recurring monthly costs (rent, salaries, payroll, contractors, marketing, software, utilities, COGS, materials, etc.)
 - Amounts must be realistic for {location}
-- Return ONLY the formatted list with the two section headers, no additional text."""
+- Return ONLY the formatted list with the three section headers, no additional text."""
 
     try:
         response = await client.chat.completions.create(
@@ -2217,6 +2220,11 @@ IMPORTANT:
 - Website & Software Setup: $2,000 (Website development and initial software)
 - Insurance (Initial Policy): $800 (First insurance premium)
 - Office / Workspace Setup: $2,000 (Furnishing and setup costs)
+
+**Monthly Revenue Projection**
+- Primary Revenue Stream: $5,000 (Main source of income)
+- Secondary Revenue Stream: $2,000 (Additional revenue source)
+- Other Income: $500 (Miscellaneous income)
 
 **Monthly Operating Expenses**
 - Rent / Workspace: $1,500 (Monthly office or workspace rental)
@@ -2522,8 +2530,8 @@ Let's focus on answering the current question first.""",
         # Check if this looks like a rating response (numbers separated by commas)
         rating_pattern = r'^\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+$'
         if re.match(rating_pattern, user_content.strip()):
-            # Only allow rating responses for GKY.05 (skills rating question)
-            if asked_q != "GKY.05":
+            # Only allow rating responses for GKY.04 (skills rating question)
+            if asked_q != "GKY.04":
                 return {
                     "reply": f"""I see you've provided a rating response, but the current question is asking about something different.
 
@@ -2612,7 +2620,7 @@ Let's continue with the current question.
     
     # Validate that asked_q is in the correct format and sequence
     if current_phase == "GKY":
-        if not asked_q.startswith("GKY.") and asked_q != "GKY.06_ACK":
+        if not asked_q.startswith("GKY.") and asked_q != "GKY.05_ACK":
             return {
                 "reply": f"""I need to ensure we're following the proper Get to Know You sequence. Please provide an answer to the current question so we can continue systematically building your business profile.
 
@@ -2642,6 +2650,144 @@ Let's continue with the current business planning question.""",
             }
     
     return None
+
+
+# ── Tone & grounding helpers (hallucination mitigation) ─────────────────────
+
+def build_tone_directive(session_data: dict | None) -> str:
+    """Build a system-prompt snippet that calibrates affirmation and
+    constructive-feedback intensity based on session / global config.
+
+    Includes the global guardrails and design principle from the
+    Affirmation and Constructive Feedback scale documents."""
+
+    bc = (session_data or {}).get("business_context", {}) or {}
+    aff = bc.get("affirmation_intensity", DEFAULT_AFFIRMATION_INTENSITY)
+    cfb = bc.get("constructive_feedback_intensity", DEFAULT_CONSTRUCTIVE_FEEDBACK_INTENSITY)
+
+    aff = max(0, min(10, int(aff)))
+    cfb = max(0, min(10, int(cfb)))
+
+    aff_desc = AFFIRMATION_SCALE.get(aff, AFFIRMATION_SCALE[5])
+    cfb_desc = CONSTRUCTIVE_FEEDBACK_SCALE.get(cfb, CONSTRUCTIVE_FEEDBACK_SCALE[5])
+
+    return f"""
+═══════════════ RESPONSE TONE CALIBRATION ═══════════════
+
+── Affirmation intensity: {aff}/10 ──
+{aff_desc}
+
+AFFIRMATION GUARDRAILS (always on):
+• Never exaggerate success likelihood.
+• Never validate clearly flawed assumptions as "great".
+• Must always be honest, grounded, and aligned to the user's input.
+
+── Constructive feedback intensity: {cfb}/10 ──
+{cfb_desc}
+
+CONSTRUCTIVE FEEDBACK GUARDRAILS (always on):
+• Critique assumptions, not the founder.
+• Pair every risk or weakness with specific improvement guidance.
+• Frame feedback as optimization, not correction.
+• Never insult, dismiss, or condescend.
+• Emphasize learning, validation, and iteration.
+
+🎯 KEY DESIGN PRINCIPLE:
+Every critique MUST end with a way forward.
+Angel should NEVER leave the user thinking "This won't work" or
+"I'm doing this wrong."
+Instead the user should feel:
+  → "Here's how to make this stronger"
+  → "I know what to do next"
+"""
+
+
+def build_business_grounding(session_data: dict | None, history: list) -> str:
+    """Return a system-prompt snippet that grounds the LLM in the user's
+    declared business type so it never hallucinates a different industry.
+
+    Pulls business_type from session context (GKY.03 answer) and
+    business_name from BP.01 answer when available."""
+
+    bc = (session_data or {}).get("business_context", {}) or {}
+    business_type = bc.get("business_type", "")
+    business_name = bc.get("business_name", "")
+    user_name = bc.get("user_name", "the user")
+
+    if not business_type:
+        ctx = extract_business_context_from_history(history)
+        business_type = ctx.get("business_type", "")
+        if not business_name:
+            business_name = ctx.get("business_name", "")
+
+    if not business_type:
+        return ""
+
+    bp01_line = ""
+    if business_name and business_name not in ("Your Business", ""):
+        bp01_line = (
+            f'Their business name (from BP.01) is: "{business_name}".\n'
+            f"Use this name when referencing their business in responses."
+        )
+
+    return BUSINESS_TYPE_GROUNDING_PROMPT.format(
+        business_type=business_type,
+        user_name=user_name,
+        bp01_context=bp01_line,
+    )
+
+
+def score_response_confidence(reply: str, business_type: str) -> float:
+    """Heuristic confidence score (0.0–1.0) measuring how relevant the
+    reply is to the declared business type.
+
+    The score is computed WITHOUT an extra LLM call — it uses keyword overlap
+    and contradiction detection against the known business type."""
+
+    if not business_type or not reply:
+        return 1.0
+
+    bt_lower = business_type.lower()
+    reply_lower = reply.lower()
+
+    bt_keywords = set(re.findall(r"[a-z]{3,}", bt_lower))
+    bt_keywords.discard("business")
+    bt_keywords.discard("the")
+    bt_keywords.discard("and")
+    bt_keywords.discard("for")
+
+    if not bt_keywords:
+        return 1.0
+
+    reply_words = set(re.findall(r"[a-z]{3,}", reply_lower))
+    overlap = bt_keywords & reply_words
+    keyword_score = len(overlap) / len(bt_keywords) if bt_keywords else 1.0
+
+    CONTRADICTING_PAIRS = [
+        ({"restaurant", "food", "dining", "cafe", "bakery", "catering"},
+         {"software", "saas", "app", "tech", "platform", "digital"}),
+        ({"plumbing", "plumber", "pipes", "drain", "water", "heating"},
+         {"entertainment", "music", "film", "gaming", "media", "streaming"}),
+        ({"consulting", "advisory", "coaching", "mentoring"},
+         {"manufacturing", "factory", "production", "warehouse"}),
+        ({"ecommerce", "online store", "retail", "shop"},
+         {"construction", "building", "contractor", "renovation"}),
+    ]
+
+    penalty = 0.0
+    for group_a, group_b in CONTRADICTING_PAIRS:
+        bt_in_a = bool(bt_keywords & group_a)
+        bt_in_b = bool(bt_keywords & group_b)
+        reply_in_a = bool(reply_words & group_a)
+        reply_in_b = bool(reply_words & group_b)
+
+        if (bt_in_a and reply_in_b and not reply_in_a) or \
+           (bt_in_b and reply_in_a and not reply_in_b):
+            penalty += 0.4
+
+    score = max(0.0, min(1.0, 0.5 + keyword_score * 0.5 - penalty))
+    return round(score, 2)
+
 
 async def get_angel_reply(user_msg, history, session_data=None):
     import time
@@ -2977,19 +3123,18 @@ Do NOT include question numbers, progress percentages, or step counts in your re
         }
 
     # Check if user just answered the final GKY question BEFORE generating AI response
-    # GKY has 6 questions (GKY.01 through GKY.06) — trigger completion on the last one
+    # GKY has 5 questions (GKY.01 through GKY.05) — trigger completion on the last one
     if session_data and session_data.get("current_phase") == "GKY":
         current_tag = session_data.get("asked_q", "")
         if current_tag and current_tag.startswith("GKY."):
             try:
                 question_num = int(current_tag.split(".")[1])
-                # Check if user just answered the final GKY question (06)
-                if (question_num >= 6 and 
+                # Check if user just answered the final GKY question (05)
+                if (question_num >= 5 and 
                     not current_tag.endswith("_ACK") and
                     len(user_content.strip()) > 0):
                     
                     print(f"🎯 User answered final GKY question ({question_num}) - triggering completion immediately BEFORE AI response")
-                    # Trigger completion immediately — use the hardcoded template, NOT the AI
                     return await handle_gky_completion(session_data, history)
             except (ValueError, IndexError):
                 pass
@@ -3370,7 +3515,16 @@ CRITICAL:
         {"role": "system", "content": TAG_PROMPT},
         {"role": "system", "content": FORMATTING_INSTRUCTION}
     ]
-    
+
+    # ── Business-type grounding (hallucination prevention) ──
+    grounding = build_business_grounding(session_data, history)
+    if grounding:
+        msgs.append({"role": "system", "content": grounding})
+
+    # ── Tone calibration (affirmation + constructive feedback scales) ──
+    tone = build_tone_directive(session_data)
+    msgs.append({"role": "system", "content": tone})
+
     # Only add web search prompt if web search was conducted
     if search_results:
         msgs.append({"role": "system", "content": WEB_SEARCH_PROMPT})
@@ -3435,10 +3589,10 @@ DO NOT repeat "{asked_q}" - the user has already answered it.
         if "." in asked_q:
             try:
                 current_num = int(asked_q.split(".")[1])
-                # Prevent going beyond GKY.06 (last GKY question)
-                if current_phase == "GKY" and current_num >= 6:
-                    # Don't increment beyond 06 for GKY
-                    next_question_num = "06"
+                # Prevent going beyond GKY.05 (last GKY question)
+                if current_phase == "GKY" and current_num >= 5:
+                    # Don't increment beyond 05 for GKY
+                    next_question_num = "05"
                 else:
                     next_question_num = f"{current_num + 1:02d}"
             except (ValueError, IndexError):
@@ -3520,9 +3674,50 @@ CRITICAL INSTRUCTIONS:
     )
 
     reply_content = response.choices[0].message.content
-    
+
+    # ── Confidence scoring (hallucination mitigation) ──
+    bc = (session_data or {}).get("business_context", {}) or {}
+    declared_business_type = bc.get("business_type", "")
+    if not declared_business_type:
+        ctx = extract_business_context_from_history(history)
+        declared_business_type = ctx.get("business_type", "")
+
+    if declared_business_type:
+        conf = score_response_confidence(reply_content, declared_business_type)
+        logger.info("Confidence score: %.2f for business_type='%s'", conf, declared_business_type)
+
+        if conf < CONFIDENCE_THRESHOLD:
+            logger.warning(
+                "Low confidence (%.2f < %.2f) — regenerating with stronger grounding",
+                conf, CONFIDENCE_THRESHOLD,
+            )
+            stronger_grounding = (
+                f"\n\n🚨 CRITICAL CORRECTION: Your previous draft was scored as potentially "
+                f"irrelevant to the user's declared business type: \"{declared_business_type}\". "
+                f"Regenerate your response ensuring EVERY example, insight, and piece of "
+                f"advice is directly applicable to a '{declared_business_type}' business. "
+                f"Do NOT reference any other industry."
+            )
+            msgs.append({"role": "system", "content": stronger_grounding})
+            msgs.append({"role": "assistant", "content": reply_content})
+            msgs.append({"role": "user", "content": "Please revise your response to be specifically relevant to my business type."})
+
+            for _retry in range(CONFIDENCE_MAX_RETRIES):
+                retry_resp = await client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=msgs,
+                    temperature=0.5,
+                    max_tokens=1000,
+                    stream=False,
+                )
+                reply_content = retry_resp.choices[0].message.content
+                new_conf = score_response_confidence(reply_content, declared_business_type)
+                logger.info("Retry confidence score: %.2f", new_conf)
+                if new_conf >= CONFIDENCE_THRESHOLD:
+                    break
+
     # Clean up extra newlines (keep "Question X of 45" format for Business Plan)
-    reply_content = re.sub(r'\n{3,}', '\n\n', reply_content)  # Clean up 3+ newlines to 2
+    reply_content = re.sub(r'\n{3,}', '\n\n', reply_content)
     
     # GUARDRAIL: Ensure new question is generated 100% of the time after previous question completes
     # This is critical for Business Planning Questionnaire - Angel must always generate next question
@@ -5787,13 +5982,10 @@ def extract_business_context_from_history(history):
     for i, msg in enumerate(history):
         if msg["role"] == "assistant":
             content = msg["content"]
-            # GKY questions (new sequential set: GKY.01-GKY.06)
-            if "[[Q:GKY.04]]" in content:  # "What kind of business are you trying to build?"
+            # GKY questions (sequential set: GKY.01-GKY.05)
+            if "[[Q:GKY.03]]" in content:  # "What kind of business are you trying to build?"
                 gky_question_indices["business_type"] = i
-                print(f"🔍 DEBUG - Found GKY.04 (business type question) at index {i}")
-            elif "[[Q:GKY.03]]" in content:  # "What motivates you to start this business?"
-                gky_question_indices["motivation"] = i
-                print(f"🔍 DEBUG - Found GKY.03 (motivation question) at index {i}")
+                print(f"🔍 DEBUG - Found GKY.03 (business type question) at index {i}")
             # Business Plan Question 1 - Business Name (HIGHEST PRIORITY)
             elif "[[Q:BUSINESS_PLAN.01]]" in content or "[[Q:BP.01]]" in content:
                 gky_question_indices["business_name"] = i
@@ -5824,12 +6016,12 @@ def extract_business_context_from_history(history):
                     context_weights["business_name"] = 100
                     print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: BP.01 business name answer (EXACT): '{business_name_answer}' (weight 100)")
             
-            # Extract business type from GKY.04 answer ("What kind of business are you trying to build?")
+            # Extract business type from GKY.03 answer ("What kind of business are you trying to build?")
             if is_gky_business_type_answer and len(content.strip()) > 2:
                 business_type_answer = content.strip()
                 business_context["business_type"] = business_type_answer
                 context_weights["business_type"] = 100
-                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: GKY.04 business type answer: '{business_type_answer}' (weight 100)")
+                print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: GKY.03 business type answer: '{business_type_answer}' (weight 100)")
             
             # Extract sales location from BP.08 answer (HIGHEST PRIORITY)
             if is_bp_sales_location_answer and len(content.strip()) > 2:

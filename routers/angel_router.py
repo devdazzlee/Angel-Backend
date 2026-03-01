@@ -14,7 +14,11 @@ from utils.progress import parse_tag, TOTALS_BY_PHASE, calculate_phase_progress,
 from middlewares.auth import verify_auth_token
 from fastapi.middleware.cors import CORSMiddleware
 from db.supabase import supabase
-from utils.constant import ANGEL_SYSTEM_PROMPT
+from utils.constant import (
+    ANGEL_SYSTEM_PROMPT,
+    DEFAULT_AFFIRMATION_INTENSITY,
+    DEFAULT_CONSTRUCTIVE_FEEDBACK_INTENSITY,
+)
 from openai import AsyncOpenAI
 import re
 import os
@@ -47,6 +51,8 @@ DEFAULT_BUSINESS_CONTEXT = {
     "industry": "General Business",
     "location": "United States",
     "business_type": "Startup",
+    "affirmation_intensity": DEFAULT_AFFIRMATION_INTENSITY,
+    "constructive_feedback_intensity": DEFAULT_CONSTRUCTIVE_FEEDBACK_INTENSITY,
 }
 
 
@@ -259,6 +265,40 @@ async def sync_progress(request: Request, session_id: str, payload: SyncProgress
         }
     }
 
+
+@router.patch("/sessions/{session_id}/response-config")
+async def update_response_config(session_id: str, request: Request):
+    """Update affirmation and constructive-feedback intensity for this session.
+
+    Body (JSON):
+      { "affirmation_intensity": 0-10, "constructive_feedback_intensity": 0-10 }
+    """
+    user_id = request.state.user["id"]
+    session = await get_session(session_id, user_id)
+    body = await request.json()
+
+    bc = session.get("business_context", {}) or {}
+    changed = False
+
+    for key in ("affirmation_intensity", "constructive_feedback_intensity"):
+        if key in body:
+            val = max(0, min(10, int(body[key])))
+            bc[key] = val
+            changed = True
+
+    if changed:
+        await patch_session(session_id, {"business_context": bc})
+
+    return {
+        "success": True,
+        "message": "Response config updated",
+        "result": {
+            "affirmation_intensity": bc.get("affirmation_intensity", DEFAULT_AFFIRMATION_INTENSITY),
+            "constructive_feedback_intensity": bc.get("constructive_feedback_intensity", DEFAULT_CONSTRUCTIVE_FEEDBACK_INTENSITY),
+        },
+    }
+
+
 @router.post("/sessions/{session_id}/chat")
 async def post_chat(session_id: str, request: Request, payload: ChatRequestSchema):
     user_id = request.state.user["id"]
@@ -389,17 +429,15 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         # message before we actually switch to BUSINESS_PLAN.
         # handle_gky_completion already set patch_session to:
         #   current_phase = "BUSINESS_PLAN_INTRO"
-        #   asked_q       = "GKY.06_ACK"
-        # The generic patch_session block above (line 340-342) already persisted
-        # that.  Just make sure the in-memory session matches:
+        #   asked_q       = "GKY.05_ACK"
         session["current_phase"] = "BUSINESS_PLAN_INTRO"
-        session["asked_q"] = "GKY.06_ACK"
+        session["asked_q"] = "GKY.05_ACK"
         await patch_session(session_id, {
             "current_phase": "BUSINESS_PLAN_INTRO",
-            "asked_q": "GKY.06_ACK",
+            "asked_q": "GKY.05_ACK",
         })
 
-        # Return progress showing GKY complete (6/6, 100%)
+        # Return progress showing GKY complete (5/5, 100%)
         return {
             "success": True,
             "message": "GKY completed - showing transition message",
@@ -407,17 +445,17 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
                 "reply": assistant_reply,
                 "progress": {
                     "phase": "GKY",
-                    "answered": 6,
-                    "total": 6,
+                    "answered": 5,
+                    "total": 5,
                     "percent": 100,
-                    "asked_q": "GKY.06",
+                    "asked_q": "GKY.05",
                     "overall_progress": {
-                        "answered": 6,
-                        "total": 51,
-                        "percent": 12,
+                        "answered": 5,
+                        "total": 50,
+                        "percent": 10,
                         "phase_breakdown": {
-                            "gky_completed": 6,
-                            "gky_total": 6,
+                            "gky_completed": 5,
+                            "gky_total": 5,
                             "bp_completed": 0,
                             "bp_total": 45,
                         }
@@ -748,7 +786,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
             "percent": combined_progress["percent"],
             "phase_breakdown": combined_progress.get("phase_breakdown", {
                 "gky_completed": 0,
-                "gky_total": 6,
+                "gky_total": 5,
                 "bp_completed": 0,
                 "bp_total": 45
             })
@@ -855,20 +893,18 @@ async def patch_session_context_from_response(session_id, response_content, tag,
     if not tag or not tag.startswith("GKY."):
         return
 
-    # Extract key information based on GKY question (GKY.01-GKY.06)
+    # Extract key information based on GKY question (GKY.01-GKY.05)
     new_fields = {}
     
     if tag == "GKY.01":  # Name and preferred name
         new_fields["user_name"] = response_content.strip()
     elif tag == "GKY.02":  # Have you started a business before?
         new_fields["has_business_experience"] = "yes" in response_content.lower()
-    elif tag == "GKY.03":  # What motivates you to start this business?
-        new_fields["motivation"] = response_content.strip()
-    elif tag == "GKY.04":  # What kind of business are you trying to build?
+    elif tag == "GKY.03":  # What kind of business are you trying to build?
         new_fields["business_type"] = response_content.strip()
-    elif tag == "GKY.05":  # Skills comfort level
+    elif tag == "GKY.04":  # Skills comfort level
         new_fields["skills_assessment"] = response_content.strip()
-    elif tag == "GKY.06":  # Greatest concern about starting a business
+    elif tag == "GKY.05":  # Greatest concern about starting a business
         new_fields["biggest_concern"] = response_content.strip()
         
     if not new_fields:
