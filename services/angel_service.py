@@ -683,18 +683,11 @@ async def should_show_accept_modify_buttons(ai_response: str, user_last_input: s
     )
     
     if has_accept_modify_tag:
-        # AI explicitly requested Accept/Modify buttons (section summary, etc.)
         should_show = True
         reason = "AI requested Accept/Modify buttons"
     elif is_command_request or is_draft_response:
-        # Only show buttons for Draft commands, not Support or Scrapping
-        if user_input_lower == "draft":
-            should_show = not is_next_question
-            reason = "Draft command response"
-        else:
-            # Support and Scrapping commands should not show Accept/Modify buttons
-            should_show = False
-            reason = f"{user_input_lower.title()} command - guidance provided"
+        should_show = True
+        reason = f"{user_input_lower.title()} command response — user must Accept or Modify"
     elif is_phase_completion:
         # Show buttons for phase completions/transitions
         should_show = True
@@ -729,6 +722,49 @@ async def should_show_accept_modify_buttons(ai_response: str, user_last_input: s
         "content_length": len(ai_response)
     }
 
+async def _generate_auto_research_fallback(
+    detected_tag: str,
+    business_name: str,
+    industry: str,
+    business_type: str,
+    location: str,
+    session_data: dict,
+    history: list,
+) -> str:
+    """When web-research fails for an auto-research question, use the LLM's
+    own knowledge plus the user's conversation history to produce useful content
+    so the user is never left at a dead end."""
+    tag_to_prompt = {
+        "BUSINESS_PLAN.11": f"List 3-5 real competitors for a {business_type} business in the {industry} industry in {location}. For each, state their strengths and weaknesses.",
+        "BUSINESS_PLAN.12": f"List 3-5 current industry trends affecting {industry} businesses like {business_name} in {location}.",
+        "BUSINESS_PLAN.17": f"List the short-term operational needs (first 3-6 months) for a {business_type} {industry} business in {location}, including staffing, space, equipment, and technology.",
+        "BUSINESS_PLAN.23": f"List the short-term marketing needs and estimated budget for a {business_type} {industry} business launching in {location}.",
+        "BUSINESS_PLAN.26": f"List the specific permits and licenses required to legally operate a {business_type} {industry} business in {location}, including the issuing authority and estimated cost.",
+        "BUSINESS_PLAN.27": f"List the recommended insurance policies for a {business_type} {industry} business in {location}, including coverage type, what it protects, and estimated annual cost.",
+        "BUSINESS_PLAN.34": f"List the main startup and operating costs for a {business_type} {industry} business in {location} with realistic dollar ranges.",
+        "BUSINESS_PLAN.35": f"Create a realistic 1-5 year scaling plan for {business_name}, a {business_type} {industry} business in {location}, with specific milestones for years 1-2 and years 3-5.",
+        "BUSINESS_PLAN.42": f"List 4-6 potential challenges or risks for {business_name}, a {business_type} {industry} business in {location}, and provide a specific contingency plan for each.",
+    }
+    prompt = tag_to_prompt.get(
+        detected_tag,
+        f"Provide detailed, actionable content for a {business_type} {industry} business in {location}."
+    )
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": f"You are a senior business analyst. {prompt}\n\nBe specific — use real names, real data, real dollar ranges. Format with clear sections and bullet points."}],
+            temperature=0.3,
+            max_tokens=800,
+            timeout=25.0,
+        )
+        content = response.choices[0].message.content or ""
+        label = tag_to_prompt.get(detected_tag, "Research").split(".")[0]
+        return f"\n\n🔍 **{business_name} — Suggested Plan:**\n\n{content}\n\nPlease review and let me know if you'd like to adjust anything."
+    except Exception as exc:
+        print(f"⚠️ Fallback generation also failed for {detected_tag}: {exc}")
+        return "\n\nPlease share what you know about this topic, and I'll incorporate it into your business plan."
+
+
 async def conduct_web_search(query, fast_mode: bool = False):
     """Generate research-quality content using AI knowledge base
     
@@ -754,7 +790,53 @@ Include key points and current information. Keep response brief and actionable."
             timeout = 5.0  # Shorter timeout for fast mode
             max_tokens = 400  # Shorter response
         else:
-            # Research prompt that works with GPT-4o's knowledge (not asking it to browse)
+            query_lower = query.lower()
+            is_permits_licenses = any(kw in query_lower for kw in ["permit", "license", "zoning", "regulatory"])
+            is_insurance = any(kw in query_lower for kw in ["insurance", "liability", "property insurance"])
+            is_costs = any(kw in query_lower for kw in ["startup cost", "main cost", "expense", "operating cost"])
+            is_scaling = any(kw in query_lower for kw in ["scaling", "growth plan", "expansion strategy", "long-term goals"])
+            is_contingency = any(kw in query_lower for kw in ["contingency", "risk management", "challenges", "obstacles"])
+
+            if is_permits_licenses:
+                numbered_sections = (
+                    "1. **Required Permits & Licenses**: List each specific permit/license, the issuing authority, and estimated cost/timeline\n"
+                    "2. **Actionable insights**: Step-by-step recommendations for obtaining them\n"
+                    "3. **Potential Service Providers**: Name real companies/platforms that help businesses obtain permits, licenses, and stay compliant (e.g., LegalZoom, MyCorporation). Include their strengths and weaknesses."
+                )
+            elif is_insurance:
+                numbered_sections = (
+                    "1. **Recommended Policies**: List each specific insurance type, what it covers, and estimated annual cost range\n"
+                    "2. **Actionable insights**: Practical recommendations for selecting the right coverage\n"
+                    "3. **Potential Service Providers**: Name real insurance providers or brokers relevant to this business type. Include their strengths and coverage specialties."
+                )
+            elif is_costs:
+                numbered_sections = (
+                    "1. **Specific findings**: Name real cost categories with real-world dollar ranges\n"
+                    "2. **Cost benchmarks**: Include real-world cost ranges and comparisons from similar businesses\n"
+                    "3. **Actionable insights**: Practical recommendations for managing and reducing costs"
+                )
+            elif is_scaling:
+                numbered_sections = (
+                    "1. **Year 1-2 Milestones**: Specific, measurable targets for the first two years (revenue, customers, team size, operations)\n"
+                    "2. **Year 3-5 Growth Strategy**: Concrete expansion plans — new markets, product lines, partnerships, and operational scaling\n"
+                    "3. **Key Resources Needed**: What the business needs to scale — hiring, technology, funding, infrastructure\n"
+                    "4. **Actionable Next Steps**: Immediate actions the founder should take to prepare for scaling"
+                )
+            elif is_contingency:
+                numbered_sections = (
+                    "1. **Potential Risks & Challenges**: List 4-6 specific, realistic risks this business type faces (financial, operational, competitive, regulatory, market)\n"
+                    "2. **Contingency Plan for Each Risk**: For every risk listed, provide a concrete mitigation strategy and action steps\n"
+                    "3. **Early Warning Signs**: Indicators the founder should monitor to catch problems early\n"
+                    "4. **Resources & Support**: Tools, advisors, or services that can help manage these risks"
+                )
+            else:
+                numbered_sections = (
+                    "1. **Specific findings**: Name real companies, real trends, real data points\n"
+                    "2. **Market data**: Include market size, growth rates, and industry statistics where relevant\n"
+                    "3. **Actionable insights**: Practical recommendations based on the research\n"
+                    "4. **Competitive landscape**: Name actual competitors with specific strengths and weaknesses"
+                )
+
             search_prompt = f"""You are a senior business research analyst providing a detailed analysis. 
 Topic: {query}
 
@@ -762,10 +844,7 @@ IMPORTANT: Provide SPECIFIC, DETAILED information based on your knowledge. Do NO
 Do NOT give generic placeholder names like "Competitor A" or "Company X" - provide REAL company names and data.
 
 Provide a comprehensive analysis with:
-1. **Specific findings**: Name real companies, real trends, real data points
-2. **Market data**: Include market size, growth rates, and industry statistics where relevant
-3. **Actionable insights**: Practical recommendations based on the research
-4. **Competitive landscape**: Name actual competitors with specific strengths and weaknesses
+{numbered_sections}
 
 Format your response with clear sections and bullet points. Be specific and data-driven."""
             timeout = 30.0  # Generous timeout for thorough research
@@ -1919,22 +1998,27 @@ async def handle_gky_completion(session_data, history):
     # Build personalized GKY recap from actual user answers
     gky_recap = _build_gky_recap(session_data, history)
 
-    # Client-approved transition message (concise + personalized)
-    transition_message = f"""🎉 Fantastic! We've completed your entrepreneurial profile. Here's what I've learned about you and your goals:
+    transition_message = f"""🎉 We've completed your entrepreneurial profile. Here's what I've learned about you:
 
 {gky_recap}
 
-Now we're moving into the exciting **Business Planning** phase! This is where we'll dive deep into every aspect of your business idea. I'll be asking detailed questions about your product, market, finances, and strategy.
+Now we're moving into the **Business Planning** phase.
 
-During this phase, I'll be conducting research in the background to provide you with industry insights, competitive analysis, and market data to enrich your business plan. Don't worry - this happens automatically and securely.
+This is where we begin shaping your idea into something tangible. Together, we'll explore what your business actually is, who it serves, what it will require to operate, and what it will realistically take to bring it to life. This isn't about promising outcomes; it's about helping you think clearly, make informed decisions, and build a strong understanding of your own business to help you decide next steps.
 
-As we go through each question, I'll provide both supportive encouragement and constructive coaching to help you think through each aspect thoroughly. Remember, this comprehensive approach ensures your final business plan is detailed and provides you with a strong starting point of information that will help you launch your business. The more detailed answers you provide, the better I can help support you to bring your business to life.
+As we move through each section, you'll be building a living business plan draft — one that you can refine over time. Below are some functions of Angel that will help:
 
-**Let's build the business of your dreams together!**
+**Drafting:** As Angel learns more about your business, it can infer answers to questions. It can either completely or partially answer questions and complete steps on your behalf, helping you move faster with greater accuracy.
 
-*"The way to get started is to quit talking and begin doing."* – **Walt Disney**
+**Scrapping:** When you have rough ideas, like bullet points, that need polishing.
 
-**Are you ready to dive into your business planning?**
+**Support & Coaching:** When you need Angel to gather info for you or you want deeper guidance.
+
+In the background, Angel also pulls in relevant industry context (market patterns, competitors, pricing cues, and practical benchmarks) to strengthen your plan.
+
+When you finish this phase, your business plan becomes the foundation that unlocks your **Launch Roadmap** — a step-by-step path Founderport generates to help you actually build and launch your business.
+
+**Are you ready to begin?**
     """
     
     # Check if we should show Accept/Modify buttons
@@ -3481,32 +3565,24 @@ CRITICAL:
         elif command.startswith("scrapping:"):
             notes = user_content[10:].strip()
             scrapping_result = await handle_scrapping_command("", notes, history, session_data)
-            # Add show_accept_modify for scrapping responses
             scrapping_result["show_accept_modify"] = True
-            # Always return the scrapping result
             return scrapping_result
         elif command in ["scrapping", "scraping"]:
             scrapping_result = await handle_scrapping_command("", "", history, session_data)
-            # Add show_accept_modify for scrapping responses
             scrapping_result["show_accept_modify"] = True
-            # Always return the scrapping result
             return scrapping_result
         elif command == "support":
             reply_content = await handle_support_command("", history, session_data)
-            show_buttons_for_command = False
         elif command in ["draft more", "draft answer"]:
             reply_content = await handle_draft_more_command("", history, session_data)
         else:
-            # Fallback to normal AI generation
             reply_content = "I understand you'd like to use a command. Please try again."
-        
-        # For command responses, ALWAYS show Accept/Modify buttons
-        # Return the command response with button detection
+
         return {
             "reply": reply_content,
             "web_search_status": {"is_searching": False, "query": None, "completed": False},
             "immediate_response": None,
-            "show_accept_modify": show_buttons_for_command
+            "show_accept_modify": True
         }
     
     # Build messages for OpenAI - optimized for speed
@@ -4045,21 +4121,13 @@ CRITICAL INSTRUCTIONS:
                         print(f"✅ Auto-research completed for Q34 - costs/expenses injected")
 
                 elif detected_tag == "BUSINESS_PLAN.35":
-                    # Scaling and growth plan research
                     search_result = await conduct_web_search(
-                        f"{industry} {business_type} business scaling growth plan long-term goals expansion strategy {location} {previous_year}"
+                        f"{industry} {business_type} realistic scaling strategy milestones year 1 to 5 operational financial marketing expansion {location} {previous_year}"
                     )
                     if _is_valid_research(search_result):
                         reply_content += f"\n\n🔍 **Suggested Scaling & Growth Plan for {business_name}:**\n\n{search_result}"
                         reply_content += f"\n\n*Research based on {industry} growth data ({previous_year}-{current_year})*"
                         reply_content += "\n\nWould you like to accept this suggested plan, or would you prefer to answer the sub-questions yourself?"
-                        reply_content += "\n\n**Sub-questions covered:**"
-                        reply_content += "\n1. Long-term (2-5 years) business goals"
-                        reply_content += "\n2. Long-term operational needs"
-                        reply_content += "\n3. Long-term financial needs"
-                        reply_content += "\n4. Long-term marketing goals"
-                        reply_content += "\n5. Approach to expanding product/service lines or entering new markets"
-                        reply_content += "\n6. Long-term administrative goals"
                         auto_research_triggered = True
                         print(f"✅ Auto-research completed for Q35 - scaling plan injected")
 
@@ -4080,11 +4148,11 @@ CRITICAL INSTRUCTIONS:
                 import traceback
                 traceback.print_exc()
             
-            # If auto-research was supposed to run but didn't produce results,
-            # add a fallback message so user doesn't see "hold on" with no content
             if not auto_research_triggered and detected_tag in auto_research_questions:
-                print(f"⚠️ Auto-research for {detected_tag} did NOT produce results - adding fallback")
-                reply_content += f"\n\n⚠️ *I wasn't able to complete the web research at this time. Please share what you know about this topic, and I'll incorporate it into your business plan.*"
+                print(f"⚠️ Auto-research for {detected_tag} did NOT produce results - generating fallback content")
+                fallback = await _generate_auto_research_fallback(detected_tag, business_name, industry, business_type, location, session_data, history)
+                reply_content += fallback
+                auto_research_triggered = True
     
     # POST-PROCESSING: Strip "Please hold on" / "while I conduct research" lines
     # The AI sometimes generates these even when told not to - clean them up
@@ -7554,24 +7622,22 @@ CRITICAL - WHAT YOU MUST NOT DO:
 5. Do NOT add thought starters - the system handles those
 6. Do NOT write more than 2-3 sentences - keep it SHORT
 """
-        # Special instruction for Q35 (scaling plan) - decision tree
         elif question_tag == "BUSINESS_PLAN.35":
             auto_suggest_instruction = f"""
-⚠️ AUTO-SUGGEST + DECISION TREE QUESTION: This is a special question where:
-1. You present a suggested scaling/growth plan based on the user's previous answers
-2. The system will automatically inject web research results after your response
-3. Tell the user they have TWO options:
-   - **Accept** the suggested plan and move on (skips sub-questions)
-   - **Answer the sub-questions themselves** for a more personalized plan
-4. List the sub-questions that would be covered:
-   a. Long-term (2-5 years) business goals
-   b. Long-term operational needs
-   c. Long-term financial needs
-   d. Long-term marketing goals
-   e. Approach to expanding product/service lines
-   f. Long-term administrative goals
-5. Present your initial suggestions clearly based on what you know about their business
-6. Do NOT add thought starters - the system handles those automatically
+⚠️ AUTO-SUGGEST + AUTO-RESEARCH QUESTION: This is NOT a regular question.
+
+WHAT YOU MUST DO:
+1. Write a brief 2-3 sentence introduction acknowledging the user's business and leading into the scaling plan
+2. The system will AUTOMATICALLY inject detailed, business-specific research after your text
+3. End with a clear call to action: the user can Accept the plan or answer follow-up questions themselves
+
+WHAT YOU MUST NOT DO:
+1. Do NOT list sub-questions or internal question numbers
+2. Do NOT generate vague/generic growth advice — the SYSTEM provides research-backed data
+3. Do NOT add thought starters — the system handles those automatically
+4. Do NOT say "Please hold on" or similar waiting messages
+5. Do NOT use bullet points or numbered lists in your introduction — keep it to clean paragraphs
+6. Keep your response to 2-3 sentences MAX before the research results are injected
 """
         else:
             auto_suggest_instruction = f"""

@@ -382,10 +382,16 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     else:
         print(f"🚫 Skipping chat history save for transition phase: {transition_phase} (will show modal instead)")
 
+    # CRITICAL: Capture the tag of the question the user just answered
+    # BEFORE angel_service's patch_session overwrites session["asked_q"]
+    # with the NEXT question tag.  Without this, last_tag == tag and the
+    # sequential-progression check always fails → answered_count never increments.
+    pre_update_asked_q = session.get("asked_q")
+
     # Handle session updates (e.g., from Accept responses)
     if session_update:
         session.update(session_update)
-        await patch_session(session_id, session_update)
+        await patch_session(session_id, user_id, session_update)
 
     # Handle transition phases
     if transition_phase == "PLAN_TO_SUMMARY":
@@ -425,16 +431,19 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         }
     
     if transition_phase == "GKY_TO_BUSINESS_PLAN":
-        # Keep session in intermediate phase — user must respond to transition
-        # message before we actually switch to BUSINESS_PLAN.
-        # handle_gky_completion already set patch_session to:
-        #   current_phase = "BUSINESS_PLAN_INTRO"
-        #   asked_q       = "GKY.05_ACK"
+        # The user just answered Q5 — increment answered_count for the last
+        # GKY question so the DB value stays consistent.
+        if (pre_update_asked_q
+                and payload.content.strip()
+                and payload.content.strip().lower() not in ("", "accept", "modify")):
+            session["answered_count"] = session.get("answered_count", 0) + 1
+
         session["current_phase"] = "BUSINESS_PLAN_INTRO"
         session["asked_q"] = "GKY.05_ACK"
         await patch_session(session_id, {
             "current_phase": "BUSINESS_PLAN_INTRO",
             "asked_q": "GKY.05_ACK",
+            "answered_count": session["answered_count"],
         })
 
         # Return progress showing GKY complete (5/5, 100%)
@@ -590,62 +599,65 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     
     if is_command_response:
         print(f"🔧 Command response detected - skipping tag processing to prevent question skipping")
-        # Don't process tags for command responses - stay on current question
         tag = None
+        last_tag = None
     else:
-        # Tag handling - Only increment when moving to a genuinely new question
-        last_tag = session.get("asked_q")
+        # last_tag = the question the user just answered (captured BEFORE
+        # angel_service's patch_session overwrote session["asked_q"])
+        last_tag = pre_update_asked_q
         tag = parse_tag(assistant_reply)
 
     print(f"🏷️ Tag Analysis:")
-    print(f"  - Last tag: {session.get('asked_q')}")
-    print(f"  - Current tag: {tag}")
+    print(f"  - Last tag (pre-update): {last_tag}")
+    print(f"  - Session asked_q (post-update): {session.get('asked_q')}")
+    print(f"  - Parsed tag from reply: {tag}")
     print(f"  - Is command response: {is_command_response}")
     print(f"  - Current answered_count: {session.get('answered_count', 0)}")
     print(f"  - Assistant reply preview: {assistant_reply[:100]}...")
 
-    # Only increment answered_count when moving to a genuinely new tagged question
-    # Follow-up questions or clarifications should NOT increment the count
-    # Skip increment for command responses
-    if not is_command_response and last_tag and tag and last_tag != tag:
-        # Check if this is a genuine progression to next question
-        # (not just a clarification or follow-up)
-        last_phase, last_num = last_tag.split(".")
-        current_phase, current_num = tag.split(".")
-        
-        print(f"🔄 Tag Comparison:")
-        print(f"  - Last phase: {last_phase}, Last num: {last_num}")
-        print(f"  - Current phase: {current_phase}, Current num: {current_num}")
-        
-      # GKY questions are now sequential (01-06), so standard +1 progression works
-        if (current_phase == last_phase and int(current_num) == int(last_num) + 1) or \
-           (current_phase != last_phase and current_num == "01"):
-            session["answered_count"] += 1
-            print(f"✅ Incremented answered_count to {session['answered_count']}")
-        else:
-            print(f"❌ No increment - not a sequential question progression")
-    elif not is_command_response and not last_tag and tag:
-        # First question with a tag - this should increment
-        session["answered_count"] += 1
-        print(f"✅ First question with tag - incremented answered_count to {session['answered_count']}")
-    elif not is_command_response and not tag:
-        print(f"⚠️ No tag found in assistant reply")
-        # Fallback: If no tag but we have a conversation, increment conservatively
-        if len(history) > 0:
-            # Only increment by 1 if we haven't incremented recently
-            current_count = session.get("answered_count", 0)
-            # Only increment if we have at least 2 messages (1 Q&A pair) and haven't incremented yet
-            if len(history) >= 2 and current_count == 0:
-                session["answered_count"] = 1
-                print(f"🔄 Fallback: Incremented answered_count to 1 (first question without tag)")
-            elif len(history) >= 4 and current_count == 1:
-                session["answered_count"] = 2
-                print(f"🔄 Fallback: Incremented answered_count to 2 (second question without tag)")
+    # ── Deterministic progress increment ──
+    # The user just sent a message (payload.content).  If it's a real answer
+    # (not empty, not a command), and last_tag exists, the user answered
+    # the question represented by last_tag.  Derive the expected next tag
+    # deterministically instead of relying on the AI to emit [[Q:...]] tags.
+    user_gave_answer = (
+        not is_command_response
+        and last_tag
+        and payload.content.strip() != ""
+        and payload.content.strip().lower() not in ["", "accept", "modify"]
+    )
+
+    if user_gave_answer:
+        try:
+            last_phase, last_num_str = last_tag.split(".")
+            last_num = int(last_num_str)
+            expected_next_tag = f"{last_phase}.{last_num + 1:02d}"
+
+            # Use AI tag if available AND it matches expected progression
+            if tag:
+                tag_phase, tag_num_str = tag.split(".")
+                tag_num = int(tag_num_str)
+                if (tag_phase == last_phase and tag_num == last_num + 1) or \
+                   (tag_phase != last_phase and tag_num_str == "01"):
+                    session["answered_count"] += 1
+                    print(f"✅ Tag-confirmed increment: answered_count → {session['answered_count']}")
+                else:
+                    print(f"⚠️ Tag present but not sequential ({last_tag} → {tag}), no increment")
+            else:
+                # No tag in AI reply — derive deterministically
+                session["answered_count"] += 1
+                tag = expected_next_tag
+                print(f"✅ Deterministic increment (no tag in reply): answered_count → {session['answered_count']}, inferred tag → {tag}")
+        except (ValueError, IndexError) as e:
+            print(f"⚠️ Could not parse last_tag '{last_tag}': {e}")
+    elif is_command_response:
+        print(f"🔧 Command response — skipping answered_count increment")
+    elif not last_tag and tag:
+        print(f"📌 First question displayed ({tag}) — no answer yet, answered_count stays at {session.get('answered_count', 0)}")
+    elif not last_tag and not tag:
+        print(f"📌 Initial load — no tags, answered_count stays at {session.get('answered_count', 0)}")
     else:
-        if is_command_response:
-            print(f"🔧 Command response - skipping answered_count increment")
-        else:
-            print(f"⚠️ No tag change or missing tags")
+        print(f"⚠️ No increment — last_tag={last_tag}, tag={tag}, content='{payload.content[:30]}...'")
 
     if tag and not is_command_response:
         # Validate tag format and detect backwards progression
@@ -798,8 +810,8 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     print(f"📊 Final Progress Data Sent to Frontend: {phase_progress}")
     print(f"📊 Phase Breakdown Data: {phase_progress.get('overall_progress', {}).get('phase_breakdown', 'NOT FOUND')}")
     
-    # Update session in DB (without phase_progress since it's calculated on the fly)
-    await patch_session(session_id, {
+    # Update session in DB (pass user_id for RLS / security)
+    await patch_session(session_id, user_id, {
         "asked_q": session["asked_q"],
         "answered_count": session["answered_count"],
         "current_phase": session["current_phase"]

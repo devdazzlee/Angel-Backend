@@ -31,23 +31,17 @@ TOTALS_BY_PHASE = {
 
 def calculate_phase_progress(current_phase: str, answered_count: int, current_tag: str = None) -> dict:
     """
-    Calculate progress within the current phase based on current question tag.
-    This fixes the issue where progress was being calculated incorrectly.
+    Progress = number of questions the user has ANSWERED, not the question
+    they are currently viewing.  Q1 visible but unanswered → 0 / 5 = 0 %.
     """
-    print(f"🔍 Progress Calculation Debug:")
-    print(f"  - current_phase: {current_phase}")
-    print(f"  - answered_count: {answered_count}")
-    print(f"  - current_tag: {current_tag}")
-    
-    # Handle transition phases - they don't have questions, just show 100% complete
     transition_phases = [
         "PLAN_TO_SUMMARY_TRANSITION",
         "PLAN_TO_BUDGET_TRANSITION",
-        "PLAN_TO_ROADMAP_TRANSITION", 
+        "PLAN_TO_ROADMAP_TRANSITION",
         "ROADMAP_TO_IMPLEMENTATION_TRANSITION",
         "ROADMAP_GENERATED"
     ]
-    
+
     if current_phase in transition_phases:
         total_in_phase = TOTALS_BY_PHASE.get(current_phase, 1)
         return {
@@ -56,146 +50,63 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
             "total": total_in_phase,
             "percent": 100
         }
-    
-    phase_order = ["GKY", "BUSINESS_PLAN", "ROADMAP", "ROADMAP_GENERATED", "ROADMAP_TO_IMPLEMENTATION_TRANSITION", "IMPLEMENTATION"]
-    
-    # Always use the current tag to determine the exact question number
-    # CRITICAL: "current_step" means "the question the user is currently ON"
-    # When the user sees Question 1, progress = 1 of 6 (not 0 of 6)
-    if current_tag and current_tag.startswith(current_phase + "."):
-        try:
-            question_num = int(current_tag.split(".")[1])
-            current_step = question_num
-                
-            print(f"✅ Using tag-based calculation: tag={current_tag}, question_num={question_num}, current_step={current_step}")
-        except (ValueError, IndexError):
-            current_step = answered_count
-            print(f"❌ Tag parsing failed, using fallback: {current_step}")
-    else:
-        # Fallback: Use answered_count if no valid tag
-        current_step = answered_count
-        print(f"⚠️ No valid tag found, using fallback: {current_step}")
-    
-    # Get total for phase - handle missing phases gracefully
+
     total_in_phase = TOTALS_BY_PHASE.get(current_phase, 1)
-    if current_phase not in TOTALS_BY_PHASE:
-        print(f"⚠️ Phase '{current_phase}' not in TOTALS_BY_PHASE, using default total: 1")
-    
-    print(f"  - total_in_phase: {total_in_phase}")
-    
-    # Ensure current_step doesn't exceed total for this phase
-    current_step = min(current_step, total_in_phase)
-    print(f"  - final current_step: {current_step}")
-    
-    # Calculate percentage (1-100%)
-    percent = max(1, min(100, round((current_step / total_in_phase) * 100)))
-    print(f"  - calculated percent: {percent}")
-    
-    result = {
+
+    answered = min(max(answered_count, 0), total_in_phase)
+
+    percent = round((answered / total_in_phase) * 100) if total_in_phase > 0 else 0
+
+    return {
         "phase": current_phase,
-        "answered": current_step,
+        "answered": answered,
         "total": total_in_phase,
         "percent": percent
     }
-    
-    print(f"📊 Final Progress Result: {result}")
-    return result
 
 def calculate_combined_progress(current_phase: str, answered_count: int, current_tag: str = None) -> dict:
     """
-    Calculate combined progress for GKY + Business Plan phases (50 total questions).
-    This provides an overall progress view that combines both phases.
+    Overall progress across GKY (5) + Business Plan (45) = 50 total questions.
+    Based strictly on answered_count — never on the tag of the question being viewed.
     """
-    print(f"🔍 Combined Progress Calculation Debug:")
-    print(f"  - current_phase: {current_phase}")
-    print(f"  - answered_count: {answered_count}")
-    print(f"  - current_tag: {current_tag}")
-    
-    # Define combined phase totals
-    COMBINED_TOTALS = {
-        "GKY": 5,
-        "BUSINESS_PLAN": 45,
-        "COMBINED_GKY_BP": 50,  # 5 + 45 = 50 total questions
-        "ROADMAP": 1,
-        "IMPLEMENTATION": 10
-    }
-    
-    # Calculate current step based on phase and question number
-    # For GKY: current_step = question being viewed (1-based, inclusive)
-    # For BP: current_step = total COMPLETED questions (GKY done + BP completed, exclusive of current)
-    if current_tag and current_tag.startswith(current_phase + "."):
-        try:
-            question_num = int(current_tag.split(".")[1])
-            
-            if current_phase == "GKY":
-                # GKY: question_num directly (Q1 = step 1, Q5 = step 5)
-                current_step = question_num
-            elif current_phase == "BUSINESS_PLAN":
-                # For Business Plan: bp_completed = questions actually COMPLETED
-                # When user is ON Q1, they haven't completed it yet → 0 BP completed
-                # Combined step = all GKY (5) + BP questions completed (question_num - 1)
-                current_step = COMBINED_TOTALS["GKY"] + (question_num - 1)
-            else:
-                # For other phases, use answered_count as fallback
-                current_step = answered_count
-                
-            print(f"✅ Combined calculation: phase={current_phase}, question_num={question_num}, current_step={current_step}")
-        except (ValueError, IndexError):
-            current_step = answered_count
-            print(f"❌ Tag parsing failed, using fallback: {current_step}")
-    else:
-        # Fallback: Use answered_count if no valid tag
-        current_step = answered_count
-        print(f"⚠️ No valid tag found, using fallback: {current_step}")
-    
-    # For GKY and Business Plan phases, use combined total (65)
+    GKY_TOTAL = 5
+    BP_TOTAL = 45
+    COMBINED_TOTAL = GKY_TOTAL + BP_TOTAL
+
     if current_phase in ["GKY", "BUSINESS_PLAN"]:
-        total_combined = COMBINED_TOTALS["COMBINED_GKY_BP"]
-        print(f"  - Using combined total: {total_combined}")
-        
-        # Ensure current_step doesn't exceed combined total
-        current_step = min(current_step, total_combined)
-        print(f"  - final current_step: {current_step}")
-        
-        # Calculate percentage based on combined total
-        percent = max(1, min(100, round((current_step / total_combined) * 100)))
-        print(f"  - calculated percent: {percent}")
-        
-        # Calculate phase-specific step for display
         if current_phase == "GKY":
-            phase_specific_step = question_num if current_tag and current_tag.startswith("GKY.") else min(current_step, COMBINED_TOTALS["GKY"])
-        elif current_phase == "BUSINESS_PLAN":
-            phase_specific_step = question_num if current_tag and current_tag.startswith("BUSINESS_PLAN.") else max(0, current_step - COMBINED_TOTALS["GKY"])
+            gky_done = min(max(answered_count, 0), GKY_TOTAL)
+            bp_done = 0
         else:
-            phase_specific_step = current_step
-            
-        result = {
+            gky_done = GKY_TOTAL
+            bp_done = min(max(answered_count, 0), BP_TOTAL)
+
+        overall_answered = gky_done + bp_done
+        percent = round((overall_answered / COMBINED_TOTAL) * 100) if COMBINED_TOTAL > 0 else 0
+
+        return {
             "phase": current_phase,
-            "answered": current_step,  # Combined step (1-50)
-            "phase_answered": phase_specific_step,  # Phase-specific step (1-6 for GKY, 1-45 for BP)
-            "total": total_combined,
+            "answered": overall_answered,
+            "phase_answered": gky_done if current_phase == "GKY" else bp_done,
+            "total": COMBINED_TOTAL,
             "percent": percent,
-            "combined": True,  # Flag to indicate this is combined progress
+            "combined": True,
             "phase_breakdown": {
-                "gky_completed": min(current_step, COMBINED_TOTALS["GKY"]),
-                "gky_total": COMBINED_TOTALS["GKY"],
-                "bp_completed": max(0, current_step - COMBINED_TOTALS["GKY"]),
-                "bp_total": COMBINED_TOTALS["BUSINESS_PLAN"]
+                "gky_completed": gky_done,
+                "gky_total": GKY_TOTAL,
+                "bp_completed": bp_done,
+                "bp_total": BP_TOTAL
             }
         }
-    else:
-        # For other phases, use regular phase calculation
-        total_in_phase = TOTALS_BY_PHASE[current_phase]
-        current_step = min(current_step, total_in_phase)
-        percent = max(1, min(100, round((current_step / total_in_phase) * 100)))
-        
-        result = {
-            "phase": current_phase,
-            "answered": current_step,
-            "total": total_in_phase,
-            "percent": percent,
-            "combined": False
-        }
-    
-    print(f"📊 Combined Progress Result: {result}")
-    return result
+
+    total_in_phase = TOTALS_BY_PHASE.get(current_phase, 1)
+    answered = min(max(answered_count, 0), total_in_phase)
+    percent = round((answered / total_in_phase) * 100) if total_in_phase > 0 else 0
+
+    return {
+        "phase": current_phase,
+        "answered": answered,
+        "total": total_in_phase,
+        "percent": percent,
+        "combined": False
+    }
