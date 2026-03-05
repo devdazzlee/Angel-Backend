@@ -560,30 +560,39 @@ def get_thought_starter_for_tag(question_tag: str) -> Optional[str]:
     return starters[0]
 
 def is_draft_or_support_response(response_text: str) -> bool:
-    """Check if response is a draft or support command response"""
+    """Check if response is a draft or support command response. Case-insensitive for robustness."""
+    response_lower = response_text.lower()
+    
     # First check if this is a verification/summary (NOT a draft)
     verification_indicators = [
-        "Does this look accurate",
-        "Does this look correct",
-        "Is this accurate",
-        "Verification:",
-        "Here's what I've captured so far"
+        "does this look accurate",
+        "does this look correct",
+        "is this accurate",
+        "verification:",
+        "here's what i've captured so far",
     ]
-    
-    # If it's a verification message, it's NOT a draft
-    if any(indicator in response_text for indicator in verification_indicators):
+    if any(indicator in response_lower for indicator in verification_indicators):
         return False
     
-    # Check for actual draft/support indicators
+    # Check for actual draft/support indicators (case-insensitive)
     draft_indicators = [
-        "Here's a draft",
-        "Here's a research-backed draft",
-        "Here's a draft based on",
-        "Let's work through this together",
-        "Here's a refined version",
-        "I'll create additional content"
+        "here's a draft",
+        "here's a research-backed draft",
+        "here's a draft based on",
+        "here's a draft for",
+        "let's work through this together",
+        "here's a refined version",
+        "i'll create additional content",
+        "here's some additional information to help you",
+        "based on your input, here",
+        "here are some suggestions for your",
+        "here are the unique value propositions",
+        "here are some unique value propositions",
+        "here are your unique value propositions",
+        "suggested unique value propositions",
+        "here are potential unique value propositions",
     ]
-    return any(indicator in response_text for indicator in draft_indicators)
+    return any(indicator in response_lower for indicator in draft_indicators)
 
 def is_moving_to_next_question(response_text: str) -> bool:
     """Check if response is transitioning to next question (should NOT show buttons)"""
@@ -595,9 +604,11 @@ def is_moving_to_next_question(response_text: str) -> bool:
         "here's a draft",
         "here's a research-backed draft",
         "here's a draft based on",
+        "here's a draft for",
         "let's work through this together",
         "here's a refined version",
-        "i'll create additional content"
+        "i'll create additional content",
+        "here's some additional information to help you"
     ]
     
     if any(indicator in response_lower for indicator in draft_or_support_indicators):
@@ -632,8 +643,12 @@ async def should_show_accept_modify_buttons(ai_response: str, user_last_input: s
     user_input_lower = user_last_input.lower().strip()
     
     # Check if user explicitly requested Draft, Support, or Scrapping
+    # Allow exact match or message starting with command (e.g. "Draft", "Draft the section", "Support me")
     command_keywords = ["draft", "support", "scrapping", "scraping", "draft more"]
-    is_command_request = user_input_lower in command_keywords
+    is_command_request = (
+        user_input_lower in command_keywords
+        or any(user_input_lower.startswith(kw + " ") for kw in command_keywords)
+    )
     
     # Check if response is a draft/support response
     is_draft_response = is_draft_or_support_response(ai_response)
@@ -743,7 +758,11 @@ async def _generate_auto_research_fallback(
         "BUSINESS_PLAN.27": f"List the recommended insurance policies for a {business_type} {industry} business in {location}, including coverage type, what it protects, and estimated annual cost.",
         "BUSINESS_PLAN.34": f"List the main startup and operating costs for a {business_type} {industry} business in {location} with realistic dollar ranges.",
         "BUSINESS_PLAN.35": f"Create a realistic 1-5 year scaling plan for {business_name}, a {business_type} {industry} business in {location}, with specific milestones for years 1-2 and years 3-5.",
-        "BUSINESS_PLAN.42": f"List 4-6 potential challenges or risks for {business_name}, a {business_type} {industry} business in {location}, and provide a specific contingency plan for each.",
+        "BUSINESS_PLAN.42": (
+            f"For {business_name}, a {business_type} {industry} business in {location}, list 4-6 potential challenges or risks "
+            f"(financial, operational, competitive, regulatory, or market-related) and for each provide: (1) a brief description, "
+            f"(2) a concrete mitigation strategy, and (3) specific action steps. Format with clear bullet points under each risk."
+        ),
     }
     prompt = tag_to_prompt.get(
         detected_tag,
@@ -752,16 +771,39 @@ async def _generate_auto_research_fallback(
     try:
         response = await client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "user", "content": f"You are a senior business analyst. {prompt}\n\nBe specific — use real names, real data, real dollar ranges. Format with clear sections and bullet points."}],
+            messages=[{"role": "user", "content": f"You are a senior business analyst. {prompt}\n\nBe specific — use real scenarios and actionable steps. Format with clear sections and bullet points."}],
             temperature=0.3,
-            max_tokens=800,
-            timeout=25.0,
+            max_tokens=1000,
+            timeout=30.0,
         )
         content = response.choices[0].message.content or ""
-        label = tag_to_prompt.get(detected_tag, "Research").split(".")[0]
+        if not content.strip():
+            if detected_tag == "BUSINESS_PLAN.42":
+                content = (
+                    "• **Financial risks**: Funding gaps, cash flow—build 6-month runway, diversify revenue. "
+                    "• **Operational risks**: Supply chain, staffing—identify backup suppliers, cross-train staff. "
+                    "• **Market risks**: Competition, demand—differentiate clearly, monitor customer feedback. "
+                    "• **Regulatory risks**: Compliance, permits—consult a local expert, maintain records. "
+                    "For each, outline concrete action steps and early warning signs to monitor."
+                )
+            else:
+                content = "Consider common risks: funding gaps, market competition, regulatory changes, operational bottlenecks, key person dependency, and customer acquisition. For each, outline a contingency plan with concrete action steps."
+        # Use same format as auto-research so Accept/Modify flow works
+        if detected_tag == "BUSINESS_PLAN.42":
+            return f"\n\n🔍 **Suggested Contingency Plans for {business_name}:**\n\n{content}\n\n*Based on {industry} risk analysis*\n\nPlease review these suggestions. Is there anything you'd like me to adjust or explore further?"
         return f"\n\n🔍 **{business_name} — Suggested Plan:**\n\n{content}\n\nPlease review and let me know if you'd like to adjust anything."
     except Exception as exc:
         print(f"⚠️ Fallback generation also failed for {detected_tag}: {exc}")
+        if detected_tag == "BUSINESS_PLAN.42":
+            return (
+                "\n\n🔍 **Suggested Contingency Plans:**\n\n"
+                "• **Financial**: Funding gaps, cash flow—build 6-month runway, diversify revenue.\n"
+                "• **Operational**: Supply chain, staffing—identify backup suppliers, cross-train staff.\n"
+                "• **Market**: Competition, demand changes—differentiate clearly, monitor feedback.\n"
+                "• **Regulatory**: Compliance, permits—consult a local expert, maintain records.\n\n"
+                "For each relevant to your business, outline concrete action steps.\n\n"
+                "Please share your thoughts or let me know what you'd like to explore further."
+            )
         return "\n\nPlease share what you know about this topic, and I'll incorporate it into your business plan."
 
 
@@ -2002,23 +2044,23 @@ async def handle_gky_completion(session_data, history):
 
 {gky_recap}
 
-Now we're moving into the **Business Planning** phase.
+Now we're moving into the Business Planning phase.
 
 This is where we begin shaping your idea into something tangible. Together, we'll explore what your business actually is, who it serves, what it will require to operate, and what it will realistically take to bring it to life. This isn't about promising outcomes; it's about helping you think clearly, make informed decisions, and build a strong understanding of your own business to help you decide next steps.
 
-As we move through each section, you'll be building a living business plan draft — one that you can refine over time. Below are some functions of Angel that will help:
+As we move through each section, you'll be building a living business plan draft; one that you can refine over time. Below are some functions of Angel that will help:
 
-**Drafting:** As Angel learns more about your business, it can infer answers to questions. It can either completely or partially answer questions and complete steps on your behalf, helping you move faster with greater accuracy.
+Drafting: As Angel learns more about your business, it can infer answers to questions. It can either completely or partially answer questions and complete steps on your behalf, helping you move faster with greater accuracy.
 
-**Scrapping:** When you have rough ideas, like bullet points, that need polishing.
+Scrapping: When you have rough ideas, like bullet points, that need polishing.
 
-**Support & Coaching:** When you need Angel to gather info for you or you want deeper guidance.
+Support & Coaching: When you need Angel to gather info for you or you want deeper guidance.
 
 In the background, Angel also pulls in relevant industry context (market patterns, competitors, pricing cues, and practical benchmarks) to strengthen your plan.
 
-When you finish this phase, your business plan becomes the foundation that unlocks your **Launch Roadmap** — a step-by-step path Founderport generates to help you actually build and launch your business.
+When you finish this phase, your business plan becomes the foundation that unlocks your Launch Roadmap; a step-by-step path Founderport generates to help you actually build and launch your business.
 
-**Are you ready to begin?**
+Are you ready to begin?
     """
     
     # Check if we should show Accept/Modify buttons
@@ -3408,7 +3450,7 @@ Do NOT include question numbers, progress percentages, or step counts in your re
     # Do NOT manually increment question numbers or use generate_next_question()
     # Let the AI follow the system prompt from constant.py
     # Check if this is a command that should not generate new questions
-    is_command_response = user_content.lower() in ["draft", "support", "scrapping", "scraping", "draft more"] or user_content.lower().startswith("scrapping:")
+    is_command_response = user_content.lower().strip() in ["draft", "support", "scrapping", "scraping", "draft more"] or user_content.lower().strip().startswith("scrapping:")
     
     # Check if this is an "Accept" command from Support/Draft/Scrapping
     is_accept_command = user_content.lower().strip() == "accept"
@@ -4182,6 +4224,25 @@ CRITICAL INSTRUCTIONS:
     if tag_match and tag_match.group(1) == "BUSINESS_PLAN.12":
         reply_content = re.sub(r'\n*Trend \d+:[^\n]*\n*', '\n', reply_content)
     
+    # For Q26 (permits/licenses): Replace "Competitive Landscape" etc. with "Potential Service Providers"
+    # Per spec, permits research should list service providers (LegalZoom, MyCorporation), not competitors
+    if tag_match and tag_match.group(1) == "BUSINESS_PLAN.26":
+        reply_content = re.sub(r'\*\*Competitive [Ll]andscape\*\*', '**Potential Service Providers**', reply_content)
+        reply_content = re.sub(r'Competitive [Ll]andscape', 'Potential Service Providers', reply_content)
+        reply_content = re.sub(r'\*\*Competitors\*\*', '**Potential Service Providers**', reply_content)
+        reply_content = re.sub(r'\*\*Competitive [Aa]nalysis\*\*', '**Potential Service Providers**', reply_content)
+    
+    # For Q27 (insurance): Strip "Market Data" section - market size, CAGR, premiums not relevant for policy recommendations
+    if tag_match and tag_match.group(1) == "BUSINESS_PLAN.27":
+        # Match **Market Data** or ## Market Data headers and their content until next section
+        reply_content = re.sub(r'\n+\*\*[Mm]arket [Dd]ata\*\*[^\n]*\n.*?(?=\n\n\*\*|\n##\s|\n\d+\.\s|\Z)', '\n', reply_content, flags=re.DOTALL)
+        reply_content = re.sub(r'\n+##\s*[Mm]arket [Dd]ata[^\n]*\n.*?(?=\n\n##|\n\*\*|\n\d+\.\s|\Z)', '\n', reply_content, flags=re.DOTALL)
+    
+    # For Q35 (scaling): Remove "Sub-questions covered" section
+    if tag_match and tag_match.group(1) == "BUSINESS_PLAN.35":
+        reply_content = re.sub(r'\n*\*\*Sub-questions covered\*\*:?.*?(?=\n\n|\n\*\*|\Z)', '\n', reply_content, flags=re.DOTALL | re.IGNORECASE)
+        reply_content = re.sub(r'\n*Sub-questions covered:?.*?(?=\n\n|\n\*\*|\Z)', '\n', reply_content, flags=re.DOTALL | re.IGNORECASE)
+    
     # Clean up excessive blank lines (3+ newlines → 2)
     reply_content = re.sub(r'\n{3,}', '\n\n', reply_content)
     
@@ -4671,7 +4732,8 @@ async def handle_draft_command(reply, history, session_data=None):
     # Skip research for simple questions like mission statement/tagline to reduce latency
     research_topics = ["competitor", "competitive analysis", "startup costs", "operational requirements", 
                        "staffing needs", "target market", "sales projections", "financial planning",
-                       "expenses", "pricing", "market", "customer acquisition"]
+                       "expenses", "pricing", "market", "customer acquisition",
+                       "unique value", "value proposition", "differentiation", "clothing", "retail"]
     
     # Exclude mission statement/tagline from research - it doesn't need external data
     skip_research_topics = ["mission statement", "tagline", "business name"]

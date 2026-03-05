@@ -615,6 +615,16 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     print(f"  - Current answered_count: {session.get('answered_count', 0)}")
     print(f"  - Assistant reply preview: {assistant_reply[:100]}...")
 
+    # Section summary: user must Accept before we advance to next question
+    section_summary_markers = ["Section Complete", "Summary of Your Information", "Ready to Continue"]
+    is_section_summary = (
+        show_accept_modify
+        and assistant_reply
+        and any(m in assistant_reply for m in section_summary_markers)
+    )
+    if is_section_summary:
+        print(f"📋 Section summary detected - NOT advancing asked_q until user accepts")
+
     # ── Deterministic progress increment ──
     # The user just sent a message (payload.content).  If it's a real answer
     # (not empty, not a command), and last_tag exists, the user answered
@@ -743,9 +753,15 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
                 print(f"⚠️ Error parsing tag format: {e}")
         
         # Only update session if tag is valid and sequential
-        session["asked_q"] = tag
-        session["current_phase"] = tag.split(".")[0]
-        print(f"📝 Updated session: asked_q={tag}, current_phase={tag.split('.')[0]}")
+        # For section summary: keep asked_q at current question until user accepts
+        if is_section_summary and pre_update_asked_q:
+            session["asked_q"] = pre_update_asked_q
+            session["current_phase"] = pre_update_asked_q.split(".")[0]
+            print(f"📋 Section summary: keeping asked_q={pre_update_asked_q} until Accept")
+        else:
+            session["asked_q"] = tag
+            session["current_phase"] = tag.split(".")[0]
+            print(f"📝 Updated session: asked_q={tag}, current_phase={tag.split('.')[0]}")
         
         # Auto-transition to roadmap after business plan completion
         # Only transition when we've completed all business plan questions (45 total)
@@ -818,10 +834,12 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     })
 
     # Extract question number from tag before removing it
+    # For section summary: use pre_update_asked_q so frontend shows current Q (e.g. 4) not next (5)
     question_number = None
-    if tag and "." in tag:
+    source_tag = (pre_update_asked_q if is_section_summary and pre_update_asked_q else tag)
+    if source_tag and "." in source_tag:
         try:
-            question_number = int(tag.split(".")[1])
+            question_number = int(source_tag.split(".")[1])
         except (ValueError, IndexError):
             question_number = None
     
