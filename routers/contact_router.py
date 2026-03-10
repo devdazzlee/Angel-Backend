@@ -2,6 +2,7 @@ import os
 import smtplib
 from email.message import EmailMessage
 
+import resend
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -51,40 +52,54 @@ def _require_smtp_config() -> dict:
 
 
 def _send_contact_email(payload: ContactFormRequest) -> None:
-    cfg = _require_smtp_config()
+    api_key = os.getenv("RESEND_API_KEY")
+    recipient = os.getenv("SUPPORT_CONTACT_RECIPIENT", "kevin@founderport.ai")
+    from_email = os.getenv("SMTP_FROM_EMAIL", "support@founderport.ai")
+    from_name = os.getenv("SMTP_FROM_NAME", "Founderport")
 
-    msg = EmailMessage()
-    msg["Subject"] = f"[Founderport Contact] {payload.subject}"
-    msg["From"] = cfg["from_email"]
-    msg["To"] = cfg["recipient"]
-
-    msg.set_content(
-        "\n".join(
-            [
-                "New Contact Us submission:",
-                "",
-                f"Name: {payload.name}",
-                f"Email: {payload.email}",
-                f"Subject: {payload.subject}",
-                "",
-                "Message:",
-                payload.message,
-            ]
-        )
+    body = "\n".join(
+        [
+            "New Contact Us submission:",
+            "",
+            f"Name: {payload.name}",
+            f"Email: {payload.email}",
+            f"Subject: {payload.subject}",
+            "",
+            "Message:",
+            payload.message,
+        ]
     )
 
-    try:
-        if cfg["use_tls"]:
-            with smtplib.SMTP(cfg["host"], cfg["port"], timeout=20) as server:
-                server.starttls()
-                server.login(cfg["username"], cfg["password"])
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=20) as server:
-                server.login(cfg["username"], cfg["password"])
-                server.send_message(msg)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="Failed to send contact email.") from exc
+    if api_key:
+        try:
+            resend.api_key = api_key
+            resend.Emails.send({
+                "from": f"{from_name} <{from_email}>",
+                "to": [recipient],
+                "subject": f"[Founderport Contact] {payload.subject}",
+                "text": body,
+            })
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to send contact email.") from exc
+    else:
+        cfg = _require_smtp_config()
+        msg = EmailMessage()
+        msg["Subject"] = f"[Founderport Contact] {payload.subject}"
+        msg["From"] = cfg["from_email"]
+        msg["To"] = recipient
+        msg.set_content(body)
+        try:
+            if cfg["use_tls"]:
+                with smtplib.SMTP(cfg["host"], cfg["port"], timeout=20) as server:
+                    server.starttls()
+                    server.login(cfg["username"], cfg["password"])
+                    server.send_message(msg)
+            else:
+                with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=20) as server:
+                    server.login(cfg["username"], cfg["password"])
+                    server.send_message(msg)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to send contact email.") from exc
 
 
 @router.post("/contact")

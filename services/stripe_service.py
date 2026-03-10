@@ -11,13 +11,30 @@ from services.email_service import (
     send_subscription_expired_email,
     send_billing_problem_email,
     send_subscription_cancellation_email,
-    get_payment_method_last4
 )
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+
+async def get_payment_method_last4(customer_id: str):
+    """Get last 4 digits of customer's default payment method. Returns None on failure."""
+    try:
+        customer = stripe.Customer.retrieve(customer_id)
+        default_pm = customer.get("invoice_settings", {}).get("default_payment_method")
+        if default_pm:
+            pm = stripe.PaymentMethod.retrieve(default_pm)
+            return pm.get("card", {}).get("last4")
+        # Fallback: first saved card
+        pms = stripe.PaymentMethod.list(customer=customer_id, type="card")
+        if pms.data:
+            return pms.data[0].get("card", {}).get("last4")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to get payment method last4: {e}")
+        return None
 
 
 async def create_subscription_checkout_session(

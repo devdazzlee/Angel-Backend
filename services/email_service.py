@@ -1,15 +1,108 @@
+"""
+Custom SMTP email service (Python equivalent of Nodemailer).
+Sends signup confirmation, password reset, subscription, and other emails via your SMTP.
+Bypasses Supabase's built-in email to avoid 504 timeouts with Office 365 etc.
+
+Environment variables:
+  SMTP_HOST      - e.g. smtp.office365.com
+  SMTP_PORT      - e.g. 587
+  SMTP_USER      - e.g. support@founderport.ai
+  SMTP_PASSWORD  - App password for Office 365 (if MFA enabled)
+  SMTP_FROM_NAME - Sender display name, e.g. Founderport
+"""
+import asyncio
 import logging
 import os
-from datetime import datetime, timedelta
-from typing import Optional
-from db.supabase import supabase
-import stripe
-from dotenv import load_dotenv
-
-load_dotenv()
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 logger = logging.getLogger(__name__)
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+
+def _get_smtp_config():
+    host = os.getenv("SMTP_HOST", "smtp.office365.com")
+    port = int(os.getenv("SMTP_PORT", "587"))
+    user = os.getenv("SMTP_USER", "")
+    password = os.getenv("SMTP_PASSWORD", "")
+    from_name = os.getenv("SMTP_FROM_NAME", "Founderport")
+    return host, port, user, password, from_name
+
+
+def _send_email(to_email: str, subject: str, html_body: str, text_body: str = None) -> bool:
+    """Send email via SMTP. Returns True on success."""
+    host, port, user, password, from_name = _get_smtp_config()
+    if not user or not password:
+        logger.error("SMTP_USER and SMTP_PASSWORD must be set in .env")
+        return False
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"{from_name} <{user}>"
+        msg["To"] = to_email
+
+        if text_body:
+            msg.attach(MIMEText(text_body, "plain"))
+        msg.attach(MIMEText(html_body, "html"))
+
+        with smtplib.SMTP(host, port) as server:
+            server.starttls()
+            server.login(user, password)
+            server.sendmail(user, to_email, msg.as_string())
+
+        logger.info(f"Email sent to {to_email}: {subject}")
+        return True
+    except Exception as e:
+        logger.error(f"SMTP send failed: {e}")
+        return False
+
+
+def send_password_reset_email(to_email: str, reset_link: str) -> bool:
+    """Send password reset email with link."""
+    subject = "Reset your Founderport password"
+    html_body = f"""
+    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2>Reset your password</h2>
+      <p>You requested a password reset for your Founderport account.</p>
+      <p>Click the button below to set a new password:</p>
+      <p style="margin: 24px 0;">
+        <a href="{reset_link}" style="background: #0d9488; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">Reset password</a>
+      </p>
+      <p>Or copy this link: <a href="{reset_link}">{reset_link}</a></p>
+      <p style="color: #666; font-size: 14px;">This link expires in 1 hour. If you didn't request this, you can ignore this email.</p>
+      <p>— The Founderport Team</p>
+    </div>
+    """
+    text_body = f"Reset your password: {reset_link}\n\nThis link expires in 1 hour."
+    return _send_email(to_email, subject, html_body, text_body)
+
+
+def send_signup_confirmation_email(to_email: str, confirm_link: str) -> bool:
+    """Send signup confirmation email with link."""
+    subject = "Confirm your Founderport account"
+    html_body = f"""
+    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2>Confirm your email</h2>
+      <p>Thanks for signing up for Founderport!</p>
+      <p>Click the button below to confirm your email address:</p>
+      <p style="margin: 24px 0;">
+        <a href="{confirm_link}" style="background: #0d9488; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">Confirm email</a>
+      </p>
+      <p>Or copy this link: <a href="{confirm_link}">{confirm_link}</a></p>
+      <p style="color: #666; font-size: 14px;">If you didn't create an account, you can ignore this email.</p>
+      <p>— The Founderport Team</p>
+    </div>
+    """
+    text_body = f"Confirm your email: {confirm_link}"
+    return _send_email(to_email, subject, html_body, text_body)
+
+
+def _subscription_base_styles() -> str:
+    """Shared styles for subscription emails."""
+    return """
+    font-family: sans-serif; max-width: 600px; margin: 0 auto;
+    """
 
 
 async def send_subscription_confirmation_email(
@@ -18,69 +111,24 @@ async def send_subscription_confirmation_email(
     currency: str,
     subscription_start_date: str,
     subscription_end_date: str,
-    last4: Optional[str] = None
-):
-    """Send subscription confirmation email when subscription is activated."""
-    try:
-        # Calculate subscription length in days
-        # Handle both ISO format strings and datetime objects
-        if isinstance(subscription_start_date, str):
-            start = datetime.fromisoformat(subscription_start_date.replace('Z', '+00:00').replace('+00:00', ''))
-        else:
-            start = subscription_start_date
-        
-        if isinstance(subscription_end_date, str):
-            end = datetime.fromisoformat(subscription_end_date.replace('Z', '+00:00').replace('+00:00', ''))
-        else:
-            end = subscription_end_date
-        
-        days = (end - start).days
-        
-        # Format dates for display
-        start_formatted = start.strftime("%B %d, %Y")
-        end_formatted = end.strftime("%B %d, %Y")
-        
-        # Format amount
-        amount_formatted = f"${amount:.2f}" if currency.lower() == "usd" else f"{amount:.2f} {currency.upper()}"
-        
-        subject = "Subscription Confirmation - Angel AI Premium"
-        
-        # Build email body
-        card_info = f"\nCard ending in: {last4}" if last4 else ""
-        
-        body = f"""
-Monthly subscription activated
-
-Dear User,
-
-Your Angel AI Premium subscription has been successfully activated.
-
-Subscription Details:
-- Amount: {amount_formatted}
-- Start Date: {start_formatted}
-- End Date: {end_formatted}
-- Length: {days} days{card_info}
-
-Thank you for subscribing to Angel AI Premium!
-
-Best regards,
-Angel AI Team
-"""
-        
-        # Use Supabase to send email (if configured) or log for now
-        # Note: You may need to configure Supabase email service or use a third-party service
-        logger.info(f"Sending subscription confirmation email to {user_email}")
-        logger.info(f"Email subject: {subject}")
-        logger.info(f"Email body: {body}")
-        
-        # TODO: Integrate with actual email service (SendGrid, AWS SES, etc.)
-        # For now, we'll log it. You can add actual email sending here.
-        
-        return {"success": True, "email": user_email}
-        
-    except Exception as e:
-        logger.error(f"Failed to send subscription confirmation email: {str(e)}")
-        return {"success": False, "error": str(e)}
+    last4: str = None,
+) -> bool:
+    """Send subscription confirmation email."""
+    amt = f"{currency.upper()} {amount:.2f}"
+    last4_line = f"<p>Payment method: •••• {last4}</p>" if last4 else ""
+    subject = "Your Founderport subscription is active"
+    html_body = f"""
+    <div style="{_subscription_base_styles()}">
+      <h2>Welcome to Founderport</h2>
+      <p>Your subscription is now active.</p>
+      <p><strong>Amount:</strong> {amt}</p>
+      <p><strong>Billing period:</strong> {subscription_start_date[:10]} – {subscription_end_date[:10]}</p>
+      {last4_line}
+      <p>— The Founderport Team</p>
+    </div>
+    """
+    text_body = f"Your subscription is active. Amount: {amt}. Period: {subscription_start_date[:10]} – {subscription_end_date[:10]}."
+    return await asyncio.to_thread(_send_email, user_email, subject, html_body, text_body)
 
 
 async def send_subscription_renewal_receipt_email(
@@ -89,252 +137,102 @@ async def send_subscription_renewal_receipt_email(
     currency: str,
     subscription_start_date: str,
     subscription_end_date: str,
-    last4: Optional[str] = None
-):
-    """Send receipt email when subscription renews monthly."""
-    try:
-        # Calculate subscription length in days
-        # Handle both ISO format strings and datetime objects
-        if isinstance(subscription_start_date, str):
-            start = datetime.fromisoformat(subscription_start_date.replace('Z', '+00:00').replace('+00:00', ''))
-        else:
-            start = subscription_start_date
-        
-        if isinstance(subscription_end_date, str):
-            end = datetime.fromisoformat(subscription_end_date.replace('Z', '+00:00').replace('+00:00', ''))
-        else:
-            end = subscription_end_date
-        
-        days = (end - start).days
-        
-        # Format dates for display
-        start_formatted = start.strftime("%B %d, %Y")
-        end_formatted = end.strftime("%B %d, %Y")
-        
-        # Format amount
-        amount_formatted = f"${amount:.2f}" if currency.lower() == "usd" else f"{amount:.2f} {currency.upper()}"
-        
-        subject = "Subscription Renewal Receipt - Angel AI Premium"
-        
-        # Build email body
-        card_info = f"\nCard ending in: {last4}" if last4 else ""
-        
-        body = f"""
-Monthly subscription renewal receipt
-
-Dear User,
-
-Your Angel AI Premium subscription has been renewed.
-
-Renewal Details:
-- Amount: {amount_formatted}
-- Start Date: {start_formatted}
-- End Date: {end_formatted}
-- Length: {days} days{card_info}
-
-This is your receipt for the renewal payment.
-
-Thank you for continuing with Angel AI Premium!
-
-Best regards,
-Angel AI Team
-"""
-        
-        logger.info(f"Sending subscription renewal receipt email to {user_email}")
-        logger.info(f"Email subject: {subject}")
-        logger.info(f"Email body: {body}")
-        
-        return {"success": True, "email": user_email}
-        
-    except Exception as e:
-        logger.error(f"Failed to send subscription renewal receipt email: {str(e)}")
-        return {"success": False, "error": str(e)}
+    last4: str = None,
+) -> bool:
+    """Send subscription renewal receipt email."""
+    amt = f"{currency.upper()} {amount:.2f}"
+    last4_line = f"<p>Payment method: •••• {last4}</p>" if last4 else ""
+    subject = "Your Founderport subscription renewal"
+    html_body = f"""
+    <div style="{_subscription_base_styles()}">
+      <h2>Renewal receipt</h2>
+      <p>Your Founderport subscription has been renewed.</p>
+      <p><strong>Amount:</strong> {amt}</p>
+      <p><strong>Billing period:</strong> {subscription_start_date[:10]} – {subscription_end_date[:10]}</p>
+      {last4_line}
+      <p>— The Founderport Team</p>
+    </div>
+    """
+    text_body = f"Subscription renewed. Amount: {amt}. Period: {subscription_start_date[:10]} – {subscription_end_date[:10]}."
+    return await asyncio.to_thread(_send_email, user_email, subject, html_body, text_body)
 
 
 async def send_subscription_expiring_email(
     user_email: str,
-    subscription_end_date: str
-):
-    """Send email when subscription is expiring soon."""
-    try:
-        # Format date for display
-        if isinstance(subscription_end_date, str):
-            end = datetime.fromisoformat(subscription_end_date.replace('Z', '+00:00').replace('+00:00', ''))
-        else:
-            end = subscription_end_date
-        end_formatted = end.strftime("%B %d, %Y")
-        
-        subject = "Subscription Expiring Soon - Angel AI Premium"
-        
-        body = f"""
-Subscription Expiring Soon
-
-Dear User,
-
-Your Angel AI Premium subscription is set to expire on {end_formatted}.
-
-To continue enjoying premium features, please renew your subscription before it expires.
-
-If you have any questions, please contact our support team.
-
-Best regards,
-Angel AI Team
-"""
-        
-        logger.info(f"Sending subscription expiring email to {user_email}")
-        logger.info(f"Email subject: {subject}")
-        logger.info(f"Email body: {body}")
-        
-        return {"success": True, "email": user_email}
-        
-    except Exception as e:
-        logger.error(f"Failed to send subscription expiring email: {str(e)}")
-        return {"success": False, "error": str(e)}
+    subscription_end_date: str,
+) -> bool:
+    """Send email when subscription is set to expire at period end."""
+    subject = "Your Founderport subscription is expiring"
+    html_body = f"""
+    <div style="{_subscription_base_styles()}">
+      <h2>Subscription expiring</h2>
+      <p>Your Founderport subscription will end on <strong>{subscription_end_date[:10]}</strong>.</p>
+      <p>To continue using Founderport, renew before this date.</p>
+      <p>— The Founderport Team</p>
+    </div>
+    """
+    text_body = f"Your subscription will end on {subscription_end_date[:10]}. Renew before this date to continue."
+    return await asyncio.to_thread(_send_email, user_email, subject, html_body, text_body)
 
 
 async def send_subscription_expired_email(
     user_email: str,
-    subscription_end_date: str
-):
-    """Send email when subscription has expired."""
-    try:
-        # Format date for display
-        if isinstance(subscription_end_date, str):
-            end = datetime.fromisoformat(subscription_end_date.replace('Z', '+00:00').replace('+00:00', ''))
-        else:
-            end = subscription_end_date
-        end_formatted = end.strftime("%B %d, %Y")
-        
-        subject = "Subscription Expired - Angel AI Premium"
-        
-        body = f"""
-Subscription Expired
-
-Dear User,
-
-Your Angel AI Premium subscription has expired on {end_formatted}.
-
-To continue using premium features, please renew your subscription.
-
-If you have any questions, please contact our support team.
-
-Best regards,
-Angel AI Team
-"""
-        
-        logger.info(f"Sending subscription expired email to {user_email}")
-        logger.info(f"Email subject: {subject}")
-        logger.info(f"Email body: {body}")
-        
-        return {"success": True, "email": user_email}
-        
-    except Exception as e:
-        logger.error(f"Failed to send subscription expired email: {str(e)}")
-        return {"success": False, "error": str(e)}
+    subscription_end_date: str,
+) -> bool:
+    """Send email when subscription has ended."""
+    subject = "Your Founderport subscription has ended"
+    html_body = f"""
+    <div style="{_subscription_base_styles()}">
+      <h2>Subscription ended</h2>
+      <p>Your Founderport subscription ended on <strong>{subscription_end_date[:10]}</strong>.</p>
+      <p>You can resubscribe anytime to continue using Founderport.</p>
+      <p>— The Founderport Team</p>
+    </div>
+    """
+    text_body = f"Your subscription ended on {subscription_end_date[:10]}. Resubscribe to continue."
+    return await asyncio.to_thread(_send_email, user_email, subject, html_body, text_body)
 
 
 async def send_billing_problem_email(
     user_email: str,
     amount: float,
     currency: str,
-    invoice_url: Optional[str] = None
-):
-    """Send email when there's a billing problem (payment failed)."""
-    try:
-        # Format amount
-        amount_formatted = f"${amount:.2f}" if currency.lower() == "usd" else f"{amount:.2f} {currency.upper()}"
-        
-        subject = "Billing Problem - Angel AI Premium"
-        
-        # Build email body
-        invoice_link = f"\n\nPlease update your payment method here: {invoice_url}" if invoice_url else ""
-        
-        body = f"""
-Billing Problem
-
-Dear User,
-
-We encountered a problem processing your payment for Angel AI Premium.
-
-Amount: {amount_formatted}
-
-Please update your payment method to continue your subscription. Your access may be limited until payment is successful.{invoice_link}
-
-If you have any questions, please contact our support team.
-
-Best regards,
-Angel AI Team
-"""
-        
-        logger.info(f"Sending billing problem email to {user_email}")
-        logger.info(f"Email subject: {subject}")
-        logger.info(f"Email body: {body}")
-        
-        return {"success": True, "email": user_email}
-        
-    except Exception as e:
-        logger.error(f"Failed to send billing problem email: {str(e)}")
-        return {"success": False, "error": str(e)}
+    invoice_url: str = None,
+) -> bool:
+    """Send email when a payment has failed."""
+    amt = f"{currency.upper()} {amount:.2f}"
+    invoice_line = ""
+    if invoice_url:
+        invoice_line = f'<p><a href="{invoice_url}" style="background: #0d9488; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">Update payment method</a></p>'
+    subject = "Action needed: your Founderport payment failed"
+    html_body = f"""
+    <div style="{_subscription_base_styles()}">
+      <h2>Payment failed</h2>
+      <p>We couldn't process your payment of {amt}.</p>
+      <p>Please update your payment method to avoid interruption of your service.</p>
+      {invoice_line}
+      <p>— The Founderport Team</p>
+    </div>
+    """
+    text_body = f"Payment of {amt} failed. Update your payment method. {invoice_url or ''}"
+    return await asyncio.to_thread(_send_email, user_email, subject, html_body, text_body)
 
 
 async def send_subscription_cancellation_email(
     user_email: str,
-    subscription_end_date: str
-):
-    """Send email when subscription is cancelled."""
-    try:
-        # Format date for display
-        if isinstance(subscription_end_date, str):
-            end = datetime.fromisoformat(subscription_end_date.replace('Z', '+00:00').replace('+00:00', ''))
-        else:
-            end = subscription_end_date
-        end_formatted = end.strftime("%B %d, %Y")
-        
-        subject = "Subscription Cancellation - Angel AI Premium"
-        
-        body = f"""
-Subscription Cancellation
-
-Dear User,
-
-Your Angel AI Premium subscription has been cancelled and will end on {end_formatted}.
-
-You will continue to have access to premium features until {end_formatted}.
-
-We're sorry to see you go! If you change your mind, you can reactivate your subscription anytime.
-
-If you have any questions, please contact our support team.
-
-Best regards,
-Angel AI Team
-"""
-        
-        logger.info(f"Sending subscription cancellation email to {user_email}")
-        logger.info(f"Email subject: {subject}")
-        logger.info(f"Email body: {body}")
-        
-        return {"success": True, "email": user_email}
-        
-    except Exception as e:
-        logger.error(f"Failed to send subscription cancellation email: {str(e)}")
-        return {"success": False, "error": str(e)}
-
-
-async def get_payment_method_last4(customer_id: str) -> Optional[str]:
-    """Get last 4 digits of customer's payment method."""
-    try:
-        customer = stripe.Customer.retrieve(customer_id)
-        if hasattr(customer, 'invoice_settings') and customer.invoice_settings.default_payment_method:
-            payment_method = stripe.PaymentMethod.retrieve(customer.invoice_settings.default_payment_method)
-            if hasattr(payment_method, 'card') and payment_method.card:
-                return payment_method.card.last4
-        # Try to get from payment methods list
-        payment_methods = stripe.PaymentMethod.list(customer=customer_id, type="card", limit=1)
-        if payment_methods.data and len(payment_methods.data) > 0:
-            if hasattr(payment_methods.data[0], 'card') and payment_methods.data[0].card:
-                return payment_methods.data[0].card.last4
-        return None
-    except Exception as e:
-        logger.warning(f"Could not retrieve payment method last4: {str(e)}")
-        return None
-
+    subscription_end_date: str = None,
+) -> bool:
+    """Send email when user cancels their subscription (cancel_at_period_end)."""
+    end_line = f"<p>Your access continues until <strong>{subscription_end_date[:10]}</strong>.</p>" if subscription_end_date else ""
+    subject = "Your Founderport subscription has been cancelled"
+    html_body = f"""
+    <div style="{_subscription_base_styles()}">
+      <h2>Subscription cancelled</h2>
+      <p>Your Founderport subscription has been cancelled.</p>
+      {end_line}
+      <p>You can resubscribe anytime.</p>
+      <p>— The Founderport Team</p>
+    </div>
+    """
+    text_body = f"Your subscription has been cancelled. {f'Access until {subscription_end_date[:10]}' if subscription_end_date else ''}"
+    return await asyncio.to_thread(_send_email, user_email, subject, html_body, text_body)

@@ -267,46 +267,58 @@ async def send_reset_password_email(email: str):
     Returns email address if successful.
     """
     try:
-        # Check if user exists first
-        if not _check_user_exists(email):
-            logger.warning(f"Password reset requested for non-existent email: {email}")
-            raise ValueError("This account is not available. Please check your email address.")
+        user_obj = None
+        try:
+            if not _check_user_exists(email):
+                logger.warning(f"Password reset requested for non-existent email: {email}")
+                raise ValueError("This account is not available. Please check your email address.")
+            user_obj = _get_user_by_email(email)
+            if not user_obj:
+                logger.error(f"User exists in database but not found in admin API for email: {email}")
+                raise ValueError("User account found but unable to process reset. Please contact support.")
+        except ValueError:
+            raise
+        except Exception as check_err:
+            msg = str(check_err).lower()
+            if "jwt" in msg or "token" in msg or "expired" in msg or "unauthorized" in msg or "forbidden" in msg:
+                logger.warning(f"User existence check failed (likely Supabase credentials): {check_err}. Attempting reset send anyway.")
+                # Proceed to send - Supabase reset_password_for_email will send only if user exists
+            else:
+                raise ValueError("Unable to verify email availability. Please try again later or contact support.") from check_err
         
-        # Get user by email using direct database query (RPC function)
-        # This efficiently queries auth.users table directly - works for any number of users
-        user_obj = _get_user_by_email(email)
+        if user_obj:
+            email_confirmed = getattr(user_obj, 'email_confirmed_at', None) is not None
+            if not email_confirmed:
+                logger.info(f"Password reset requested for unconfirmed email: {email} - will attempt to send anyway")
         
-        if not user_obj:
-            logger.error(f"User exists in database but not found in admin API for email: {email}")
-            raise ValueError("User account found but unable to process reset. Please contact support.")
-        
-        user_id = user_obj.id
-        
-        # Check if email is confirmed - we'll try to send reset email anyway
-        # If Supabase rejects it, we'll handle the error and provide helpful message
-        email_confirmed = getattr(user_obj, 'email_confirmed_at', None) is not None
-        if not email_confirmed:
-            logger.info(f"Password reset requested for unconfirmed email: {email} - will attempt to send anyway")
-        
-        # User exists, send password reset email using Supabase's email service
-        # Note: Supabase may allow password reset for unconfirmed emails depending on configuration
-        # Note: Email sender (support@founderport.ai) must be configured in Supabase Dashboard
-        # Authentication > Email Templates > Reset Password
-        # Also ensure SMTP is configured in Project Settings > Auth > SMTP Settings
         frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
         frontend_url = frontend_url.rstrip('/')
         redirect_url = f"{frontend_url}/reset-password"
-        
-        # Use reset_password_for_email - this generates the link AND sends the email in one call
-        # This is simpler and avoids rate limiting issues from calling multiple endpoints
+
+        # Custom email service: generate link via Supabase, send via our SMTP (bypasses Supabase 504)
+        from services.email_service import send_password_reset_email as send_reset_via_smtp
+
         try:
-            supabase.auth.reset_password_for_email(
-                email,
-                {
-                    "redirect_to": redirect_url
-                }
-            )
-            logger.info(f"Password reset email sent to {email}")
+            link_resp = supabase.auth.admin.generate_link({
+                "type": "recovery",
+                "email": email,
+                "options": {"redirect_to": redirect_url}
+            })
+            # gotrue GenerateLinkResponse has .properties.action_link
+            props = getattr(link_resp, 'properties', None) if link_resp else None
+            action_link = props.action_link if props and hasattr(props, 'action_link') else None
+
+            if action_link:
+                sent = send_reset_via_smtp(email, action_link)
+                if not sent:
+                    raise ValueError("Failed to send password reset email. Please check SMTP configuration (SMTP_USER, SMTP_PASSWORD in .env).")
+                logger.info(f"Password reset email sent via custom SMTP to {email}")
+            else:
+                # Fallback to Supabase built-in (may timeout with Office 365)
+                supabase.auth.reset_password_for_email(email, {"redirect_to": redirect_url})
+                logger.info(f"Password reset email sent via Supabase to {email}")
+        except ValueError:
+            raise
         except Exception as send_error:
             error_str = str(send_error).lower()
             
@@ -324,6 +336,14 @@ async def send_reset_password_email(email: str):
                 logger.warning(f"Password reset blocked for unconfirmed email: {email}")
                 raise ValueError("Please confirm your email address first. Check your inbox for the confirmation email, then try resetting your password again. If you didn't receive the confirmation email, please contact support.") from send_error
             
+            # Handle JWT/credential errors - backend Supabase key may be wrong or expired
+            if "jwt" in error_str or "token" in error_str or "expired" in error_str or "401" in str(send_error) or "403" in str(send_error):
+                logger.error(f"Supabase credential error sending reset email: {send_error}")
+                raise ValueError(
+                    "Backend Supabase credentials are invalid or expired. "
+                    "Please verify SUPABASE_SERVICE_ROLE_KEY in .env matches Supabase Dashboard > Project Settings > API > service_role key."
+                ) from send_error
+
             # Handle other errors
             logger.error(f"Failed to send password reset email: {send_error}")
             raise ValueError("Failed to send password reset email. Please check your Supabase email configuration (SMTP settings and email templates) or contact support.") from send_error
@@ -636,44 +656,27 @@ async def send_confirmation_email_after_acceptance(user_id: str):
             logger.info(f"Confirmation email already sent to {email}")
             return {"email": email, "message": "Confirmation email already sent"}
         
-        # Generate confirmation link using admin API
+        # Generate confirmation link and send via custom SMTP (bypasses Supabase 504)
         frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
         frontend_url = frontend_url.rstrip('/')
         redirect_url = f"{frontend_url}/auth/confirm"
         
-        try:
-            # Generate signup confirmation link and send email
-            # Using generate_link with type "signup" should send the email
-            link_response = supabase.auth.admin.generate_link({
-                "type": "signup",
-                "email": email,
-                "options": {
-                    "redirect_to": redirect_url
-                }
-            })
-            
-            # Note: generate_link with type "signup" generates the link but may not send email
-            # If email confirmations are disabled in Supabase, we need to send it manually
-            # Try to resend confirmation email using admin API
-            try:
-                # Update user to trigger email resend (if needed)
-                # This ensures the email is sent even if generate_link doesn't send it
-                supabase.auth.admin.update_user_by_id(
-                    user_id,
-                    {
-                        "email_confirm": False  # Keep unconfirmed, but this might trigger email
-                    }
-                )
-            except Exception as update_error:
-                logger.warning(f"Could not update user to trigger email: {update_error}")
-            
-            logger.info(f"Confirmation link generated for {email}")
-            
-        except Exception as link_error:
-            logger.error(f"Failed to generate confirmation link: {link_error}")
-            # Try alternative: Use the user's email to manually send via Supabase email service
-            # Note: This requires Supabase email service to be configured
-            raise ValueError("Failed to generate confirmation link. Please contact support.") from link_error
+        from services.email_service import send_signup_confirmation_email as send_confirm_via_smtp
+
+        link_response = supabase.auth.admin.generate_link({
+            "type": "signup",
+            "email": email,
+            "options": {"redirect_to": redirect_url}
+        })
+        props = getattr(link_response, 'properties', None) if link_response else None
+        action_link = props.get('action_link') if isinstance(props, dict) else (getattr(props, 'action_link', None) if props else None)
+
+        if action_link:
+            sent = send_confirm_via_smtp(email, action_link)
+            if not sent:
+                raise ValueError("Failed to send confirmation email. Check SMTP configuration (SMTP_USER, SMTP_PASSWORD in .env).")
+        else:
+            raise ValueError("Could not generate confirmation link. Please contact support.")
         
         # Mark email as sent
         from datetime import datetime
