@@ -42,10 +42,12 @@ class RefreshTokenSchema(BaseModel):
 
 
 class AcceptTermsSchema(BaseModel):
+    email: EmailStr
     name: str = Field(..., min_length=1, description="User's full name for acceptance record")
     date: str = Field(..., description="Acceptance date in YYYY-MM-DD format")
 
 
 class AcceptPrivacySchema(BaseModel):
+    email: EmailStr
     name: str = Field(..., min_length=1, description="User's full name for acceptance record")
     date: str = Field(..., description="Acceptance date in YYYY-MM-DD format")

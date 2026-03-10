@@ -95,13 +95,12 @@ def refresh_token(token: RefreshTokenSchema):
 
 @auth_router.post("/accept-terms")
 async def accept_terms_endpoint(
-    request: Request,
     data: AcceptTermsSchema,
-    _: None = Depends(verify_auth_token)
 ):
     """Accept Terms and Conditions. Returns True if both Terms and Privacy are now accepted."""
     try:
-        user_id = request.state.user["id"]
+        from services.auth_service import _require_user_id_by_email
+        user_id = _require_user_id_by_email(data.email)
         both_accepted = await accept_terms(user_id, data.name, data.date)
         
         # If both are now accepted, send confirmation email
@@ -127,13 +126,12 @@ async def accept_terms_endpoint(
 
 @auth_router.post("/accept-privacy")
 async def accept_privacy_endpoint(
-    request: Request,
     data: AcceptPrivacySchema,
-    _: None = Depends(verify_auth_token)
 ):
     """Accept Privacy Policy. Returns True if both Terms and Privacy are now accepted."""
     try:
-        user_id = request.state.user["id"]
+        from services.auth_service import _require_user_id_by_email
+        user_id = _require_user_id_by_email(data.email)
         both_accepted = await accept_privacy(user_id, data.name, data.date)
         
         # If both are now accepted, send confirmation email

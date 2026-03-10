@@ -101,6 +101,13 @@ def _get_user_by_email(email: str):
             return None
 
 
+def _require_user_id_by_email(email: str) -> str:
+    user = _get_user_by_email(email)
+    if not user or not getattr(user, "id", None):
+        raise ValueError("User not found for this email.")
+    return user.id
+
+
 async def create_user(email: str, password: str, full_name: str):
     # Check if user already exists before attempting signup
     if _check_user_exists(email):
