@@ -39,12 +39,29 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
     print(f"🔗 Path: {request.url.path}")
     print(f"📝 Errors: {exc.errors()}")
 
+    # Make Pydantic's default messages more user-friendly
+    details = exc.errors()
+    for err in details:
+        try:
+            err_type = err.get("type")
+            loc = err.get("loc") or []
+            field = loc[-1] if loc else "field"
+            ctx = err.get("ctx") or {}
+
+            if err_type == "string_too_short" and "min_length" in ctx:
+                err["msg"] = f"{field} must be at least {ctx['min_length']} characters."
+            elif err_type == "string_too_long" and "max_length" in ctx:
+                err["msg"] = f"{field} must be at most {ctx['max_length']} characters."
+        except Exception:
+            # If formatting fails, keep the original error unchanged
+            pass
+
     return JSONResponse(
         status_code=422,
         content={
             "success": False,
             "error": "Validation Error",
-            "details": exc.errors(),
+            "details": details,
         },
     )
 
