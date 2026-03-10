@@ -1,6 +1,7 @@
 from db.supabase import supabase
 import logging
 import os
+import httpx
 from gotrue.errors import AuthApiError
 
 logger = logging.getLogger(__name__)
@@ -262,9 +263,8 @@ async def authenticate_user(email: str, password: str):
 
 async def send_reset_password_email(email: str):
     """
-    Send password reset email to user with 10-minute expiration.
-    Uses Supabase admin API to generate recovery link and stores token with expiration.
-    Returns email address if successful.
+    Send password reset email to user.
+    Supabase handles sending the email using its SMTP + templates.
     """
     try:
         user_obj = None
@@ -295,28 +295,9 @@ async def send_reset_password_email(email: str):
         frontend_url = frontend_url.rstrip('/')
         redirect_url = f"{frontend_url}/reset-password"
 
-        # Custom email service: generate link via Supabase, send via our SMTP (bypasses Supabase 504)
-        from services.email_service import send_password_reset_email as send_reset_via_smtp
-
         try:
-            link_resp = supabase.auth.admin.generate_link({
-                "type": "recovery",
-                "email": email,
-                "options": {"redirect_to": redirect_url}
-            })
-            # gotrue GenerateLinkResponse has .properties.action_link
-            props = getattr(link_resp, 'properties', None) if link_resp else None
-            action_link = props.action_link if props and hasattr(props, 'action_link') else None
-
-            if action_link:
-                sent = send_reset_via_smtp(email, action_link)
-                if not sent:
-                    raise ValueError("Failed to send password reset email. Please check SMTP configuration (SMTP_USER, SMTP_PASSWORD in .env).")
-                logger.info(f"Password reset email sent via custom SMTP to {email}")
-            else:
-                # Fallback to Supabase built-in (may timeout with Office 365)
-                supabase.auth.reset_password_for_email(email, {"redirect_to": redirect_url})
-                logger.info(f"Password reset email sent via Supabase to {email}")
+            supabase.auth.reset_password_for_email(email, {"redirect_to": redirect_url})
+            logger.info(f"Password reset email triggered via Supabase for {email}")
         except ValueError:
             raise
         except Exception as send_error:
@@ -347,13 +328,6 @@ async def send_reset_password_email(email: str):
             # Handle other errors
             logger.error(f"Failed to send password reset email: {send_error}")
             raise ValueError("Failed to send password reset email. Please check your Supabase email configuration (SMTP settings and email templates) or contact support.") from send_error
-        
-        # Note: Token tracking removed - Supabase manages token expiration (default 1 hour)
-        # If you need custom 10-minute expiration, you would need to:
-        # 1. Use generate_link to get the token
-        # 2. Store it in password_reset_tokens table
-        # 3. Send email via your own SMTP
-        # For now, we use Supabase's built-in reset_password_for_email which handles everything
         
         return {
             "email": email, 
@@ -656,27 +630,39 @@ async def send_confirmation_email_after_acceptance(user_id: str):
             logger.info(f"Confirmation email already sent to {email}")
             return {"email": email, "message": "Confirmation email already sent"}
         
-        # Generate confirmation link and send via custom SMTP (bypasses Supabase 504)
+        # Trigger Supabase to send the confirmation email using its templates/SMTP
         frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
         frontend_url = frontend_url.rstrip('/')
         redirect_url = f"{frontend_url}/auth/confirm"
-        
-        from services.email_service import send_signup_confirmation_email as send_confirm_via_smtp
 
-        link_response = supabase.auth.admin.generate_link({
-            "type": "signup",
-            "email": email,
-            "options": {"redirect_to": redirect_url}
-        })
-        props = getattr(link_response, 'properties', None) if link_response else None
-        action_link = props.get('action_link') if isinstance(props, dict) else (getattr(props, 'action_link', None) if props else None)
+        supabase_url = os.getenv("SUPABASE_URL")
+        service_role = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if not supabase_url or not service_role:
+            raise ValueError("Supabase is not configured. Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.")
 
-        if action_link:
-            sent = send_confirm_via_smtp(email, action_link)
-            if not sent:
-                raise ValueError("Failed to send confirmation email. Check SMTP configuration (SMTP_USER, SMTP_PASSWORD in .env).")
-        else:
-            raise ValueError("Could not generate confirmation link. Please contact support.")
+        try:
+            # Call GoTrue resend endpoint directly (supabase-py doesn't expose this reliably across versions)
+            # Docs: POST /auth/v1/resend with { type: "signup", email, options: { email_redirect_to } }
+            resp = httpx.post(
+                f"{supabase_url.rstrip('/')}/auth/v1/resend",
+                headers={
+                    "apikey": service_role,
+                    "Authorization": f"Bearer {service_role}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "type": "signup",
+                    "email": email,
+                    "options": {"email_redirect_to": redirect_url},
+                },
+                timeout=30.0,
+            )
+            if resp.status_code >= 400:
+                raise ValueError(resp.text or f"HTTP {resp.status_code}")
+        except ValueError:
+            raise
+        except Exception as send_error:
+            raise ValueError(f"Failed to trigger confirmation email via Supabase: {send_error}") from send_error
         
         # Mark email as sent
         from datetime import datetime
