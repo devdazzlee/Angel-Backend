@@ -95,12 +95,19 @@ def refresh_token(token: RefreshTokenSchema):
 
 @auth_router.post("/accept-terms")
 async def accept_terms_endpoint(
+    request: Request,
     data: AcceptTermsSchema,
+    _: None = Depends(verify_auth_token)
 ):
     """Accept Terms and Conditions. Returns True if both Terms and Privacy are now accepted."""
     try:
+        # Get email from JWT token (set by verify_auth_token)
+        user_email = request.state.user.get("email")
+        if not user_email:
+            raise HTTPException(status_code=401, detail="User email not found in token")
+        
         from services.auth_service import _require_user_id_by_email
-        user_id = _require_user_id_by_email(data.email)
+        user_id = _require_user_id_by_email(user_email)
         both_accepted = await accept_terms(user_id, data.name, data.date)
         
         # If both are now accepted, send confirmation email
@@ -126,12 +133,19 @@ async def accept_terms_endpoint(
 
 @auth_router.post("/accept-privacy")
 async def accept_privacy_endpoint(
+    request: Request,
     data: AcceptPrivacySchema,
+    _: None = Depends(verify_auth_token)
 ):
     """Accept Privacy Policy. Returns True if both Terms and Privacy are now accepted."""
     try:
+        # Get email from JWT token (set by verify_auth_token)
+        user_email = request.state.user.get("email")
+        if not user_email:
+            raise HTTPException(status_code=401, detail="User email not found in token")
+        
         from services.auth_service import _require_user_id_by_email
-        user_id = _require_user_id_by_email(data.email)
+        user_id = _require_user_id_by_email(user_email)
         both_accepted = await accept_privacy(user_id, data.name, data.date)
         
         # If both are now accepted, send confirmation email

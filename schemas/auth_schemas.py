@@ -42,12 +42,12 @@ class RefreshTokenSchema(BaseModel):
 
 
 class AcceptTermsSchema(BaseModel):
-    email: EmailStr
+    # email is now optional - will be extracted from JWT token via verify_auth_token
     name: str = Field(..., min_length=1, description="User's full name for acceptance record")
     date: str = Field(..., description="Acceptance date in YYYY-MM-DD format")
 
 
 class AcceptPrivacySchema(BaseModel):
-    email: EmailStr
+    # email is now optional - will be extracted from JWT token via verify_auth_token
     name: str = Field(..., min_length=1, description="User's full name for acceptance record")
     date: str = Field(..., description="Acceptance date in YYYY-MM-DD format")

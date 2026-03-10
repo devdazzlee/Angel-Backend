@@ -187,6 +187,51 @@ async def create_user(email: str, password: str, full_name: str):
         logger.warning(f"Failed to create legal acceptance record: {e}")
         # Don't fail signup if this fails, but log it
 
+    # Send confirmation email immediately after signup
+    # (Changed from waiting for Terms/Privacy acceptance since flow now shows those after login)
+    try:
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+        frontend_url = frontend_url.rstrip('/')
+        redirect_url = f"{frontend_url}/auth/confirm"
+        
+        supabase_url = os.getenv("SUPABASE_URL")
+        service_role = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if supabase_url and service_role:
+            # Call GoTrue resend endpoint to send confirmation email
+            resp = httpx.post(
+                f"{supabase_url.rstrip('/')}/auth/v1/resend",
+                headers={
+                    "apikey": service_role,
+                    "Authorization": f"Bearer {service_role}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "type": "signup",
+                    "email": email,
+                    "options": {"email_redirect_to": redirect_url},
+                },
+                timeout=30.0,
+            )
+            if resp.status_code < 400:
+                # Mark email as sent
+                from datetime import datetime
+                try:
+                    supabase.table("user_legal_acceptances").update({
+                        "email_confirmation_sent": True,
+                        "email_confirmation_sent_at": datetime.now().isoformat()
+                    }).eq("user_id", user_id).execute()
+                    logger.info(f"Confirmation email sent to {email} immediately after signup")
+                except Exception as update_error:
+                    logger.warning(f"Failed to update email_confirmation_sent flag: {update_error}")
+            else:
+                logger.warning(f"Failed to send confirmation email: HTTP {resp.status_code} - {resp.text}")
+        else:
+            logger.warning("Supabase URL or service role key not configured - cannot send confirmation email")
+    except Exception as email_error:
+        # Don't fail signup if email sending fails - log it but continue
+        logger.warning(f"Failed to send confirmation email after signup: {email_error}")
+        # User can request resend later if needed
+
     try:
         updated_user_response = supabase.auth.admin.get_user_by_id(user_id)
         return updated_user_response.user
@@ -302,9 +347,12 @@ async def send_reset_password_email(email: str):
         frontend_url = frontend_url.rstrip('/')
         redirect_url = f"{frontend_url}/reset-password"
 
+        # Use Supabase's standard reset_password_for_email method
+        # This creates a proper recovery link that Supabase's verify endpoint can process
+        # The redirect_to URL must be in Supabase's allowed redirect URLs list
         try:
             supabase.auth.reset_password_for_email(email, {"redirect_to": redirect_url})
-            logger.info(f"Password reset email triggered via Supabase for {email}")
+            logger.info(f"Password reset email triggered via Supabase for {email} (redirect_to: {redirect_url})")
         except ValueError:
             raise
         except Exception as send_error:
@@ -386,13 +434,23 @@ async def update_password(token: str, new_password: str):
             
             # Check expiration
             if exp:
-                from datetime import datetime, timezone
+                from datetime import datetime, timezone, timedelta
                 exp_datetime = datetime.fromtimestamp(exp, tz=timezone.utc)
                 now = datetime.now(timezone.utc)
+                time_until_expiry = exp_datetime - now
+                time_until_expiry_seconds = time_until_expiry.total_seconds()
                 
-                if now > exp_datetime:
-                    logger.warning(f"Password reset token expired for user: {user_id}")
+                # Log token expiration details for debugging
+                logger.info(f"Recovery token expiration check - Now: {now.isoformat()}, Expires: {exp_datetime.isoformat()}, Time until expiry: {time_until_expiry_seconds:.0f} seconds ({time_until_expiry_seconds/60:.1f} minutes)")
+                
+                # Add 5 second buffer to account for clock skew and processing time
+                if time_until_expiry_seconds < -5:
+                    logger.warning(f"Password reset token expired for user: {user_id}. Token expired {abs(time_until_expiry_seconds):.0f} seconds ago.")
                     raise ValueError("Password reset link has expired. Please request a new password reset link.")
+                elif time_until_expiry_seconds < 60:
+                    logger.warning(f"Password reset token expiring soon for user: {user_id}. Only {time_until_expiry_seconds:.0f} seconds remaining.")
+            else:
+                logger.warning(f"Recovery token missing 'exp' claim - cannot verify expiration")
             
             logger.info(f"Decoded recovery token for user_id: {user_id}, email: {email}")
             

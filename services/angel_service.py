@@ -2780,7 +2780,7 @@ Let's continue with the current business planning question.""",
 
 # ── Tone & grounding helpers (hallucination mitigation) ─────────────────────
 
-def build_tone_directive(session_data: dict | None) -> str:
+def build_tone_directive(session_data: Optional[dict]) -> str:
     """Build a system-prompt snippet that calibrates affirmation and
     constructive-feedback intensity based on session / global config.
 
@@ -2828,7 +2828,7 @@ Instead the user should feel:
 """
 
 
-def build_business_grounding(session_data: dict | None, history: list) -> str:
+def build_business_grounding(session_data: Optional[dict], history: list) -> str:
     """Return a system-prompt snippet that grounds the LLM in the user's
     declared business type so it never hallucinates a different industry.
 

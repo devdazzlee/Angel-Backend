@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import smtplib
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -23,33 +24,52 @@ logger = logging.getLogger(__name__)
 def _get_smtp_config():
     host = os.getenv("SMTP_HOST", "smtp.office365.com")
     port = int(os.getenv("SMTP_PORT", "587"))
-    user = os.getenv("SMTP_USER", "")
+    # Support both SMTP_USER and SMTP_USERNAME for compatibility
+    user = os.getenv("SMTP_USER") or os.getenv("SMTP_USERNAME", "")
     password = os.getenv("SMTP_PASSWORD", "")
     from_name = os.getenv("SMTP_FROM_NAME", "Founderport")
-    return host, port, user, password, from_name
+    # Use SMTP_FROM_EMAIL, fallback to SMTP_USER if it looks like an email
+    from_email = os.getenv("SMTP_FROM_EMAIL", "")
+    if not from_email and user and "@" in user:
+        from_email = user
+    # Determine if we should use SSL (port 465) or TLS (port 587)
+    use_ssl = port == 465 or os.getenv("SMTP_USE_TLS", "true").lower() in ("false", "0", "no")
+    return host, port, user, password, from_name, from_email, use_ssl
 
 
 def _send_email(to_email: str, subject: str, html_body: str, text_body: str = None) -> bool:
     """Send email via SMTP. Returns True on success."""
-    host, port, user, password, from_name = _get_smtp_config()
+    host, port, user, password, from_name, from_email, use_ssl = _get_smtp_config()
     if not user or not password:
-        logger.error("SMTP_USER and SMTP_PASSWORD must be set in .env")
+        logger.error("SMTP_USER (or SMTP_USERNAME) and SMTP_PASSWORD must be set in .env")
+        return False
+    
+    if not from_email:
+        logger.error("SMTP_FROM_EMAIL must be set in .env file")
         return False
 
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
-        msg["From"] = f"{from_name} <{user}>"
+        msg["From"] = f"{from_name} <{from_email}>"
         msg["To"] = to_email
 
         if text_body:
             msg.attach(MIMEText(text_body, "plain"))
         msg.attach(MIMEText(html_body, "html"))
 
-        with smtplib.SMTP(host, port) as server:
-            server.starttls()
-            server.login(user, password)
-            server.sendmail(user, to_email, msg.as_string())
+        # Use SSL for port 465 (Resend, Gmail SSL), TLS for port 587 (Office 365, Gmail TLS)
+        if use_ssl:
+            # Port 465 uses SSL directly
+            with smtplib.SMTP_SSL(host, port) as server:
+                server.login(user, password)
+                server.sendmail(from_email, to_email, msg.as_string())
+        else:
+            # Port 587 uses STARTTLS
+            with smtplib.SMTP(host, port) as server:
+                server.starttls()
+                server.login(user, password)
+                server.sendmail(from_email, to_email, msg.as_string())
 
         logger.info(f"Email sent to {to_email}: {subject}")
         return True
@@ -62,39 +82,154 @@ def send_password_reset_email(to_email: str, reset_link: str) -> bool:
     """Send password reset email with link."""
     subject = "Reset your Founderport password"
     html_body = f"""
-    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2>Reset your password</h2>
-      <p>You requested a password reset for your Founderport account.</p>
-      <p>Click the button below to set a new password:</p>
-      <p style="margin: 24px 0;">
-        <a href="{reset_link}" style="background: #0d9488; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">Reset password</a>
-      </p>
-      <p>Or copy this link: <a href="{reset_link}">{reset_link}</a></p>
-      <p style="color: #666; font-size: 14px;">This link expires in 1 hour. If you didn't request this, you can ignore this email.</p>
-      <p>— The Founderport Team</p>
-    </div>
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    </head>
+    <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f5;">
+      <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f5f5;">
+        <tr>
+          <td style="padding: 40px 20px;">
+            <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); border-collapse: collapse;">
+              <!-- Header -->
+              <tr>
+                <td style="padding: 40px 40px 30px; text-align: center; background: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%); border-radius: 12px 12px 0 0;">
+                  <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 600; letter-spacing: -0.5px;">Reset Your Password</h1>
+                </td>
+              </tr>
+              <!-- Content -->
+              <tr>
+                <td style="padding: 40px 40px 30px;">
+                  <p style="margin: 0 0 16px; color: #1f2937; font-size: 16px; line-height: 1.6;">Hello,</p>
+                  <p style="margin: 0 0 24px; color: #4b5563; font-size: 16px; line-height: 1.6;">You requested a password reset for your Founderport account. Click the button below to set a new password:</p>
+                  
+                  <!-- CTA Button -->
+                  <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 32px 0;">
+                    <tr>
+                      <td style="text-align: center;">
+                        <a href="{reset_link}" style="display: inline-block; background: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%); color: #ffffff; text-decoration: none; padding: 16px 32px; border-radius: 8px; font-weight: 600; font-size: 16px; box-shadow: 0 4px 6px rgba(13, 148, 136, 0.3); transition: all 0.3s ease;">Reset Password</a>
+                      </td>
+                    </tr>
+                  </table>
+                  
+                  <!-- Alternative Link -->
+                  <p style="margin: 32px 0 16px; color: #6b7280; font-size: 14px; line-height: 1.5;">Or copy and paste this link into your browser:</p>
+                  <p style="margin: 0 0 32px; padding: 12px; background-color: #f9fafb; border-radius: 6px; word-break: break-all;">
+                    <a href="{reset_link}" style="color: #0d9488; text-decoration: none; font-size: 13px; line-height: 1.5;">{reset_link}</a>
+                  </p>
+                  
+                  <!-- Security Notice -->
+                  <div style="margin: 32px 0; padding: 16px; background-color: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
+                    <p style="margin: 0; color: #92400e; font-size: 14px; line-height: 1.5;">
+                      <strong>⏰ This link expires in 1 hour.</strong><br>
+                      If you didn't request this password reset, you can safely ignore this email.
+                    </p>
+                  </div>
+                </td>
+              </tr>
+              <!-- Footer -->
+              <tr>
+                <td style="padding: 30px 40px; text-align: center; background-color: #f9fafb; border-radius: 0 0 12px 12px; border-top: 1px solid #e5e7eb;">
+                  <p style="margin: 0 0 8px; color: #6b7280; font-size: 14px;">— The Founderport Team</p>
+                  <p style="margin: 0; color: #9ca3af; font-size: 12px;">© {datetime.now().year} Founderport. All rights reserved.</p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
     """
-    text_body = f"Reset your password: {reset_link}\n\nThis link expires in 1 hour."
+    text_body = f"""Reset your Founderport password
+
+You requested a password reset for your Founderport account.
+
+Click this link to reset your password:
+{reset_link}
+
+This link expires in 1 hour. If you didn't request this, you can safely ignore this email.
+
+— The Founderport Team"""
     return _send_email(to_email, subject, html_body, text_body)
 
 
 def send_signup_confirmation_email(to_email: str, confirm_link: str) -> bool:
     """Send signup confirmation email with link."""
-    subject = "Confirm your Founderport account"
+    subject = "Welcome to Founderport - Confirm your email"
     html_body = f"""
-    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2>Confirm your email</h2>
-      <p>Thanks for signing up for Founderport!</p>
-      <p>Click the button below to confirm your email address:</p>
-      <p style="margin: 24px 0;">
-        <a href="{confirm_link}" style="background: #0d9488; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">Confirm email</a>
-      </p>
-      <p>Or copy this link: <a href="{confirm_link}">{confirm_link}</a></p>
-      <p style="color: #666; font-size: 14px;">If you didn't create an account, you can ignore this email.</p>
-      <p>— The Founderport Team</p>
-    </div>
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    </head>
+    <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f5;">
+      <table role="presentation" style="width: 100%; border-collapse: collapse; background-color: #f5f5f5;">
+        <tr>
+          <td style="padding: 40px 20px;">
+            <table role="presentation" style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); border-collapse: collapse;">
+              <!-- Header -->
+              <tr>
+                <td style="padding: 40px 40px 30px; text-align: center; background: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%); border-radius: 12px 12px 0 0;">
+                  <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 600; letter-spacing: -0.5px;">Welcome to Founderport! 🎉</h1>
+                </td>
+              </tr>
+              <!-- Content -->
+              <tr>
+                <td style="padding: 40px 40px 30px;">
+                  <p style="margin: 0 0 16px; color: #1f2937; font-size: 16px; line-height: 1.6;">Hello,</p>
+                  <p style="margin: 0 0 24px; color: #4b5563; font-size: 16px; line-height: 1.6;">Thanks for signing up for Founderport! We're excited to have you on board. To get started, please confirm your email address by clicking the button below:</p>
+                  
+                  <!-- CTA Button -->
+                  <table role="presentation" style="width: 100%; border-collapse: collapse; margin: 32px 0;">
+                    <tr>
+                      <td style="text-align: center;">
+                        <a href="{confirm_link}" style="display: inline-block; background: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%); color: #ffffff; text-decoration: none; padding: 16px 32px; border-radius: 8px; font-weight: 600; font-size: 16px; box-shadow: 0 4px 6px rgba(13, 148, 136, 0.3); transition: all 0.3s ease;">Confirm Email Address</a>
+                      </td>
+                    </tr>
+                  </table>
+                  
+                  <!-- Alternative Link -->
+                  <p style="margin: 32px 0 16px; color: #6b7280; font-size: 14px; line-height: 1.5;">Or copy and paste this link into your browser:</p>
+                  <p style="margin: 0 0 32px; padding: 12px; background-color: #f9fafb; border-radius: 6px; word-break: break-all;">
+                    <a href="{confirm_link}" style="color: #0d9488; text-decoration: none; font-size: 13px; line-height: 1.5;">{confirm_link}</a>
+                  </p>
+                  
+                  <!-- Security Notice -->
+                  <div style="margin: 32px 0; padding: 16px; background-color: #f0f9ff; border-left: 4px solid #0d9488; border-radius: 4px;">
+                    <p style="margin: 0; color: #0c4a6e; font-size: 14px; line-height: 1.5;">
+                      <strong>💡 What's next?</strong><br>
+                      Once you confirm your email, you'll have full access to all Founderport features. If you didn't create an account, you can safely ignore this email.
+                    </p>
+                  </div>
+                </td>
+              </tr>
+              <!-- Footer -->
+              <tr>
+                <td style="padding: 30px 40px; text-align: center; background-color: #f9fafb; border-radius: 0 0 12px 12px; border-top: 1px solid #e5e7eb;">
+                  <p style="margin: 0 0 8px; color: #6b7280; font-size: 14px;">— The Founderport Team</p>
+                  <p style="margin: 0; color: #9ca3af; font-size: 12px;">© {datetime.now().year} Founderport. All rights reserved.</p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
     """
-    text_body = f"Confirm your email: {confirm_link}"
+    text_body = f"""Welcome to Founderport!
+
+Thanks for signing up! Please confirm your email address by clicking this link:
+
+{confirm_link}
+
+If you didn't create an account, you can safely ignore this email.
+
+— The Founderport Team"""
     return _send_email(to_email, subject, html_body, text_body)
 
 
