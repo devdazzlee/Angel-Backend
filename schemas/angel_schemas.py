@@ -7,6 +7,7 @@ class CreateSessionSchema(BaseModel):
 
 class ChatRequestSchema(BaseModel):
     content: str = Field(...)
+    context: Optional[str] = Field(default=None, description="Chat context: 'budget_chat' allows chat during budget transitions")
 
     # Optional: Add this if you want to prevent null explicitly (helps with OpenAPI docs or frontend errors)
     @classmethod

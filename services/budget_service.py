@@ -507,11 +507,22 @@ class BudgetService:
                     amount = 0.0
                 description = match.group(3).strip() if match.group(3) else None
 
+                # Detect revenue items misplaced under expense headers by the AI
+                # (e.g., description says "Revenue from..." but AI put it under Startup Costs)
+                actual_cat = current_cat
+                actual_sub = current_sub
+                desc_lower = (description or '').lower()
+                name_lower = name.lower()
+                revenue_signals = ['revenue from', 'income from', 'sales of', 'revenue stream']
+                if actual_cat == 'expense' and any(sig in desc_lower or sig in name_lower for sig in revenue_signals):
+                    actual_cat = 'revenue'
+                    actual_sub = 'revenue'
+
                 items.append(BudgetItemCreate(
                     id=str(uuid.uuid4()),
                     name=name,
-                    category=current_cat,
-                    subcategory=current_sub,
+                    category=actual_cat,
+                    subcategory=actual_sub,
                     estimated_amount=amount,
                     actual_amount=None,
                     description=description,

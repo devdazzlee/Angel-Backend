@@ -310,6 +310,8 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     
     # CRITICAL: Block normal chat processing during transition phases
     # User should interact with modals, not chat during transitions
+    # Exception: budget_chat context is allowed during PLAN_TO_BUDGET_TRANSITION
+    # because the user is on the Budget Setup page and chatting about budget items
     current_phase = session.get("current_phase", "")
     transition_phases = [
         "PLAN_TO_BUDGET_TRANSITION",
@@ -317,8 +319,11 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         "PLAN_TO_ROADMAP_TRANSITION",
         "ROADMAP_TO_IMPLEMENTATION_TRANSITION"
     ]
-    
-    if current_phase in transition_phases:
+
+    is_budget_chat = getattr(payload, 'context', None) == 'budget_chat'
+    budget_allowed = is_budget_chat and current_phase == "PLAN_TO_BUDGET_TRANSITION"
+
+    if current_phase in transition_phases and not budget_allowed:
         print(f"🚫 Blocking chat message - session is in transition phase: {current_phase}")
         print(f"   User should interact with the transition modal, not send chat messages")
         return {
