@@ -540,7 +540,7 @@ class BudgetService:
                 raise HTTPException(status_code=404, detail="Session not found")
 
             session = session_response.data[0]
-            history_response = supabase.table("chat_messages").select("*").eq(
+            history_response = supabase.table("chat_history").select("*").eq(
                 "session_id", session_id
             ).order("created_at").execute()
             history = [{"role": m.get("role"), "content": m.get("content", "")} for m in (history_response.data or [])]
