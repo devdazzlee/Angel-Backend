@@ -1604,6 +1604,12 @@ async def personalize_business_question(reply: str, history, session_data=None) 
     
     question_tag = tag_match.group(1)
     
+    # ROOT CAUSE FIX 2: Do NOT personalize auto-research/intro statements.
+    # The actual question is not being asked yet, so we shouldn't fetch the dynamic question wording.
+    auto_suggest_tags = ["BUSINESS_PLAN.11", "BUSINESS_PLAN.12", "BUSINESS_PLAN.17", "BUSINESS_PLAN.23", "BUSINESS_PLAN.26", "BUSINESS_PLAN.27", "BUSINESS_PLAN.34", "BUSINESS_PLAN.35", "BUSINESS_PLAN.42"]
+    if question_tag in auto_suggest_tags:
+        return reply
+        
     lines = reply.split("\n")
     
     # Find first question line after the tag
@@ -3781,6 +3787,14 @@ CRITICAL INSTRUCTIONS:
     # Add conversation history (trimmed for performance) and current message
     trimmed_history = trim_conversation_history(history, max_messages=10)
     msgs.extend(trimmed_history)
+    
+    # If the user clicked Accept, tell the AI exactly what that means so it doesn't get confused and apologize
+    if is_accept_command:
+        msgs.append({
+            "role": "system",
+            "content": "The user has clicked the 'Accept' button to approve your previously drafted content or research findings. Do NOT apologize. Do NOT say 'Apologies for the oversight'. Briefly acknowledge their acceptance (e.g., 'Great, I have saved that.'), and then immediately ask the next sequential question."
+        })
+        
     msgs.append({"role": "user", "content": user_content})
 
     response = await client.chat.completions.create(
