@@ -75,8 +75,17 @@ async def create_subscription_checkout_session(
     return session
 
 
+from datetime import datetime, timezone
+
 async def check_user_subscription_status(user_id: str) -> bool:
     """Check if user has an active subscription (active or trialing)."""
+    
+    # 🆓 FREE INTRO PERIOD LOGIC (Valid until August 30, 2026)
+    free_intro_end = datetime(2026, 8, 30, 23, 59, 59, tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) <= free_intro_end:
+        logger.info(f"User {user_id} granted premium access due to active Free Intro Period")
+        return True
+
     # Check for active or trialing subscriptions
     result = supabase.table("user_subscriptions").select("id, subscription_status").eq(
         "user_id", user_id

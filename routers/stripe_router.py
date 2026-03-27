@@ -76,7 +76,17 @@ async def check_subscription_status(
     # Check if subscription exists but payment failed
     payment_failed = False
     cancel_at_period_end = False
-    if subscription:
+    
+    # Check if in free intro period to completely pardon payment failures
+    free_intro_end = datetime(2026, 8, 30, 23, 59, 59, tzinfo=datetime.now().astimezone().tzinfo.__class__(None, 'UTC') if hasattr(datetime.now().astimezone().tzinfo, '__class__') else None)
+    try:
+        from datetime import timezone
+        free_intro_end = datetime(2026, 8, 30, 23, 59, 59, tzinfo=timezone.utc)
+        is_free_intro = datetime.now(timezone.utc) <= free_intro_end
+    except Exception:
+        is_free_intro = False
+    
+    if subscription and not is_free_intro:
         status = subscription.get("subscription_status", "").lower()
         payment_failed = status in ["past_due", "unpaid"]
         cancel_at_period_end = subscription.get("cancel_at_period_end", False)
