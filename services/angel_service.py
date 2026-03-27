@@ -7746,6 +7746,7 @@ FORMATTING REQUIREMENTS:
 - Start with [[Q:{question_tag}]] tag on its own line
 - Add a brief 1-2 sentence acknowledgment of the previous answer (if context available)
 - Then present the EXACT question from the questionnaire in **bold** on its own line
+- CRITICAL: Never include newlines or paragraph breaks (\n\n) INSIDE the bold tags.
 - Use clear, conversational language
 - Do NOT include "Question X" text - the UI displays it automatically
 - Do NOT add follow-up prompts, hints, "Thought Starter" lines, or sub-questions
