@@ -25,11 +25,18 @@ from services.auth_service import (
 )
 from middlewares.auth import verify_auth_token
 from fastapi import Depends, Request
+from utils.recaptcha import verify_recaptcha_token
 
 auth_router = APIRouter()
 
 @auth_router.post("/signup")
-async def signup(user: SignUpSchema):
+async def signup(request: Request, user: SignUpSchema):
+    try:
+        remote_ip = request.client.host if request.client else None
+        await verify_recaptcha_token(user.captcha_token, remote_ip=remote_ip)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     try:
         created_user = await create_user(user.email, user.password, user.full_name)
     except ValueError as exc:

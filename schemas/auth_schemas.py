@@ -8,6 +8,10 @@ class SignUpSchema(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6)
     confirm_password: str = Field(..., min_length=6)
+    captcha_token: Optional[str] = Field(
+        default=None,
+        description="Google reCAPTCHA token (required when RECAPTCHA_SECRET_KEY is set)",
+    )
 
     @model_validator(mode="after")
     def passwords_match(self) -> "SignUpSchema":
