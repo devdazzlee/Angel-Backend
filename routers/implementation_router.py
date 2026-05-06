@@ -123,6 +123,36 @@ task_manager = ImplementationTaskManager()
 task_cache = {}
 CACHE_TTL = 300  # 5 minutes cache
 
+
+def _normalize_roadmap_step_key(value: str) -> str:
+    """Normalize an Implementation task identifier or title into the canonical
+    form used to match roadmap rows on the frontend.
+
+    The frontend's `roadmapMatching.ts` performs the same kind of normalization
+    on the roadmap row's task name (lowercasing, stripping leading numbering,
+    collapsing non-alphanumerics to spaces). Storing the canonicalized key on
+    the backend keeps both sides aligned.
+    """
+    if not value:
+        return ""
+    text = str(value).replace("_", " ").lower()
+    return " ".join(text.split())
+
+
+def _record_completed_roadmap_step(business_context: Dict[str, Any], task_id: str) -> None:
+    """Append the normalized form of `task_id` to `completed_roadmap_step_keys`,
+    keeping the list deduplicated. Any falsy or empty key is ignored.
+    """
+    key = _normalize_roadmap_step_key(task_id)
+    if not key:
+        return
+    existing = business_context.get("completed_roadmap_step_keys") or []
+    if not isinstance(existing, list):
+        existing = []
+    if key not in existing:
+        existing.append(key)
+        business_context["completed_roadmap_step_keys"] = existing
+
 def _calculate_phases_completed(completed_tasks: List[str]) -> int:
     """Calculate number of phases completed based on completed tasks and substeps"""
     phase_tasks = {
@@ -361,19 +391,27 @@ async def get_current_implementation_task(session_id: str, request: Request):
             # Get substeps and current substep from task_details
             substeps = task_result["task_details"].get("substeps", [])
             current_substep = task_result["task_details"].get("current_substep", 1)
-            
-            # Mark completed substeps and determine current active substep
+
+            # The note map is keyed by substep id so each substep gets its
+            # own note back on the wire. Stored on /complete; consumed here.
+            substep_notes_map = business_context.get("substep_notes") or {}
+            if not isinstance(substep_notes_map, dict):
+                substep_notes_map = {}
+
+            # Mark completed substeps, attach the user's note (if any), and
+            # determine current active substep.
             active_substep_found = False
             for substep in substeps:
                 substep_id = f"{task_result['task_id']}_substep_{substep.get('step_number', 0)}"
                 is_completed = substep_id in completed_tasks
                 substep["completed"] = is_completed
-                
+                substep["note"] = substep_notes_map.get(substep_id, "")
+
                 # Find first incomplete substep as current
                 if not active_substep_found and not is_completed:
                     current_substep = substep.get('step_number', 1)
                     active_substep_found = True
-            
+
             # If all substeps completed, current_substep is the last one
             if not active_substep_found and substeps:
                 current_substep = substeps[-1].get('step_number', len(substeps))
@@ -652,11 +690,13 @@ async def complete_implementation_task(
     user_id = request.state.user["id"]
     
     try:
-        # Extract completion data
+        # Extract completion data. The frontend's substep flow sends the
+        # user's note as `completion_notes`; older callers sent it as
+        # `notes`. Accept either spelling so the note isn't silently dropped.
         decision = payload.get("decision", "")
         actions = payload.get("actions", "")
         documents = payload.get("documents", "")
-        notes = payload.get("notes", "")
+        notes = (payload.get("notes") or payload.get("completion_notes") or "").strip()
         substep_number = payload.get("substep_number")  # Optional: if completing a substep
         
         # Get session
@@ -744,7 +784,34 @@ async def complete_implementation_task(
             "decision": decision,
             "notes": notes
         }
-        
+
+        # Persist the user's note keyed by the same id we use to track
+        # completion (`{task_id}_substep_{step_number}` for substeps,
+        # bare `task_id` for full-task completion). This lets the GET
+        # endpoint hand each substep its own note back, so the Implementation
+        # dashboard can render the note inline and the "Click to Edit"
+        # modal can pre-fill what the user previously wrote. We always
+        # update on (re-)submit so editing a note actually saves the new
+        # value; if the user submits an empty note we drop the entry so
+        # stale notes can be cleared.
+        substep_notes_map = business_context.get("substep_notes") or {}
+        if not isinstance(substep_notes_map, dict):
+            substep_notes_map = {}
+        note_key = f"{task_id}_substep_{substep_number}" if substep_number else task_id
+        if notes:
+            substep_notes_map[note_key] = notes
+        elif note_key in substep_notes_map:
+            del substep_notes_map[note_key]
+        business_context["substep_notes"] = substep_notes_map
+
+        # If the main implementation task is now complete, record its
+        # normalized key so the Roadmap UI can render a real Status
+        # checkmark on the corresponding row. We deliberately do this only
+        # for full-task completion — substep completion is too granular to
+        # surface as a roadmap row state change.
+        if task_id in completed_tasks:
+            _record_completed_roadmap_step(business_context, task_id)
+
         # Save to database
         await patch_session(session_id, {
             "business_context": business_context
@@ -1101,8 +1168,12 @@ async def get_service_providers_for_step(request: Request):
         payload = await request.json()
         session_id = payload.get("session_id")
         task_context = payload.get("task_context", "business support")
+        # `category` is the Implementation phase name as the frontend knows
+        # it (e.g. "Legal Foundation"). We pass it as `phase_hint` so the
+        # provider service can constrain the returned categories
+        # deterministically, instead of inferring from free-text keywords.
         category = payload.get("category", "general")
-        
+
         if not session_id:
             raise HTTPException(status_code=400, detail="session_id is required")
         
@@ -1136,11 +1207,16 @@ async def get_service_providers_for_step(request: Request):
             "business_type": get_valid_value("business_type", "Startup")
         }
         
-        # Get service providers for the task
+        # Get service providers for the task. We pass `category` (the phase
+        # name from the frontend) as `phase_hint` so the provider service
+        # narrows the result to the categories that are actually relevant
+        # to the active step — see _PHASE_TO_CATEGORIES in
+        # service_provider_tables_service.
         provider_table = await generate_provider_table(
             task_context,
             business_context,
-            business_context.get('location', 'United States')
+            business_context.get('location', 'United States'),
+            phase_hint=category if category and category != "general" else None,
         )
         
         # Extract and format providers

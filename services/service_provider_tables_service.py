@@ -48,11 +48,24 @@ class ServiceProviderTableGenerator:
             }
         }
     
-    async def generate_service_provider_table(self, task_context: str, business_context: Dict[str, Any], location: str = None) -> Dict[str, Any]:
-        """Generate a comprehensive service provider table for a specific task"""
-        
+    async def generate_service_provider_table(self, task_context: str, business_context: Dict[str, Any], location: str = None, phase_hint: str = None) -> Dict[str, Any]:
+        """Generate a comprehensive service provider table for a specific task.
+
+        ``phase_hint`` is the Implementation phase the user is currently on
+        (e.g. ``"Legal Formation & Compliance"`` or ``"legal_formation"``).
+        When provided it deterministically constrains the set of provider
+        categories returned, instead of relying on free-text keyword
+        matching against ``task_context``. This is the right behaviour
+        because the only task-context strings the frontend sends today are
+        either the implementation task title or a generic placeholder, and
+        without a phase hint the keyword inference would frequently miss
+        and fan out to *every* category — producing irrelevant marketing /
+        IT / media providers for legal-formation tasks, and turning a
+        single LLM call into six.
+        """
+
         # Determine relevant service categories for the task
-        relevant_categories = self._determine_relevant_categories(task_context)
+        relevant_categories = self._determine_relevant_categories(task_context, phase_hint)
         
         # Generate providers for each relevant category
         provider_tables = {}
@@ -154,40 +167,114 @@ class ServiceProviderTableGenerator:
                 "rating": 4.5
             }]
     
-    def _determine_relevant_categories(self, task_context: str) -> List[str]:
-        """Determine which service categories are relevant for the task"""
-        
-        task_lower = task_context.lower()
-        relevant_categories = []
-        
-        # Legal keywords
-        if any(keyword in task_lower for keyword in ['legal', 'compliance', 'license', 'permit', 'regulation', 'contract', 'incorporation']):
+    # Map known Implementation phase names (and their normalized internal
+    # ids) deterministically to provider categories. The frontend sends the
+    # phase name as `category` on the /implementation/service-providers
+    # endpoint; this dict is the source of truth for what providers an
+    # active step in each phase should surface.
+    _PHASE_TO_CATEGORIES = {
+        "legal_formation": ["legal"],
+        "legal foundation": ["legal"],
+        "legal formation & compliance": ["legal"],
+        "financial_setup": ["financial"],
+        "financial systems": ["financial"],
+        "financial planning & setup": ["financial"],
+        "operations_development": ["operations"],
+        "operations setup": ["operations"],
+        "product & operations development": ["operations"],
+        "marketing_sales": ["marketing"],
+        "marketing & sales": ["marketing"],
+        "marketing & sales strategy": ["marketing"],
+        "launch_scaling": ["consulting", "marketing"],
+        "launch & growth": ["consulting", "marketing"],
+        "full launch & scaling": ["consulting", "marketing"],
+    }
+
+    def _determine_relevant_categories(self, task_context: str, phase_hint: str = None) -> List[str]:
+        """Determine which service categories are relevant for the task.
+
+        Resolution order:
+          1. If ``phase_hint`` matches a known Implementation phase, use the
+             deterministic mapping. This is the strongest signal — the
+             phase the user is on directly determines which provider
+             vertical applies.
+          2. Otherwise fall back to keyword inference on ``task_context``.
+             The keyword sets below intentionally cover the wording used by
+             the hand-coded implementation task ids (e.g.
+             "business_structure_selection") as well as the LLM-generated
+             roadmap step names.
+          3. If neither produces a hit, return a single safe default
+             (``["consulting"]``) rather than fanning out to every
+             category. Returning everything is what was producing
+             unrelated providers (marketing / IT / media) on a Legal
+             Formation step, and was also responsible for the ~6× LLM
+             round-trip slowness on the providers tab.
+        """
+
+        if phase_hint:
+            normalized_hint = phase_hint.strip().lower()
+            mapped = self._PHASE_TO_CATEGORIES.get(normalized_hint)
+            if mapped:
+                return list(mapped)
+
+        task_lower = (task_context or "").lower()
+        relevant_categories: List[str] = []
+
+        # Legal — covers business formation, structure choice, IP, licensing, compliance.
+        if any(keyword in task_lower for keyword in [
+            'legal', 'compliance', 'license', 'permit', 'regulation', 'contract',
+            'incorporation', 'incorporate', 'formation', 'structure', 'entity',
+            'llc', 'corporation', 'partnership', 'sole proprietor', 'register',
+            'registration', 'trademark', 'patent', 'intellectual property', 'ein',
+            'tax id', 'business name', 'naming', 'attorney', 'lawyer',
+        ]):
             relevant_categories.append("legal")
-        
-        # Financial keywords
-        if any(keyword in task_lower for keyword in ['financial', 'accounting', 'tax', 'banking', 'funding', 'budget', 'revenue']):
+
+        # Financial — accounting, tax, banking, funding.
+        if any(keyword in task_lower for keyword in [
+            'financial', 'finance', 'accounting', 'bookkeeping', 'tax', 'banking',
+            'bank account', 'funding', 'budget', 'revenue', 'cpa', 'invoice',
+            'payroll', 'expense', 'cash flow', 'capital',
+        ]):
             relevant_categories.append("financial")
-        
-        # Marketing keywords
-        if any(keyword in task_lower for keyword in ['marketing', 'branding', 'advertising', 'social media', 'content', 'promotion']):
+
+        # Marketing.
+        if any(keyword in task_lower for keyword in [
+            'marketing', 'branding', 'brand', 'advertising', 'ad campaign',
+            'social media', 'content', 'promotion', 'seo', 'public relations',
+            'pr', 'press', 'campaign', 'audience',
+        ]):
             relevant_categories.append("marketing")
-        
-        # Operations keywords
-        if any(keyword in task_lower for keyword in ['operations', 'supply', 'equipment', 'facilities', 'logistics', 'production']):
+
+        # Operations — supply chain, equipment, facilities.
+        if any(keyword in task_lower for keyword in [
+            'operations', 'supply', 'supplier', 'vendor', 'equipment', 'facility',
+            'facilities', 'logistics', 'production', 'inventory', 'fulfillment',
+            'warehouse', 'shipping',
+        ]):
             relevant_categories.append("operations")
-        
-        # Technology keywords
-        if any(keyword in task_lower for keyword in ['technology', 'software', 'IT', 'website', 'digital', 'automation']):
+
+        # Technology / IT.
+        if any(keyword in task_lower for keyword in [
+            'technology', 'software', ' it ', 'website', 'digital', 'automation',
+            'cloud', 'hosting', 'domain', 'web app', 'mobile app', 'platform',
+            'security', 'cybersecurity', 'database',
+        ]):
             relevant_categories.append("technology")
-        
-        # Consulting keywords
-        if any(keyword in task_lower for keyword in ['consulting', 'strategy', 'advice', 'guidance', 'expertise', 'planning']):
+
+        # Consulting — strategy, mentorship, advisory.
+        if any(keyword in task_lower for keyword in [
+            'consulting', 'consultant', 'strategy', 'advice', 'advisory',
+            'guidance', 'expertise', 'planning', 'mentor', 'coach',
+        ]):
             relevant_categories.append("consulting")
-        
-        # If no specific keywords found, include all categories for comprehensive coverage
+
         if not relevant_categories:
-            relevant_categories = list(self.provider_categories.keys())
-        
+            # Single safe default — generalist business consulting. Surfacing
+            # *all* categories here is what produced the irrelevant-providers
+            # bug, so we deliberately do not do that anymore.
+            relevant_categories = ["consulting"]
+
         return relevant_categories
     
     async def _generate_category_providers(self, category: str, business_context: Dict[str, Any], location: str = None) -> Dict[str, Any]:
@@ -723,9 +810,15 @@ class ServiceProviderTableGenerator:
 provider_table_generator = ServiceProviderTableGenerator()
 
 # Convenience functions
-async def generate_provider_table(task_context: str, business_context: Dict[str, Any], location: str = None) -> Dict[str, Any]:
-    """Generate a service provider table for a specific task"""
-    return await provider_table_generator.generate_service_provider_table(task_context, business_context, location)
+async def generate_provider_table(task_context: str, business_context: Dict[str, Any], location: str = None, phase_hint: str = None) -> Dict[str, Any]:
+    """Generate a service provider table for a specific task.
+
+    ``phase_hint`` (optional) is the Implementation phase name; when
+    provided the categories returned are constrained deterministically.
+    """
+    return await provider_table_generator.generate_service_provider_table(
+        task_context, business_context, location, phase_hint=phase_hint
+    )
 
 async def get_task_providers(task_id: str, task_description: str, business_context: Dict[str, Any], location: str = None) -> Dict[str, Any]:
     """Get providers for a specific implementation task"""

@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import logging
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from services.stripe_service import (
     handle_stripe_webhook, 
     create_subscription_checkout_session, 
@@ -78,13 +78,8 @@ async def check_subscription_status(
     cancel_at_period_end = False
     
     # Check if in free intro period to completely pardon payment failures
-    free_intro_end = datetime(2026, 8, 30, 23, 59, 59, tzinfo=datetime.now().astimezone().tzinfo.__class__(None, 'UTC') if hasattr(datetime.now().astimezone().tzinfo, '__class__') else None)
-    try:
-        from datetime import timezone
-        free_intro_end = datetime(2026, 8, 30, 23, 59, 59, tzinfo=timezone.utc)
-        is_free_intro = datetime.now(timezone.utc) <= free_intro_end
-    except Exception:
-        is_free_intro = False
+    free_intro_end = datetime(2026, 8, 30, 23, 59, 59, tzinfo=timezone.utc)
+    is_free_intro = datetime.now(timezone.utc) <= free_intro_end
     
     if subscription and not is_free_intro:
         status = subscription.get("subscription_status", "").lower()

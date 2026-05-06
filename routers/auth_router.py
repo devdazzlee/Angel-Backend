@@ -38,7 +38,12 @@ async def signup(request: Request, user: SignUpSchema):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        created_user = await create_user(user.email, user.password, user.full_name)
+        created_user = await create_user(
+            user.email,
+            user.password,
+            user.full_name,
+            accepted_terms_and_privacy=user.accepted_terms_and_privacy,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"success": True, "message": "User created successfully", "result": {"user": created_user}}

@@ -8,15 +8,21 @@ class SignUpSchema(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6)
     confirm_password: str = Field(..., min_length=6)
+    accepted_terms_and_privacy: bool = Field(
+        ...,
+        description="User must acknowledge the Terms and Conditions and Privacy Policy to create an account",
+    )
     captcha_token: Optional[str] = Field(
         default=None,
         description="Google reCAPTCHA token (required when RECAPTCHA_SECRET_KEY is set)",
     )
 
     @model_validator(mode="after")
-    def passwords_match(self) -> "SignUpSchema":
+    def validate_signup(self) -> "SignUpSchema":
         if self.password != self.confirm_password:
             raise ValueError("Passwords do not match")
+        if not self.accepted_terms_and_privacy:
+            raise ValueError("You must agree to the Terms and Conditions and Privacy Policy to create an account.")
         return self
 
 

@@ -108,7 +108,19 @@ def _require_user_id_by_email(email: str) -> str:
     return user.id
 
 
-async def create_user(email: str, password: str, full_name: str):
+async def create_user(
+    email: str,
+    password: str,
+    full_name: str,
+    accepted_terms_and_privacy: bool = False,
+):
+    # Acknowledgement is required at signup. Schema-level validation already enforces
+    # this for HTTP callers; this guard protects against direct/internal misuse.
+    if not accepted_terms_and_privacy:
+        raise ValueError(
+            "You must agree to the Terms and Conditions and Privacy Policy to create an account."
+        )
+
     # Check if user already exists before attempting signup
     if _check_user_exists(email):
         raise ValueError("An account with this email already exists. Please sign in instead.")
@@ -174,15 +186,28 @@ async def create_user(email: str, password: str, full_name: str):
 
     # user_id and response_user are set in the try block above
 
-    # Create acceptance record (both false initially)
+    # Record the acknowledgement captured during signup. The user has confirmed they
+    # read and agreed to the Terms and Conditions and Privacy Policy by checking the
+    # acknowledgement box on the signup form. We capture name (their typed full name)
+    # and the date for an auditable record.
     try:
+        from datetime import datetime
+        now = datetime.now()
+        acceptance_date = now.date().isoformat()
+        acceptance_timestamp = now.isoformat()
         supabase.table("user_legal_acceptances").insert({
             "user_id": user_id,
-            "terms_accepted": False,
-            "privacy_accepted": False,
-            "email_confirmation_sent": False
+            "terms_accepted": True,
+            "terms_accepted_at": acceptance_timestamp,
+            "terms_accepted_name": full_name,
+            "terms_accepted_date": acceptance_date,
+            "privacy_accepted": True,
+            "privacy_accepted_at": acceptance_timestamp,
+            "privacy_accepted_name": full_name,
+            "privacy_accepted_date": acceptance_date,
+            "email_confirmation_sent": False,
         }).execute()
-        logger.info(f"Created legal acceptance record for user {user_id}")
+        logger.info(f"Recorded Terms & Privacy acknowledgement for user {user_id}")
     except Exception as e:
         logger.warning(f"Failed to create legal acceptance record: {e}")
         # Don't fail signup if this fails, but log it
