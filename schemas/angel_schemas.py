@@ -1,24 +1,40 @@
 # test development 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional
 
 class CreateSessionSchema(BaseModel):
     title: Optional[str] = Field(default="Untitled", max_length=120)
 
+
+class ModifyIntentSchema(BaseModel):
+    """Structured Modify: user guidance + snapshot of the assistant message being revised."""
+
+    assistant_snapshot: str = Field(..., min_length=1, max_length=100_000)
+    user_guidance: str = Field(..., min_length=1, max_length=8_000)
+
+
 class ChatRequestSchema(BaseModel):
-    content: str = Field(...)
+    content: str = Field(
+        default="",
+        max_length=120_000,
+        description="User-visible chat text; if modify is set and content is empty, guidance is copied from modify.user_guidance",
+    )
     context: Optional[str] = Field(default=None, description="Chat context: 'budget_chat' allows chat during budget transitions")
+    modify: Optional[ModifyIntentSchema] = Field(
+        default=None,
+        description="When set, Angel reworks assistant_snapshot using user_guidance (conversational iteration)",
+    )
 
-    # Optional: Add this if you want to prevent null explicitly (helps with OpenAPI docs or frontend errors)
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate_not_null
-
-    @staticmethod
-    def validate_not_null(value):
-        if value is None:
-            raise ValueError("content cannot be null")
-        return value
+    @model_validator(mode="after")
+    def normalize_content_and_modify(self):
+        if self.modify is not None:
+            if not (self.content or "").strip():
+                object.__setattr__(self, "content", self.modify.user_guidance)
+            return self
+        # Allow empty content for startup/system-driven turns (e.g., initial question fetch).
+        # Interactive user turns still provide non-empty content via the frontend input guard.
+        object.__setattr__(self, "content", (self.content or "").strip())
+        return self
 
 class RefreshTokenSchema(BaseModel):
     refresh_token: str

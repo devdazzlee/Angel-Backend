@@ -2,8 +2,19 @@ from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR, HTTP_400_BAD_REQUEST
 from pydantic import ValidationError
-from gotrue.errors import AuthApiError  
+from gotrue.errors import AuthApiError
 import traceback
+
+
+def _json_safe(value):
+    """Recursively convert non-JSON-serializable values to strings."""
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 async def global_exception_handler(request: Request, exc: Exception):
     print("⚠️ Global Exception Caught")
@@ -40,7 +51,7 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
     print(f"📝 Errors: {exc.errors()}")
 
     # Make Pydantic's default messages more user-friendly
-    details = exc.errors()
+    details = _json_safe(exc.errors())
     for err in details:
         try:
             err_type = err.get("type")

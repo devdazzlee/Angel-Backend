@@ -19,8 +19,15 @@ from utils.constant import (
 )
 import logging
 from schemas.budget_schemas import RevenueStreamInitial
+from services.feedback_tone_resolver import (
+    assess_answer_substance,
+    compute_effective_tone_intensities,
+)
 
 logger = logging.getLogger(__name__)
+
+# Support, Draft, Scrapping (and Draft Answer): keep assistant blocks scannable; enforced via prompt + truncate_to_word_limit.
+COMMAND_ASSIST_MAX_WORDS = 150
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # pkpalstan
@@ -275,6 +282,99 @@ Q42: [[Q:BUSINESS_PLAN.42]] **Here are some suggested contingency plans for pote
 BAD EXAMPLES (DO NOT DO THIS):
 Q11: "Competitor A: Offers..., Competitor B: Known for..." ← WRONG, do NOT generate fake competitor names
 Q12: "Trend 1: Increasing demand..., Trend 2: Growing focus..." ← WRONG, do NOT generate fake trends"""
+
+MODIFY_REVISION_SYSTEM = """You are revising your prior assistant message in Founderport. The user chose **Modify** and is giving conversational feedback — this is NOT their answer to a questionnaire item.
+
+Requirements:
+• Use a collaborative tone: briefly acknowledge what they asked (one short sentence), then deliver the revised material.
+• Output a complete replacement for the assistant message under “Assistant message to revise,” fully applying their guidance.
+• Preserve every [[Q:PHASE.NN]] tag exactly as in that snapshot when present; do not change the question number unless they explicitly ask to move on.
+• Preserve [[ACCEPT_MODIFY_BUTTONS]] in the revised reply when the snapshot included it.
+• Do not invent business facts the user did not supply unless they appear in the snapshot or their revision request.
+• Keep useful structure (headings, bullets) unless they asked to change it.
+• Avoid excessive apology; stay constructive and direct."""
+
+
+def format_modify_revision_user_turn(assistant_snapshot: str, user_guidance: str) -> str:
+    return (
+        "——— Assistant message to revise ———\n"
+        f"{assistant_snapshot.strip()}\n\n"
+        "——— User's revision request ———\n"
+        f"{user_guidance.strip()}"
+    )
+
+
+async def _reply_modify_revision(
+    *,
+    modify_intent: Dict[str, Any],
+    history: list,
+    session_data: Optional[dict],
+    user_name: str,
+    user_prefs: dict,
+) -> dict:
+    """Single LLM turn: rework assistant_snapshot per user_guidance without advancing the questionnaire."""
+    assistant_snapshot = modify_intent["assistant_snapshot"].strip()
+    user_guidance = modify_intent["user_guidance"].strip()
+
+    eff_aff, eff_cfb = compute_effective_tone_intensities(
+        session_data,
+        user_prefs,
+        user_guidance,
+        is_command_message=False,
+        tone_assessment_text=user_guidance,
+    )
+    intensity_guidance = _get_feedback_intensity_guidance(eff_cfb)
+    # Slim formatting only: full `_build_angel_formatting_instruction` tells the model to
+    # advance BP questions, which conflicts with revision-only Modify turns.
+    modify_formatting = f"""FORMATTING FOR THIS TURN (revise-in-place):
+• Address {user_name} naturally; use clear Markdown (headings, bullets) when it helps readability.
+• Do not add questionnaire flow instructions, option lists, or “ask the next question” unless the user explicitly asked to move on.
+• Constructive tone calibration for this turn (intensity {eff_cfb}/10):
+{intensity_guidance.strip()}"""
+
+    msgs: List[Dict[str, str]] = [
+        {"role": "system", "content": MODIFY_REVISION_SYSTEM},
+        {"role": "system", "content": TAG_PROMPT},
+        {"role": "system", "content": modify_formatting},
+    ]
+
+    grounding = build_business_grounding(session_data, history)
+    if grounding:
+        msgs.append({"role": "system", "content": grounding})
+
+    tone = build_tone_directive(
+        session_data,
+        affirmation_intensity=eff_aff,
+        constructive_feedback_intensity=eff_cfb,
+    )
+    msgs.append({"role": "system", "content": tone})
+
+    trimmed_history = trim_conversation_history(history, max_messages=6)
+    msgs.extend(trimmed_history)
+
+    user_turn = format_modify_revision_user_turn(assistant_snapshot, user_guidance)
+    msgs.append({"role": "user", "content": user_turn})
+
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=msgs,
+        temperature=0.7,
+        max_tokens=4096,
+        stream=False,
+    )
+    reply_content = response.choices[0].message.content or ""
+    reply_content = re.sub(r"\n{3,}", "\n\n", reply_content)
+    reply_content = format_response_structure(reply_content)
+    reply_content = ensure_question_separation(reply_content, session_data)
+
+    return {
+        "reply": reply_content,
+        "web_search_status": {"is_searching": False, "query": None},
+        "immediate_response": None,
+        "show_accept_modify": True,
+        "patch_session": None,
+    }
+
 
 WEB_SEARCH_PROMPT = """You have access to web search capabilities, but use them VERY SPARINGLY during Implementation phase.
 
@@ -989,6 +1089,13 @@ def truncate_to_word_limit(text: str, max_words: int) -> str:
     
     return truncated_text
 
+
+def cap_full_command_assist_reply(text: str) -> str:
+    """Cap the entire user-visible Draft / Support / Scrapping message (prefix + body + any footer)."""
+    if not text or not str(text).strip():
+        return text
+    return truncate_to_word_limit(str(text).strip(), COMMAND_ASSIST_MAX_WORDS)
+
 def trim_conversation_history(history, max_messages=10):
     """Trim conversation history to prevent context from growing too large"""
     if len(history) <= max_messages:
@@ -1144,50 +1251,324 @@ def ensure_question_separation(reply, session_data=None):
     
     return reply
 
-def validate_business_plan_sequence(reply, session_data=None):
-    """Ensure business plan questions follow proper sequence"""
-    
+
+def _parse_business_plan_tag_number(tag: str | None) -> int | None:
+    """Return question index from BUSINESS_PLAN.NN or None."""
+    if not tag or "BUSINESS_PLAN." not in tag.upper():
+        return None
+    try:
+        return int(tag.split(".", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _business_plan_depth_coaching_hint(asked_q: str | None) -> str | None:
+    """
+    Tighter coaching for Market Research (Q8–Q13) and Legal (Q24–Q28) without an extra
+    “deep research” model pass—reinforces the same-turn rules from ANGEL_SYSTEM_PROMPT.
+    """
+    n = _parse_business_plan_tag_number(asked_q)
+    if n is None:
+        return None
+    if 8 <= n <= 13:
+        return (
+            "BUSINESS_PLAN coaching (Market Research, Q8–Q13): Give structured, specific guidance—segment, "
+            "channels, problem significance, differentiation tied to competitor/trend content already in this thread. "
+            "If the answer is thin, state one sharp improvement. Do not invent research; use only injected web results when present."
+        )
+    if 24 <= n <= 28:
+        return (
+            "BUSINESS_PLAN coaching (Legal & Regulatory, Q24–Q28): Cover trade-offs (entity, liability, filings), "
+            "jurisdiction verification on official sites, permits/licenses by layer (federal/state/local/industry), "
+            "insurance matched to operations, and concrete compliance habits—not generic reassurance."
+        )
+    return None
+
+
+def _first_business_plan_tag_in_reply(reply: str) -> tuple[str | None, int | None]:
+    """First [[Q:BUSINESS_PLAN.NN]] in reply (case-insensitive). Returns (BUSINESS_PLAN.NN, num)."""
+    m = re.search(r"\[\[Q:(BUSINESS_PLAN)\.(\d+)\]\]", reply, re.IGNORECASE)
+    if not m:
+        return None, None
+    num = int(m.group(2))
+    return f"BUSINESS_PLAN.{num:02d}", num
+
+
+def _expected_next_business_plan_tag(session_data: dict, answered_num: int) -> str | None:
+    """
+    Question tag that must appear after the user completes answered_num.
+    Handles uploaded-plan missing-question mode (next is min(remaining missing), not always +1).
+    """
+    if answered_num >= 45:
+        return None
+    bc = session_data.get("business_context") or {}
+    if not isinstance(bc, dict):
+        bc = {}
+    uploaded = bool(bc.get("uploaded_plan_mode"))
+    missing = bc.get("missing_questions")
+    if uploaded and isinstance(missing, list) and missing and answered_num in missing:
+        remaining = sorted(q for q in missing if q != answered_num)
+        if remaining:
+            n = min(remaining)
+            return f"BUSINESS_PLAN.{n:02d}"
+    return f"BUSINESS_PLAN.{answered_num + 1:02d}"
+
+
+def _strip_business_plan_tags(reply: str) -> str:
+    return re.sub(r"\[\[Q:BUSINESS_PLAN\.\d+\]\]\s*", "", reply, flags=re.IGNORECASE).strip()
+
+
+def _sanitize_business_identity_text(value: str | None, fallback: str) -> str:
+    """Clean noisy free-text labels before using them in prompts."""
+    raw = (value or "").strip()
+    if not raw:
+        return fallback
+    cleaned = re.sub(r"\s+", " ", raw).strip(" .,:;|-")
+    lower = cleaned.lower()
+    noisy_phrases = (
+        "not decided yet",
+        "not sure",
+        "maybe something like",
+        "i'm not fully sure",
+        "i am not fully sure",
+    )
+    if any(p in lower for p in noisy_phrases):
+        return fallback
+    return cleaned[:80]
+
+
+def format_static_business_plan_question(question_tag: str) -> str:
+    """Deterministic [[Q:...]] + bold text from the canonical questionnaire (no LLM)."""
+    static_text = {
+        "BUSINESS_PLAN.01": "Describe your business idea in detail.",
+        "BUSINESS_PLAN.02": "What product or service will you offer?",
+        "BUSINESS_PLAN.03": "What makes your product or service unique compared to others in the market?",
+        "BUSINESS_PLAN.04": "What is the current stage of your business?",
+        "BUSINESS_PLAN.05": "Business Name (if decided):",
+        "BUSINESS_PLAN.06": "What industry does your business fall into?",
+        "BUSINESS_PLAN.07": "What are your short-term (6 months to 1 year) business goals?",
+        "BUSINESS_PLAN.08": "Who is your target customer?",
+        "BUSINESS_PLAN.09": "Where will your business products or services be available for purchase?",
+        "BUSINESS_PLAN.10": "What problem(s) are you solving for your target customers?",
+        "BUSINESS_PLAN.11": "Here are some competitors for your business, including their strengths and weaknesses:",
+        "BUSINESS_PLAN.12": "Here are the trends currently affecting your industry and how they may impact your business:",
+        "BUSINESS_PLAN.13": "How do you plan to differentiate your business to stand out?",
+        "BUSINESS_PLAN.14": "Where will your business be located?",
+        "BUSINESS_PLAN.15": "What kind of facilities or resources will you need to operate?",
+        "BUSINESS_PLAN.16": "What will be your primary method of delivering your product/service?",
+        "BUSINESS_PLAN.17": "Here are some suggested short-term operational needs to launch your business.",
+        "BUSINESS_PLAN.18": "Business Mission Statement (What are your core values and mission?):",
+        "BUSINESS_PLAN.19": "How do you plan to market your business?",
+        "BUSINESS_PLAN.20": "Will you hire a sales team, contract with a marketing firm, self-market, or use some other method?",
+        "BUSINESS_PLAN.21": "What is your unique selling proposition (USP)?",
+        "BUSINESS_PLAN.22": "What promotional strategies will you use to launch your business?",
+        "BUSINESS_PLAN.23": "Here are some suggested short-term marketing needs. Is there anything else you'd like to add?",
+        "BUSINESS_PLAN.24": "What type of business structure will you have?",
+        "BUSINESS_PLAN.25": "Have you registered your business name?",
+        "BUSINESS_PLAN.26": "Here are the permits and/or licenses you will need to operate legally.",
+        "BUSINESS_PLAN.27": "Here are some suggested insurance policies you may need.",
+        "BUSINESS_PLAN.28": "How do you plan to ensure adherence to requirements to keep your business compliant?",
+        "BUSINESS_PLAN.29": "How will your business make money?",
+        "BUSINESS_PLAN.30": "What is your pricing strategy?",
+        "BUSINESS_PLAN.31": "How will you keep track of your business financials and accounting?",
+        "BUSINESS_PLAN.32": "What is your initial funding source?",
+        "BUSINESS_PLAN.33": "What are your financial goals for the first year?",
+        "BUSINESS_PLAN.34": "Here are the general main costs associated with starting your business.",
+        "BUSINESS_PLAN.35": "What are your plans for scaling your business in the future?",
+        "BUSINESS_PLAN.36": "What are your long-term (2-5 years) business goals?",
+        "BUSINESS_PLAN.37": "What are your long-term operational needs?",
+        "BUSINESS_PLAN.38": "What are your long-term financial needs?",
+        "BUSINESS_PLAN.39": "What are your long-term marketing goals?",
+        "BUSINESS_PLAN.40": "What will be your approach to expanding product/service lines or entering new markets?",
+        "BUSINESS_PLAN.41": "What are your long-term administrative goals?",
+        "BUSINESS_PLAN.42": "Here are some suggested contingency plans for potential challenges your business may face.",
+        "BUSINESS_PLAN.43": "How will you adapt if your market conditions change or new competitors enter the market?",
+        "BUSINESS_PLAN.44": "Will you seek additional funding to expand? If so, what sources and for what purposes?",
+        "BUSINESS_PLAN.45": "What is your overall vision for where you see this business in 5 years?",
+    }
+    body = static_text.get(question_tag, "Please share the next detail for your business plan.")
+    return f"[[Q:{question_tag}]]\n\n**{body}**"
+
+
+async def _ensure_business_plan_next_question_reply(
+    reply_content: str,
+    session_data: dict,
+    history: list,
+    user_content: str,
+    *,
+    answered_question_num: int | None,
+) -> str:
+    """
+    After the model responds to a completed BP question, guarantee the reply asks
+    exactly the expected next [[Q:BUSINESS_PLAN.NN]] (relevance + progression).
+    """
+    user_lower = user_content.lower().strip()
+    is_user_answer = (
+        len(user_content.strip()) > 0
+        and user_lower
+        not in (
+            "draft",
+            "support",
+            "scrapping",
+            "scraping",
+            "modify",
+            "kickstart",
+            "draft more",
+        )
+        and not user_lower.startswith(("draft", "support", "scrapping", "scraping", "modify", "kickstart"))
+    )
+    is_accept_click = user_lower == "accept"
+    if not (is_user_answer or is_accept_click):
+        return reply_content
+
+    # Defensive fallback chain. The caller passes `answered_question_num` derived
+    # from history scan; if that came back None (e.g., GKY→BP transition where
+    # asked_q is still the last GKY tag, or the most recent assistant message
+    # didn't carry a BP tag), we still want the guardrail to fire instead of
+    # silently no-op'ing — that no-op was the regression where Angel re-asked Q1.
+    if answered_question_num is None:
+        asked_q_raw = session_data.get("asked_q") if isinstance(session_data, dict) else None
+        answered_question_num = _parse_business_plan_tag_number(asked_q_raw)
+    if answered_question_num is None:
+        # Last-resort fallback: if the model itself emitted a BP tag, treat that
+        # as the question that was just answered. This converts an "I don't know
+        # what was answered → do nothing" silent failure into a deterministic
+        # advance, which matches user expectation ("I just answered something").
+        _, model_tag_num = _first_business_plan_tag_in_reply(reply_content)
+        if model_tag_num is not None:
+            answered_question_num = model_tag_num
+            logger.warning(
+                "BP progression guardrail: answered_question_num was None at entry; "
+                "fell back to model-emitted tag Q%s. asked_q=%s",
+                answered_question_num,
+                session_data.get("asked_q") if isinstance(session_data, dict) else None,
+            )
+    if answered_question_num is None:
+        logger.warning(
+            "BP progression guardrail: skipped — no answered_question_num derivable "
+            "(history-scan, asked_q, and model-tag fallbacks all empty). asked_q=%s, "
+            "user_content_preview=%r",
+            session_data.get("asked_q") if isinstance(session_data, dict) else None,
+            user_content[:60],
+        )
+        return reply_content
+
+    expected_tag = _expected_next_business_plan_tag(session_data, answered_question_num)
+    if not expected_tag:
+        return reply_content
+
+    expected_num = _parse_business_plan_tag_number(expected_tag)
+    _, reply_num = _first_business_plan_tag_in_reply(reply_content)
+
+    if reply_num is not None and reply_num == expected_num:
+        return reply_content
+
+    if reply_num is not None and reply_num > answered_question_num and reply_num != expected_num:
+        # Wrong branch (e.g. missing-list violation); still not the canonical next.
+        needs_replace = True
+    elif reply_num is not None and reply_num <= answered_question_num:
+        needs_replace = True
+    elif reply_num is None:
+        needs_replace = True
+    else:
+        needs_replace = False
+
+    if not needs_replace:
+        return reply_content
+
+    logger.info(
+        "BP progression guardrail: answered Q%s expected %s; model had tag num=%s — injecting next question",
+        answered_question_num,
+        expected_tag,
+        reply_num,
+    )
+
+    bc_raw = session_data.get("business_context")
+    bc = bc_raw if isinstance(bc_raw, dict) else {}
+    mq = bc.get("missing_questions")
+    is_missing_question = bool(bc.get("uploaded_plan_mode")) and isinstance(mq, list) and expected_num in mq
+
+    try:
+        next_block = await generate_dynamic_business_question(
+            expected_tag,
+            session_data,
+            history,
+            is_missing_question=is_missing_question,
+        )
+    except Exception:
+        logger.exception("generate_dynamic_business_question failed for %s; using static wording", expected_tag)
+        next_block = format_static_business_plan_question(expected_tag)
+
+    base = _strip_business_plan_tags(reply_content)
+    if base:
+        return f"{base}\n\n{next_block}"
+    return next_block
+
+
+def validate_business_plan_sequence(reply, session_data=None, answered_question_num: int | None = None):
+    """Ensure business plan questions follow proper sequence (case-insensitive tag)."""
+
     if session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
         asked_q = session_data.get("asked_q", "BUSINESS_PLAN.01")
-        answered_count = session_data.get("answered_count", 0)
-        
-        # Extract current question number from tag
-        tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', reply)
+
+        tag_match = re.search(r"\[\[Q:BUSINESS_PLAN\.(\d+)\]\]", reply, re.IGNORECASE)
         if tag_match:
             current_q_num = int(tag_match.group(1))
-            
-            # Check if we're jumping ahead or backwards
-            if "BUSINESS_PLAN." in asked_q:
+
+            if "BUSINESS_PLAN." in asked_q.upper():
                 last_q_num = int(asked_q.split(".")[1])
-                
+
                 print(f"🔍 DEBUG - Question sequence check: last_q={last_q_num}, current_q={current_q_num}")
-                
-                # Handle jumping ahead (skipping questions)
+
                 if current_q_num > last_q_num + 1:
                     print(f"⚠️ WARNING: Jumping ahead from question {last_q_num} to {current_q_num}")
-                    # Force back to next sequential question
                     next_q = f"BUSINESS_PLAN.{last_q_num + 1:02d}"
-                    reply = re.sub(r'\[\[Q:BUSINESS_PLAN\.\d+\]\]', f'[[Q:{next_q}]]', reply)
+                    reply = re.sub(r"\[\[Q:BUSINESS_PLAN\.\d+\]\]", f"[[Q:{next_q}]]", reply, count=1, flags=re.IGNORECASE)
                     print(f"🔧 Corrected to: {next_q}")
-                
-                # Handle jumping backwards (going to previous questions)
+
                 elif current_q_num < last_q_num:
                     print(f"⚠️ WARNING: Jumping backwards from question {last_q_num} to {current_q_num}")
-                    # Force to next sequential question (don't go backwards)
                     next_q = f"BUSINESS_PLAN.{last_q_num + 1:02d}"
-                    reply = re.sub(r'\[\[Q:BUSINESS_PLAN\.\d+\]\]', f'[[Q:{next_q}]]', reply)
+                    reply = re.sub(r"\[\[Q:BUSINESS_PLAN\.\d+\]\]", f"[[Q:{next_q}]]", reply, count=1, flags=re.IGNORECASE)
                     print(f"🔧 Corrected backwards jump to: {next_q}")
-                
-                # Log normal progression
+
                 elif current_q_num == last_q_num + 1:
                     print(f"✅ Normal progression: {last_q_num} → {current_q_num}")
-                
-                # Same question number is VALID because session updates before validation
-                # This happens when: user answers Q35 → session updates to Q36 → AI generates Q36
-                # The validation sees Q36 == Q36, which is correct!
+
                 elif current_q_num == last_q_num:
-                    print(f"✅ Correct question sequence: {current_q_num} (session already updated)")
-                    # DO NOT force progression - this is correct behavior!
+                    # Session and reply both show the same N: valid only if N is already the *new*
+                    # question (both advanced). If N is still the question the user just answered,
+                    # the model repeated the old prompt — force sequential next when not in missing mode.
+                    # Defensive fallback: if the caller couldn't compute answered_question_num
+                    # but session.asked_q does match the reply tag, infer the user just answered
+                    # that question (matches the screenshot regression where Q1 was repeated).
+                    if answered_question_num is None and current_q_num == last_q_num:
+                        answered_question_num = last_q_num
+                    if (
+                        answered_question_num is not None
+                        and current_q_num == answered_question_num
+                        and answered_question_num < 45
+                    ):
+                        bc = session_data.get("business_context") or {}
+                        missing = bc.get("missing_questions") if isinstance(bc, dict) else None
+                        if not (isinstance(missing, list) and len(missing) > 0):
+                            next_q = f"BUSINESS_PLAN.{answered_question_num + 1:02d}"
+                            print(
+                                f"⚠️ Model repeated answered question Q{answered_question_num}; tag-only bump to {next_q}"
+                            )
+                            reply = re.sub(
+                                r"\[\[Q:BUSINESS_PLAN\.\d+\]\]",
+                                f"[[Q:{next_q}]]",
+                                reply,
+                                count=1,
+                                flags=re.IGNORECASE,
+                            )
+                        else:
+                            print(
+                                f"✅ Same Q{current_q_num} after answer — missing-question mode; progression handled upstream"
+                            )
+                    else:
+                        print(f"✅ Reply and session aligned on Q{current_q_num}")
 
     return reply
 
@@ -2786,16 +3167,24 @@ Let's continue with the current business planning question.""",
 
 # ── Tone & grounding helpers (hallucination mitigation) ─────────────────────
 
-def build_tone_directive(session_data: Optional[dict]) -> str:
-    """Build a system-prompt snippet that calibrates affirmation and
-    constructive-feedback intensity based on session / global config.
-
-    Includes the global guardrails and design principle from the
-    Affirmation and Constructive Feedback scale documents."""
+def build_tone_directive(
+    session_data: Optional[dict],
+    *,
+    affirmation_intensity: Optional[int] = None,
+    constructive_feedback_intensity: Optional[int] = None,
+) -> str:
+    """Calibrate affirmation + constructive feedback using resolved intensities
+    (per-turn) or, if omitted, raw values from business_context."""
 
     bc = (session_data or {}).get("business_context", {}) or {}
-    aff = bc.get("affirmation_intensity", DEFAULT_AFFIRMATION_INTENSITY)
-    cfb = bc.get("constructive_feedback_intensity", DEFAULT_CONSTRUCTIVE_FEEDBACK_INTENSITY)
+    if affirmation_intensity is not None:
+        aff = int(affirmation_intensity)
+    else:
+        aff = bc.get("affirmation_intensity", DEFAULT_AFFIRMATION_INTENSITY)
+    if constructive_feedback_intensity is not None:
+        cfb = int(constructive_feedback_intensity)
+    else:
+        cfb = bc.get("constructive_feedback_intensity", DEFAULT_CONSTRUCTIVE_FEEDBACK_INTENSITY)
 
     aff = max(0, min(10, int(aff)))
     cfb = max(0, min(10, int(cfb)))
@@ -2831,6 +3220,119 @@ Angel should NEVER leave the user thinking "This won't work" or
 Instead the user should feel:
   → "Here's how to make this stronger"
   → "I know what to do next"
+"""
+
+
+def _build_angel_formatting_instruction(
+    user_name: str,
+    constructive_intensity: int,
+    intensity_guidance: str,
+    weak_substance_input: bool = False,
+) -> str:
+    """System prompt chunk: formatting rules + constructive feedback level for this turn."""
+    weak_input_rules = ""
+    if weak_substance_input:
+        weak_input_rules = f"""
+WEAK / VAGUE USER INPUT DETECTED (STRICT MODE):
+• Keep acknowledgment neutral and short (max 1 sentence). Do NOT use praise words like "great", "excellent", "perfect", or "amazing".
+• Give 2 concise corrective bullets that force specificity (who, what offer, target user, problem, channel, or numeric assumption).
+• After those bullets, ask the next single tagged question immediately.
+• Do not repeat the same coaching block across consecutive questions.
+"""
+    return f"""
+CRITICAL FORMATTING RULES - FOLLOW EXACTLY:
+
+1. ALWAYS start with a brief acknowledgment (1-2 sentences max)
+2. Add a blank line for visual separation
+3. Present the question in a clear, structured format
+
+IMPORTANT: The UI automatically displays "Question X" - DO NOT include question numbers in your response!
+
+For YES/NO questions:
+"That's great, {user_name}!
+
+Have you started a business before?"
+
+For multiple choice questions:
+"That's perfect, {user_name}!
+
+What's your current work situation?"
+
+NOTE: Do NOT list option bullets in your message. The UI displays clickable option buttons.
+
+For rating questions:
+"That's helpful, {user_name}!
+
+How comfortable are you with business planning?"
+
+❌ NEVER LIST OPTIONS IN YOUR MESSAGE: 
+"What's your current work situation? • Full-time • Part-time • Student..."
+"Will your business be primarily: • Online • Brick-and-mortar • Mix of both"
+
+✅ CORRECT - ASK CLEANLY WITHOUT OPTIONS: 
+"What's your current work situation?"
+"Will your business be primarily?"
+
+CRITICAL: The UI displays option buttons automatically. Do NOT include option lists in your message text.
+
+BUSINESS PLAN SPECIFIC RULES:
+• Ask ONE question at a time in EXACT sequential order
+• Each question must be on its own line with proper spacing
+• NEVER mold user answers into mission, vision, USP without explicit verification
+• CRITICAL: Your response must contain EXACTLY ONE [[Q:BUSINESS_PLAN.XX]] tag - NO MORE.
+• Do NOT ask multiple questions. Only ask the single next sequential question.
+• Your response must be DIRECTLY RELEVANT to the question being asked. Stay on topic.
+• ACTIVE STEP ONLY: All coaching and body text must serve the current Business Plan question or the user’s on-topic question—no digressions into other BP items or phases.
+• NEVER include sub-questions like "What problems are you solving?" or "How will you differentiate?" in a response about a different question.
+• Do NOT list option bullets in your message - UI shows clickable buttons for multiple-choice questions
+• Start with BUSINESS_PLAN.01 and proceed sequentially
+• AUTO-RESEARCH QUESTIONS (Q11, Q12): These are NOT skippable. When it's time for Q11 or Q12, you MUST include the tag and present the question. The backend will inject research results automatically.
+  - For Q11: Say "Now I will do some initial research to help you understand who are some competitors for your business."
+  - For Q12: Say "Next I'll look into trends that are currently affecting your industry, and how they impact your business."
+• EVERY question must have a BOLD topline question. NEVER omit the actual question text. Example:
+  [[Q:BUSINESS_PLAN.14]] **Where will your business be located (e.g., online, physical store, both)?**
+• Do NOT jump to later questions or combine multiple questions
+• Do NOT provide section summaries or verification steps - just ask the next question
+• When user answers, acknowledge briefly (1-2 sentences) and immediately ask the next question
+• NEVER include "Question X" in your response - the UI shows it automatically
+
+QUESTION FORMATTING (CRITICAL):
+• The MAIN QUESTION must ALWAYS be on its OWN line, separated from coaching/feedback text
+• NEVER embed the question at the end of a coaching paragraph
+• The question must be clearly distinguishable - put a blank line BEFORE and AFTER the question
+• Do NOT generate "Thought Starter:", "Consider:", "Think about:", or similar guidance - the system adds these automatically
+• Do NOT include any follow-up questions or hints after the main question
+
+CORRECT FORMAT:
+"Great insight about your business!
+
+[Brief coaching feedback - 2-3 sentences max]
+
+[[Q:BUSINESS_PLAN.XX]]
+
+What is your business name?"
+
+WRONG FORMAT (DO NOT DO THIS):
+"Great insight! Your strategy is strong. What is your business name?"
+
+CONSTRUCTIVE FEEDBACK SYSTEM (INTENSITY: {constructive_intensity}/10):
+Purpose: Reality checks plus actionable guidance to strengthen the user's answer, assumptions, and overall business.
+
+GLOBAL GUARDRAILS (ALWAYS ON):
+• Critique assumptions, not the founder
+• Pair every risk or weakness with specific improvement guidance
+• Frame feedback as optimization, not correction
+• Never insult, dismiss, or condescend
+• Emphasize learning, validation, and iteration
+
+{intensity_guidance}
+
+KEY DESIGN PRINCIPLE (CRITICAL):
+Every critique must end with a way forward. Never leave the user thinking "This won't work" or "I'm doing this wrong." Instead, they should feel "Here's how to make this stronger" or "I know what to do next."
+
+{weak_input_rules}
+
+Do NOT include question numbers, progress percentages, or step counts in your response.
 """
 
 
@@ -2921,24 +3423,29 @@ def score_response_confidence(reply: str, business_type: str) -> float:
     return round(score, 2)
 
 
-async def get_angel_reply(user_msg, history, session_data=None):
+async def get_angel_reply(
+    user_msg,
+    history,
+    session_data=None,
+    modify_intent: Optional[Dict[str, Any]] = None,
+):
     import time
     start_time = time.time()
     
     # Get user name from session data, fallback to generic greeting
     user_name = session_data.get("user_name", "there") if session_data else "there"
     
-    # Get user preferences including feedback intensity (0-10)
-    feedback_intensity = 5  # Default to moderate
+    user_prefs: dict = {}
     try:
         if session_data and session_data.get("user_id"):
             from services.preferences_service import get_user_preferences
             user_prefs = await get_user_preferences(session_data.get("user_id"))
-            feedback_intensity = user_prefs.get("feedback_intensity", 5)
-            print(f"🔍 DEBUG - User feedback intensity: {feedback_intensity}/10")
+            print(
+                f"🔍 DEBUG - User profile feedback_intensity: "
+                f"{user_prefs.get('feedback_intensity', 5)}/10"
+            )
     except Exception as e:
-        logger.warning(f"Could not fetch user preferences for feedback intensity: {e}")
-        feedback_intensity = 5  # Default to moderate
+        logger.warning("Could not fetch user preferences for feedback intensity: %s", e)
     
     # GKY completion check removed - now triggered immediately after final answer
     
@@ -2958,13 +3465,8 @@ async def get_angel_reply(user_msg, history, session_data=None):
     #     print(f"🔍 DEBUG - Session validation triggered: {session_validation.get('reply', '')[:100]}...")
     #     return session_validation
     
-    # Define formatting instruction at the top to avoid UnboundLocalError
-    # Get current phase and question info for Business Plan numbering
     current_phase = session_data.get("current_phase", "GKY") if session_data else "GKY"
     asked_q = session_data.get("asked_q", "GKY.01") if session_data else "GKY.01"
-    
-    # Get feedback intensity guidance text
-    intensity_guidance = _get_feedback_intensity_guidance(feedback_intensity)
     
     # DISABLED: Critiquing feedback was too aggressive and causing false positives
     # Words like "faster" in "scale faster" were triggering unrealistic assumptions check
@@ -2973,99 +3475,6 @@ async def get_angel_reply(user_msg, history, session_data=None):
     #     if critique_feedback:
     #         print(f"🔍 DEBUG - Critiquing feedback triggered: {critique_feedback.get('reply', '')[:100]}...")
     #         return critique_feedback
-    
-    FORMATTING_INSTRUCTION = f"""
-CRITICAL FORMATTING RULES - FOLLOW EXACTLY:
-
-1. ALWAYS start with a brief acknowledgment (1-2 sentences max)
-2. Add a blank line for visual separation
-3. Present the question in a clear, structured format
-
-IMPORTANT: The UI automatically displays "Question X" - DO NOT include question numbers in your response!
-
-For YES/NO questions:
-"That's great, {user_name}!
-
-Have you started a business before?"
-
-For multiple choice questions:
-"That's perfect, {user_name}!
-
-What's your current work situation?"
-
-NOTE: Do NOT list option bullets in your message. The UI displays clickable option buttons.
-
-For rating questions:
-"That's helpful, {user_name}!
-
-How comfortable are you with business planning?"
-
-❌ NEVER LIST OPTIONS IN YOUR MESSAGE: 
-"What's your current work situation? • Full-time • Part-time • Student..."
-"Will your business be primarily: • Online • Brick-and-mortar • Mix of both"
-
-✅ CORRECT - ASK CLEANLY WITHOUT OPTIONS: 
-"What's your current work situation?"
-"Will your business be primarily?"
-
-CRITICAL: The UI displays option buttons automatically. Do NOT include option lists in your message text.
-
-BUSINESS PLAN SPECIFIC RULES:
-• Ask ONE question at a time in EXACT sequential order
-• Each question must be on its own line with proper spacing
-• NEVER mold user answers into mission, vision, USP without explicit verification
-• CRITICAL: Your response must contain EXACTLY ONE [[Q:BUSINESS_PLAN.XX]] tag - NO MORE.
-• Do NOT ask multiple questions. Only ask the single next sequential question.
-• Your response must be DIRECTLY RELEVANT to the question being asked. Stay on topic.
-• NEVER include sub-questions like "What problems are you solving?" or "How will you differentiate?" in a response about a different question.
-• Do NOT list option bullets in your message - UI shows clickable buttons for multiple-choice questions
-• Start with BUSINESS_PLAN.01 and proceed sequentially
-• AUTO-RESEARCH QUESTIONS (Q11, Q12): These are NOT skippable. When it's time for Q11 or Q12, you MUST include the tag and present the question. The backend will inject research results automatically.
-  - For Q11: Say "Now I will do some initial research to help you understand who are some competitors for your business."
-  - For Q12: Say "Next I'll look into trends that are currently affecting your industry, and how they impact your business."
-• EVERY question must have a BOLD topline question. NEVER omit the actual question text. Example:
-  [[Q:BUSINESS_PLAN.14]] **Where will your business be located (e.g., online, physical store, both)?**
-• Do NOT jump to later questions or combine multiple questions
-• Do NOT provide section summaries or verification steps - just ask the next question
-• When user answers, acknowledge briefly (1-2 sentences) and immediately ask the next question
-• NEVER include "Question X" in your response - the UI shows it automatically
-
-QUESTION FORMATTING (CRITICAL):
-• The MAIN QUESTION must ALWAYS be on its OWN line, separated from coaching/feedback text
-• NEVER embed the question at the end of a coaching paragraph
-• The question must be clearly distinguishable - put a blank line BEFORE and AFTER the question
-• Do NOT generate "Thought Starter:", "Consider:", "Think about:", or similar guidance - the system adds these automatically
-• Do NOT include any follow-up questions or hints after the main question
-
-CORRECT FORMAT:
-"Great insight about your business!
-
-[Brief coaching feedback - 2-3 sentences max]
-
-[[Q:BUSINESS_PLAN.XX]]
-
-What is your business name?"
-
-WRONG FORMAT (DO NOT DO THIS):
-"Great insight! Your strategy is strong. What is your business name?"
-
-CONSTRUCTIVE FEEDBACK SYSTEM (INTENSITY: {feedback_intensity}/10):
-Purpose: Reality checks plus actionable guidance to strengthen the user's answer, assumptions, and overall business.
-
-GLOBAL GUARDRAILS (ALWAYS ON):
-• Critique assumptions, not the founder
-• Pair every risk or weakness with specific improvement guidance
-• Frame feedback as optimization, not correction
-• Never insult, dismiss, or condescend
-• Emphasize learning, validation, and iteration
-
-{intensity_guidance}
-
-KEY DESIGN PRINCIPLE (CRITICAL):
-Every critique must end with a way forward. Never leave the user thinking "This won't work" or "I'm doing this wrong." Instead, they should feel "Here's how to make this stronger" or "I know what to do next."
-
-Do NOT include question numbers, progress percentages, or step counts in your response.
-"""
     
     # Handle empty input based on context - preserve current phase state
     # BUT FIRST check if this might be a jump request (even if empty, check session metadata)
@@ -3145,6 +3554,15 @@ Do NOT include question numbers, progress percentages, or step counts in your re
 
     user_content = user_msg["content"].strip()
     print(f"🚀 Starting Angel reply generation for: {user_content[:100]}...")
+
+    if modify_intent:
+        return await _reply_modify_revision(
+            modify_intent=modify_intent,
+            history=history,
+            session_data=session_data,
+            user_name=user_name,
+            user_prefs=user_prefs,
+        )
     
     # Check if user wants to start from a specific question (from uploaded plan analysis)
     # This MUST happen early, before any other processing
@@ -3456,7 +3874,11 @@ Do NOT include question numbers, progress percentages, or step counts in your re
     # Do NOT manually increment question numbers or use generate_next_question()
     # Let the AI follow the system prompt from constant.py
     # Check if this is a command that should not generate new questions
-    is_command_response = user_content.lower().strip() in ["draft", "support", "scrapping", "scraping", "draft more"] or user_content.lower().strip().startswith("scrapping:")
+    normalized_user_content = user_content.lower().strip()
+    is_command_response = (
+        normalized_user_content in ["draft", "support", "scrapping", "scraping", "draft more", "draft answer"]
+        or normalized_user_content.startswith("scrapping:")
+    )
     
     # Check if this is an "Accept" command from Support/Draft/Scrapping
     is_accept_command = user_content.lower().strip() == "accept"
@@ -3602,10 +4024,10 @@ CRITICAL:
     
     # For commands, bypass AI generation and provide direct responses
     elif is_command_response and session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
-        print(f"🔧 Command detected: {user_content.lower()} - bypassing AI generation to prevent question skipping")
+        print(f"🔧 Command detected: {normalized_user_content} - bypassing AI generation to prevent question skipping")
         
         # Generate direct command response without AI
-        command = user_content.lower()
+        command = normalized_user_content
         show_buttons_for_command = True
 
         if command == "draft":
@@ -3633,6 +4055,25 @@ CRITICAL:
             "show_accept_modify": True
         }
     
+    eff_aff, eff_cfb = compute_effective_tone_intensities(
+        session_data,
+        user_prefs,
+        user_content,
+        is_command_message=False,
+    )
+    logger.info(
+        "Resolved tone for reply: affirmation=%s constructive=%s (profile feedback_intensity=%s)",
+        eff_aff,
+        eff_cfb,
+        user_prefs.get("feedback_intensity"),
+    )
+    substance_score = assess_answer_substance(user_content)
+    weak_substance_input = substance_score < 0.38
+    intensity_guidance = _get_feedback_intensity_guidance(eff_cfb)
+    FORMATTING_INSTRUCTION = _build_angel_formatting_instruction(
+        user_name, eff_cfb, intensity_guidance, weak_substance_input=weak_substance_input
+    )
+
     # Build messages for OpenAI - optimized for speed
     msgs = [
         {"role": "system", "content": ANGEL_SYSTEM_PROMPT},
@@ -3646,7 +4087,11 @@ CRITICAL:
         msgs.append({"role": "system", "content": grounding})
 
     # ── Tone calibration (affirmation + constructive feedback scales) ──
-    tone = build_tone_directive(session_data)
+    tone = build_tone_directive(
+        session_data,
+        affirmation_intensity=eff_aff,
+        constructive_feedback_intensity=eff_cfb,
+    )
     msgs.append({"role": "system", "content": tone})
 
     # Only add web search prompt if web search was conducted
@@ -3769,11 +4214,11 @@ CRITICAL INSTRUCTIONS:
 7. Do NOT ask about business plan drafting or other phases - stay in {current_phase} phase
 8. Continue with the next sequential question in the {current_phase} phase
 9. NEVER skip questions - ask them in exact sequential order
-10. If user provides an answer, acknowledge it briefly and positively (1-2 sentences) - e.g., "Thank you for sharing that!" DO NOT ask the next question yet - the system will show Accept/Modify buttons and only move forward after user clicks Accept
+10. If user provides an answer, acknowledge briefly (1-2 sentences), stay on-topic to what they shared, then ask the single NEXT question with exactly one [[Q:BUSINESS_PLAN.NN]] tag whose number always advances (never repeat the question they just answered unless clarifying-only with no tag — prefer always moving forward)
 11. If user uses Support/Draft/Scrapping commands, provide help but stay on the same question
-12. Do NOT jump to random questions - follow the exact sequence
+12. Do NOT jump to random questions - follow the exact sequence (or the missing-questions list when in uploaded-plan mode)
 13. Do NOT list option bullets in your message - the UI displays clickable option buttons
-14. Do NOT provide section summaries - just acknowledge answers briefly and wait for user confirmation
+14. Do NOT provide ad-hoc section summaries in place of the next question; the app triggers formal section summaries when appropriate
 15. **IMPORTANT FOR BUSINESS_PLAN PHASE**: When asking business plan questions, make them DYNAMIC and TAILORED to the user's specific business type and industry. For example:
     - If it's a restaurant: ask about menu, service hours, dining capacity, kitchen equipment, food suppliers
     - If it's a service business: ask about service offerings, timelines, client management, service delivery methods
@@ -3783,19 +4228,61 @@ CRITICAL INSTRUCTIONS:
 
 """
         msgs.append({"role": "system", "content": session_context})
-    
+        if current_phase == "BUSINESS_PLAN":
+            msgs.append({
+                "role": "system",
+                "content": (
+                    "BUSINESS_PLAN (this reply): All substantive content must align with the single questionnaire step "
+                    "prescribed by CURRENT SESSION STATE and CRITICAL INSTRUCTIONS above—the active [[Q:BUSINESS_PLAN.NN]] "
+                    "and the user’s latest message. Do not elaborate on other Business Plan questions, other phases, or "
+                    "off-agenda topics. If the user asked a specific question, answer it only when it is a permitted "
+                    "follow-up on the active step (same standard as INPUT GUARDRAILS in your base instructions)."
+                ),
+            })
+            depth_hint = _business_plan_depth_coaching_hint(
+                session_data.get("asked_q") if session_data else None
+            )
+            if depth_hint:
+                msgs.append({"role": "system", "content": depth_hint})
+
     # Add conversation history (trimmed for performance) and current message
     trimmed_history = trim_conversation_history(history, max_messages=10)
     msgs.extend(trimmed_history)
     
-    # If the user clicked Accept, tell the AI exactly what that means so it doesn't get confused and apologize
+    # If the user clicked Accept, steer the model without giving a phrase it will copy verbatim every turn
     if is_accept_command:
         msgs.append({
             "role": "system",
-            "content": "The user has clicked the 'Accept' button to approve your previously drafted content or research findings. Do NOT apologize. Do NOT say 'Apologies for the oversight'. Briefly acknowledge their acceptance (e.g., 'Great, I have saved that.'), and then immediately ask the next sequential question."
+            "content": (
+                "The user clicked **Accept** on your prior Draft/Support/Scrapping output (or summary step). "
+                "They are moving forward with that content—do not apologize or hedge. "
+                "Write one short, natural acknowledgment in your own words (vary wording across turns; "
+                "do not repeat the same canned line). Tie it briefly to what they accepted if context is clear. "
+                "Then immediately continue with the next sequential question per session rules and one [[Q:...]] tag."
+            ),
         })
         
     msgs.append({"role": "user", "content": user_content})
+
+    # Question index the user is answering this turn (session may mutate later in this handler).
+    # Source-of-truth order:
+    # 1) last assistant [[Q:BUSINESS_PLAN.NN]] in history (most reliable for what user actually saw)
+    # 2) session asked_q fallback
+    bp_answered_question_num: int | None = None
+    if session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
+        if history:
+            for msg in reversed(history[-16:]):
+                if msg.get("role") != "assistant":
+                    continue
+                content = msg.get("content")
+                if not content:
+                    continue
+                _, n = _first_business_plan_tag_in_reply(content)
+                if n is not None:
+                    bp_answered_question_num = n
+                    break
+        if bp_answered_question_num is None:
+            bp_answered_question_num = _parse_business_plan_tag_number(session_data.get("asked_q"))
 
     response = await client.chat.completions.create(
         model="gpt-4o",
@@ -3851,106 +4338,6 @@ CRITICAL INSTRUCTIONS:
     # Clean up extra newlines (keep "Question X of 45" format for Business Plan)
     reply_content = re.sub(r'\n{3,}', '\n\n', reply_content)
     
-    # GUARDRAIL: Ensure new question is generated 100% of the time after previous question completes
-    # This is critical for Business Planning Questionnaire - Angel must always generate next question
-    # Only apply guardrail after user answers (not for commands like Draft/Support/Scrapping)
-    if session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
-        # Check if user just provided an answer (not a command)
-        user_lower = user_content.lower().strip()
-        is_user_answer = (
-            len(user_content.strip()) > 0 and
-            user_lower not in ["draft", "support", "scrapping", "scraping", "modify"] and
-            not user_lower.startswith(("draft", "support", "scrapping", "scraping", "modify"))
-        )
-        
-        # Check if user just clicked "Accept" to move to next question
-        is_accept_click = user_lower == "accept"
-        
-        # Only apply guardrail if user answered a question or accepted (not for commands)
-        # Commands (Draft/Support/Scrapping) return early and don't reach this point
-        if is_user_answer or is_accept_click:
-            # Get the last question that was asked (from session or history)
-            current_tag = session_data.get("asked_q", "")
-            last_q_num = None
-            
-            # Extract question number from current session tag
-            if current_tag and "BUSINESS_PLAN." in current_tag:
-                try:
-                    last_q_num = int(current_tag.split(".")[1])
-                except (ValueError, IndexError):
-                    pass
-            
-            # If we couldn't get from session, try to extract from last assistant message in history
-            if last_q_num is None and history:
-                for msg in reversed(history[-10:]):
-                    if msg.get('role') == 'assistant' and msg.get('content'):
-                        content = msg['content']
-                        tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', content)
-                        if tag_match:
-                            last_q_num = int(tag_match.group(1))
-                            break
-            
-            # Check if AI response contains a question tag
-            tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', reply_content)
-            reply_has_tag = tag_match is not None
-            reply_q_num = int(tag_match.group(1)) if tag_match else None
-            
-            # Check if AI generated a valid new question (higher number than last asked)
-            # After user answers question N, AI should generate question N+1 or higher
-            has_valid_new_question = (
-                reply_has_tag and
-                last_q_num is not None and
-                reply_q_num is not None and
-                reply_q_num > last_q_num
-            )
-            
-            # Check if response is missing a new question or has wrong question number
-            needs_guardrail = (
-                not reply_has_tag or  # No question tag at all
-                (last_q_num is not None and reply_q_num is not None and reply_q_num <= last_q_num) or  # Same or lower number
-                (last_q_num is None and not reply_has_tag)  # Can't determine but no tag
-            )
-            
-            # Apply guardrail: Force generate next sequential question
-            if needs_guardrail and last_q_num is not None and last_q_num < 45:
-                next_q_num = last_q_num + 1
-                next_tag = f"BUSINESS_PLAN.{next_q_num:02d}"
-                
-                print(f"🛡️ GUARDRAIL: AI didn't generate valid new question after Q{last_q_num}. Forcing next question: {next_tag}")
-                print(f"   AI response has tag: {reply_has_tag}, AI question num: {reply_q_num}, Last question num: {last_q_num}")
-                
-                # Generate the next question using the question generation function
-                try:
-                    next_question = await generate_dynamic_business_question(
-                        question_tag=next_tag,
-                        session_data=session_data,
-                        history=history,
-                        is_missing_question=False
-                    )
-                    
-                    # If AI gave a short acknowledgment, prepend it; otherwise replace with new question
-                    if not reply_has_tag and len(reply_content.strip()) < 200:
-                        # AI gave short acknowledgment - prepend it to new question
-                        reply_content = f"{reply_content.strip()}\n\n{next_question}"
-                    else:
-                        # AI gave response without proper new question - replace with guaranteed next question
-                        # Remove any incorrect question tags first
-                        reply_content = re.sub(r'\[\[Q:BUSINESS_PLAN\.\d+\]\]', '', reply_content).strip()
-                        if reply_content:
-                            reply_content = f"{reply_content}\n\n{next_question}"
-                        else:
-                            reply_content = next_question
-                    
-                    print(f"✅ GUARDRAIL: Successfully generated next question {next_tag}")
-                except Exception as e:
-                    print(f"⚠️ GUARDRAIL ERROR: Failed to generate next question: {e}")
-                    # Fallback: At least inject the tag manually
-                    if not reply_has_tag:
-                        reply_content = f"{reply_content}\n\n[[Q:{next_tag}]]"
-                        print(f"✅ GUARDRAIL FALLBACK: Injected question tag {next_tag}")
-            elif needs_guardrail and last_q_num is None:
-                print(f"⚠️ GUARDRAIL: Cannot determine last question number, skipping guardrail")
-    
     # Handle remaining commands (kickstart, contact) that weren't processed earlier
     current_phase = session_data.get("current_phase", "") if session_data else ""
     
@@ -3963,17 +4350,39 @@ CRITICAL INSTRUCTIONS:
     
     # Inject missing tag if AI forgot to include one
     reply_content = inject_missing_tag(reply_content, session_data)
-    
+
+    # Section-end flows show a summary without a new [[Q:...]] — do not force the next question there.
+    bp_skip_progression_guard = bool(
+        session_data
+        and session_data.get("current_phase") == "BUSINESS_PLAN"
+        and not is_accept_command
+        and not is_command_response
+        and check_for_section_summary(session_data.get("asked_q"), session_data, history)
+    )
+
+    if (
+        session_data
+        and session_data.get("current_phase") == "BUSINESS_PLAN"
+        and not bp_skip_progression_guard
+    ):
+        reply_content = await _ensure_business_plan_next_question_reply(
+            reply_content,
+            session_data,
+            history,
+            user_content,
+            answered_question_num=bp_answered_question_num,
+        )
+
     # CRITICAL: Enforce single-question rule - strip extra [[Q:...]] tags if AI generated multiple
-    all_tags = re.findall(r'\[\[Q:(BUSINESS_PLAN\.\d{2})\]\]', reply_content)
+    all_tags_raw = re.findall(r"\[\[Q:(BUSINESS_PLAN\.\d+)\]\]", reply_content, flags=re.IGNORECASE)
+    all_tags = [f"BUSINESS_PLAN.{int(t.split('.')[1]):02d}" for t in all_tags_raw]
     if len(all_tags) > 1:
-        print(f"⚠️ MULTI-QUESTION VIOLATION: AI generated {len(all_tags)} question tags: {all_tags}. Keeping only the first: {all_tags[0]}")
-        # Keep only the first occurrence and the content up to the second tag
         first_tag = all_tags[0]
-        second_tag_pattern = f'[[Q:{all_tags[1]}]]'
-        second_tag_pos = reply_content.find(second_tag_pattern)
-        if second_tag_pos > 0:
-            reply_content = reply_content[:second_tag_pos].rstrip()
+        print(f"⚠️ MULTI-QUESTION VIOLATION: AI generated {len(all_tags)} question tags: {all_tags}. Keeping only the first: {first_tag}")
+        matches = list(re.finditer(r"\[\[Q:BUSINESS_PLAN\.\d+\]\]", reply_content, flags=re.IGNORECASE))
+        if len(matches) > 1:
+            second_start = matches[1].start()
+            reply_content = reply_content[:second_start].rstrip()
             print(f"✅ Trimmed reply to contain only [[Q:{first_tag}]]")
     
     # Check if AI response contains WEBSEARCH_QUERY (from scrapping command)
@@ -4005,14 +4414,23 @@ CRITICAL INSTRUCTIONS:
     # Extract question tag from reply and update session data BEFORE sequence validation
     # IMPORTANT: Don't update asked_q if we're showing a section summary
     patch_session = {}
-    tag_match = re.search(r'\[\[Q:([A-Z_]+\.\d+)\]\]', reply_content)
+    tag_match = re.search(r"\[\[Q:([A-Za-z_]+\.\d+)\]\]", reply_content, re.IGNORECASE)
+    new_question_tag = None
     if tag_match and session_data and not section_summary_info:
-        new_question_tag = tag_match.group(1)
+        raw_tag = tag_match.group(1)
+        phase_part, num_part = raw_tag.split(".", 1)
+        phase_up = phase_part.upper()
+        try:
+            qn = int(num_part)
+        except ValueError:
+            qn = 0
+        if phase_up == "BUSINESS_PLAN":
+            new_question_tag = f"BUSINESS_PLAN.{qn:02d}"
+        else:
+            new_question_tag = f"{phase_up}.{num_part}"
         current_asked_q = session_data.get("asked_q", "")
-        
-        # Only update if this is a new question (not the same as current)
+
         if new_question_tag != current_asked_q:
-            # Update session data immediately for sequence validation
             session_data["asked_q"] = new_question_tag
             patch_session["asked_q"] = new_question_tag
             print(f"🔧 Updating session asked_q: {current_asked_q} → {new_question_tag}")
@@ -4036,8 +4454,13 @@ CRITICAL INSTRUCTIONS:
         "BUSINESS_PLAN.42": "contingency plans",
     }
     auto_research_triggered = False  # Track if auto-research ran for this response
+    detected_tag = None
     if tag_match and not is_command_response:
-        detected_tag = tag_match.group(1)
+        raw_tag = tag_match.group(1)
+        parts = raw_tag.split(".", 1)
+        if len(parts) == 2 and parts[0].upper() == "BUSINESS_PLAN":
+            detected_tag = f"BUSINESS_PLAN.{int(parts[1]):02d}"
+    if detected_tag and not is_command_response:
         if detected_tag in auto_research_questions:
             research_type = auto_research_questions[detected_tag]
             print(f"🔍 AUTO-RESEARCH TRIGGERED for {detected_tag} ({research_type})")
@@ -4224,7 +4647,7 @@ CRITICAL INSTRUCTIONS:
         reply_content = re.sub(pattern, '', reply_content, flags=re.IGNORECASE)
     
     # Also strip floating sub-instruction lines for Q11 that AI generates as separate paragraphs
-    if tag_match and tag_match.group(1) == "BUSINESS_PLAN.11":
+    if detected_tag == "BUSINESS_PLAN.11":
         # Remove standalone "List top 5..." and "Look for both small and large..." lines
         # These are sub-instructions that should not appear as separate paragraphs
         reply_content = re.sub(r'\n+List top 5 and describe their strengths and weaknesses\.?\s*\n+', '\n', reply_content)
@@ -4235,25 +4658,25 @@ CRITICAL INSTRUCTIONS:
         reply_content = re.sub(r'\n*Competitor [A-E]:[^\n]*\n*', '\n', reply_content)
     
     # For Q12, strip AI-generated fake trends (Trend 1, Trend 2, etc.)
-    if tag_match and tag_match.group(1) == "BUSINESS_PLAN.12":
+    if detected_tag == "BUSINESS_PLAN.12":
         reply_content = re.sub(r'\n*Trend \d+:[^\n]*\n*', '\n', reply_content)
     
     # For Q26 (permits/licenses): Replace "Competitive Landscape" etc. with "Potential Service Providers"
     # Per spec, permits research should list service providers (LegalZoom, MyCorporation), not competitors
-    if tag_match and tag_match.group(1) == "BUSINESS_PLAN.26":
+    if detected_tag == "BUSINESS_PLAN.26":
         reply_content = re.sub(r'\*\*Competitive [Ll]andscape\*\*', '**Potential Service Providers**', reply_content)
         reply_content = re.sub(r'Competitive [Ll]andscape', 'Potential Service Providers', reply_content)
         reply_content = re.sub(r'\*\*Competitors\*\*', '**Potential Service Providers**', reply_content)
         reply_content = re.sub(r'\*\*Competitive [Aa]nalysis\*\*', '**Potential Service Providers**', reply_content)
     
     # For Q27 (insurance): Strip "Market Data" section - market size, CAGR, premiums not relevant for policy recommendations
-    if tag_match and tag_match.group(1) == "BUSINESS_PLAN.27":
+    if detected_tag == "BUSINESS_PLAN.27":
         # Match **Market Data** or ## Market Data headers and their content until next section
         reply_content = re.sub(r'\n+\*\*[Mm]arket [Dd]ata\*\*[^\n]*\n.*?(?=\n\n\*\*|\n##\s|\n\d+\.\s|\Z)', '\n', reply_content, flags=re.DOTALL)
         reply_content = re.sub(r'\n+##\s*[Mm]arket [Dd]ata[^\n]*\n.*?(?=\n\n##|\n\*\*|\n\d+\.\s|\Z)', '\n', reply_content, flags=re.DOTALL)
     
     # For Q35 (scaling): Remove "Sub-questions covered" section
-    if tag_match and tag_match.group(1) == "BUSINESS_PLAN.35":
+    if detected_tag == "BUSINESS_PLAN.35":
         reply_content = re.sub(r'\n*\*\*Sub-questions covered\*\*:?.*?(?=\n\n|\n\*\*|\Z)', '\n', reply_content, flags=re.DOTALL | re.IGNORECASE)
         reply_content = re.sub(r'\n*Sub-questions covered:?.*?(?=\n\n|\n\*\*|\Z)', '\n', reply_content, flags=re.DOTALL | re.IGNORECASE)
     
@@ -4261,7 +4684,9 @@ CRITICAL INSTRUCTIONS:
     reply_content = re.sub(r'\n{3,}', '\n\n', reply_content)
     
     # Validate business plan question sequence (now with updated session data)
-    reply_content = validate_business_plan_sequence(reply_content, session_data)
+    reply_content = validate_business_plan_sequence(
+        reply_content, session_data, answered_question_num=bp_answered_question_num
+    )
     
     # Fix verification flow to separate verification from next question
     # reply_content = fix_verification_flow(reply_content, session_data)
@@ -4543,7 +4968,7 @@ CRITICAL:
     
     # POST-PROCESSING: Strip unrelated "Follow-up prompts:" sections from auto-generated responses
     reply_content = _strip_followup_prompts(reply_content)
-    
+
     return {
         "reply": reply_content,
         "web_search_status": web_search_status,
@@ -4600,6 +5025,39 @@ def _strip_followup_prompts(reply_content: str) -> str:
         reply_content = re.sub(pattern, '', reply_content, flags=re.DOTALL | re.IGNORECASE).strip()
     
     return reply_content
+
+
+def _strip_draft_transition_bleed(text: str) -> str:
+    """Remove transition lines, stray follow-up questions, and thought starters that
+    models often append to draft text despite system instructions."""
+    if not text or not str(text).strip():
+        return text
+    reply_content = str(text)
+    # Cut before common "moving to next question" phrases (keep only the draft body)
+    transition_patterns = [
+        r"(?:\n\s*)+(?:Now,?\s+)?Let'?s\s+move\s+on(?:\s+to\s+the\s+next\s+step)?[^\n]*",
+        r"(?:\n\s*)+Let'?s\s+move\s+forward[^\n]*",
+        r"(?:\n\s*)+Let'?s\s+continue\s+to\s+the\s+next[^\n]*",
+        r"(?:\n\s*)+Moving\s+on\s+to[^\n]*",
+        r"(?:\n\s*)+Ready\s+for\s+the\s+next\s+question[^\n]*",
+    ]
+    cut_at = len(reply_content)
+    for pat in transition_patterns:
+        m = re.search(pat, reply_content, flags=re.IGNORECASE)
+        if m:
+            cut_at = min(cut_at, m.start())
+    reply_content = reply_content[:cut_at].rstrip()
+    # Drop thought-starter blocks and trailing questionnaire tags
+    reply_content = re.sub(r"(?:\n\s*)+🧠[\s\S]*", "", reply_content, flags=re.IGNORECASE)
+    reply_content = re.sub(r"(?:\n\s*)+💭[\s\S]*", "", reply_content, flags=re.IGNORECASE)
+    reply_content = re.sub(
+        r"(?:\n\s*)+(?:\*\*)?Thought\s+Starter(?:\*\*)?[\s\S]*",
+        "",
+        reply_content,
+        flags=re.IGNORECASE,
+    )
+    reply_content = re.sub(r"\[\[Q:[^\]]+\]\]\s*", "", reply_content)
+    return reply_content.strip()
 
 
 def _extract_section_qa_pairs(history: list, section_end_q: int, section_name: str) -> str:
@@ -4737,10 +5195,19 @@ async def handle_draft_command(reply, history, session_data=None):
     print(f"🔍 Draft - Final current_question: {current_question[:100]}...")
     
     # Conduct web search for research-backed drafts (for specific question types)
-    business_name = business_context.get("business_name", "business")
-    industry = business_context.get("industry", "business")
+    business_name = _sanitize_business_identity_text(
+        business_context.get("business_name"),
+        "your business",
+    )
+    industry = _sanitize_business_identity_text(
+        business_context.get("industry"),
+        "your industry",
+    )
     location = business_context.get("location", "")
     question_topic = get_question_topic(current_question)
+    business_context_for_draft = dict(business_context)
+    business_context_for_draft["business_name"] = business_name
+    business_context_for_draft["industry"] = industry
     
     # Trigger research ONLY for data-heavy questions that truly need external data
     # Skip research for simple questions like mission statement/tagline to reduce latency
@@ -4764,13 +5231,19 @@ async def handle_draft_command(reply, history, session_data=None):
             print(f"⏱️ Draft command - Skipping research due to throttling (reducing latency)")
     
     # Generate draft content based on conversation history, question, and research
-    draft_content = await generate_draft_content(history, business_context, current_question, research_results)
+    draft_content = await generate_draft_content(
+        history,
+        business_context_for_draft,
+        current_question,
+        research_results,
+    )
+    draft_content = _strip_followup_prompts(draft_content)
+    draft_content = _strip_draft_transition_bleed(draft_content)
     
     # Create a comprehensive draft response with clear heading
     # NOTE: Do NOT append thought starters to draft responses - they introduce irrelevant context
     draft_response = f"Here's a draft for you:\n\n{draft_content}\n\n"
-    
-    return draft_response
+    return cap_full_command_assist_reply(draft_response)
 
 def get_current_question_context(history, session_data=None):
     """Extract the current question context from the most recent assistant message or session data"""
@@ -4997,6 +5470,7 @@ async def generate_draft_content(history, business_context, current_question="",
     
     # Use AI to generate a comprehensive, personalized, research-backed draft
     research_section = ""
+    no_research_guardrail = ""
     if research_results:
         research_section = f"""
     
@@ -5005,22 +5479,32 @@ async def generate_draft_content(history, business_context, current_question="",
     
     Use this research to provide data-driven, factual content with citations.
     """
+    else:
+        no_research_guardrail = """
+
+    NO-RESEARCH MODE (MANDATORY):
+    - Do NOT reference specific companies, brands, market leaders, or named examples.
+    - Do NOT state external facts/trends as if verified data.
+    - Keep recommendations practical and scenario-based using only user-provided context.
+    """
     
     draft_prompt = f"""
     ⚠️ CRITICAL CONTEXT - READ FIRST:
-        This business is in the {industry.upper()} INDUSTRY operating as a {business_type.upper()}.
-    ALL draft content must be 100% specific to {industry.upper()} businesses.
+        This business is in the {industry} industry operating as a {business_type}.
+    ALL draft content must be specific to this business context.
     {research_section}
+    {no_research_guardrail}
     
     Create a draft answer for this SPECIFIC business question ONLY: "{current_question}"
     
     ⚠️ CRITICAL: Your draft must ONLY address the question above. Do NOT include information about 
     unrelated topics like tools, equipment, operations, or other business areas unless the question 
     specifically asks about them. Stay focused on the exact topic of the question.
+    MANDATORY: Produce only material that helps complete THIS questionnaire item. Do not add sections that belong to other Business Plan questions or phases.
     
     Business Context (PRIMARY IDENTIFIERS):
     - Business Name: {business_name}
-    - PRIMARY INDUSTRY: {industry.upper()} ⭐ (THIS IS THE CORE BUSINESS TYPE)
+    - PRIMARY INDUSTRY: {industry}
     - Business Structure: {business_type}
     - Location: {location}
     
@@ -5035,37 +5519,29 @@ async def generate_draft_content(history, business_context, current_question="",
     explicitly stated they will work solo. Respect their previous answers completely.
     
     Generate a complete, well-structured draft answer that:
-        1. Directly answers the question with specific, data-backed content for a {industry.upper()} business
+    1. Directly answers the question with specific content for this business
     2. Incorporates research findings, statistics, and data when available
-    3. Cites sources and data points from research findings
-    4. Is personalized to {business_name} in the {industry.upper()} industry
+    3. Uses only user-provided facts or provided research facts (no fabricated numbers/claims)
+    4. Is personalized to {business_name} in the {industry} industry
     5. Considers the {location} market and local factors with actual data
-    6. Provides concrete details and examples from the {industry.upper()} industry (not generic advice)
+    6. Provides concrete details and examples from the {industry} industry (not generic advice)
     7. Is appropriate for a {business_type} business structure
     8. Uses information from previous answers when relevant
-    9. Includes bullet points or numbered lists for clarity
-    10. ⚠️ CRITICAL WORD LIMIT: Your response MUST be exactly 100 words or less. Be concise and focused. Do not exceed 100 words.
-    11. NEVER mentions unrelated industries - stay focused on {industry.upper()}
+    9. Optional: one short bullet list (at most 3 bullets) only if it fits the word budget
+    10. ⚠️ CRITICAL WORD LIMIT: Your entire draft MUST be {COMMAND_ASSIST_MAX_WORDS} words or fewer. Be concise; do not exceed this limit.
+    11. NEVER mention unrelated industries.
+    12. Write in first person as the founder ("I/we"), ready to paste as an answer.
     
     ⚠️ CRITICAL FOR COST/FINANANCIAL QUESTIONS:
     - If the question asks about costs, expenses, pricing, acquisition costs, startup costs, or any financial estimates:
-      * You MUST provide ACTUAL NUMERICAL ESTIMATES based on the {industry.upper()} industry and {location} market
+      * Provide numerical estimates ONLY when they come from provided research or explicit user inputs
       * Include specific dollar amounts, ranges, or percentages (e.g., "$50-$200 per customer", "15-25% of revenue", "$10,000-$25,000")
-      * Base estimates on research data, industry benchmarks, and {location} market conditions
+      * If no research/user number exists, use conservative ranges and label them as estimates
       * Break down costs by category if applicable
-      * DO NOT just provide general advice - provide actual numbers the user can use
-      * Example: For "customer acquisition cost" - provide a specific range like "$25-$75 per customer for a {industry.upper()} in {location}"
+      * Do not invent specific market claims (e.g., CAGR, market size) unless present in provided research
     
-    Structure the draft with clear sections like:
-        - Main answer/core content for {industry.upper()} business (with data)
-    - Key points or features with statistics (use bullet points)
-    - Research-backed insights and market data
-    - Specific considerations for the {industry} business
-    - Next steps or recommendations
-    - Sources cited (if research data was provided)
-    
-    Make this a complete, polished, research-backed draft that the user can accept and use immediately. Be specific and detailed, not generic.
-    REMEMBER: This is a {industry.upper()} business - all examples, features, and recommendations must be relevant to {industry.upper()}.
+    Keep structure light so the whole draft stays within {COMMAND_ASSIST_MAX_WORDS} words (e.g. one short opening, one tight paragraph or micro-list, optional one-line source hint if research was provided).
+    REMEMBER: Keep all examples and recommendations relevant to this business context.
     
     ⚠️ DO NOT include:
     - "Follow-up prompts:" or follow-up questions
@@ -5073,6 +5549,9 @@ async def generate_draft_content(history, business_context, current_question="",
     - "Would you like to explore..." or similar prompts
     - Thought starters or tips
     Just provide the draft content itself.
+    
+    NEVER include: "Let's move on", "next step", a new questionnaire question, bold interview questions,
+    "Thought Starter", brain emoji prompts, or any transition to a different Business Plan item.
     """
     
     try:
@@ -5080,14 +5559,14 @@ async def generate_draft_content(history, business_context, current_question="",
             model="gpt-4o",
             messages=[{"role": "user", "content": draft_prompt}],
             temperature=0.3,
-            max_tokens=500  # Reduced to enforce 100-word limit (approximately 500 tokens for 100 words)
+            max_tokens=800  # Ceiling before truncation; COMMAND_ASSIST_MAX_WORDS is enforced below
         )
         
         ai_draft = response.choices[0].message.content
         # Strip any follow-up prompts/questions the AI may have added
         ai_draft = _strip_followup_prompts(ai_draft)
-        # Enforce 100-word limit
-        ai_draft = truncate_to_word_limit(ai_draft, 100)
+        ai_draft = _strip_draft_transition_bleed(ai_draft)
+        ai_draft = truncate_to_word_limit(ai_draft, COMMAND_ASSIST_MAX_WORDS)
         word_count = len(ai_draft.split())
         print(f"✅ Draft content generated with {len(ai_draft)} characters ({word_count} words){' (with research)' if research_results else ''}")
         return ai_draft
@@ -5446,7 +5925,8 @@ async def handle_scrapping_command(reply, notes, history, session_data=None):
         scrapping_response += f"**🔍 Research: {search_query}**\n\n"
         scrapping_response += "Research is integrated into the refined content above based on current business best practices.\n\n"
     
-    print(f"🔍 DEBUG - Scrapping response generated, length: {len(scrapping_response)}")
+    scrapping_response = cap_full_command_assist_reply(scrapping_response)
+    print(f"🔍 DEBUG - Scrapping response generated (capped), length: {len(scrapping_response)}")
     return {
         "reply": scrapping_response,
         "web_search_status": {"is_searching": False, "query": search_query, "completed": True},
@@ -5473,7 +5953,9 @@ async def refine_user_input(user_notes, business_context, current_question=""):
     Use ONLY {industry.upper()} industry examples, insights, and terminology.
     
     Take this user's rough notes/ideas and refine them into a comprehensive, well-structured answer for the question: "{current_question}"
-    
+
+    ⚠️ ACTIVE QUESTION RELEVANCE (MANDATORY): Your entire refinement must address ONLY the question above. Do NOT pivot to other Business Plan questions, later phases, or off-agenda themes. Every paragraph must tie back to the active questionnaire step.
+
     User's Notes/Ideas:
     "{cleaned_notes}"
     
@@ -5490,26 +5972,10 @@ async def refine_user_input(user_notes, business_context, current_question=""):
     4. Structure the content clearly with sections and bullet points
     5. Keep the user's core ideas but make them more comprehensive and actionable
     6. Add strategic recommendations that build on their initial thoughts
-    7. ⚠️ CRITICAL WORD LIMIT: Your response MUST be exactly 100 words or less. Be concise and focused. Do not exceed 100 words.
+    7. ⚠️ CRITICAL WORD LIMIT: Your entire refinement MUST be {COMMAND_ASSIST_MAX_WORDS} words or fewer.
     8. NEVER mentions unrelated industries - stay focused on {industry.upper()}
     
-    Structure your refined version with:
-    **Refined Core Concept:**
-    [Their idea, polished and expanded for {industry.upper()} business]
-    
-    **{industry.upper()} Industry-Specific Application:**
-    [How this applies to the {industry.upper()} industry specifically]
-    
-    **Strategic Recommendations for {industry.upper()} Business:**
-    [3-5 specific recommendations building on their ideas]
-    
-    **Implementation Steps:**
-    [4-6 concrete steps they can take]
-    
-    **Key Considerations for {industry.upper()}:**
-    [2-3 important factors to consider]
-    
-    Make this a comprehensive refinement that takes their rough ideas and turns them into polished, actionable content.
+    Use at most two short headings plus bullets if needed; stay within the word limit.
     REMEMBER: This is a {industry.upper()} business - all refinements must be relevant to {industry.upper()}.
     """
     
@@ -5518,12 +5984,11 @@ async def refine_user_input(user_notes, business_context, current_question=""):
             model="gpt-4o",
             messages=[{"role": "user", "content": refine_prompt}],
             temperature=0.3,
-            max_tokens=500  # Reduced to enforce 100-word limit (approximately 500 tokens for 100 words)
+            max_tokens=800
         )
         
         refined_content = response.choices[0].message.content
-        # Enforce 100-word limit for scrapping
-        refined_content = truncate_to_word_limit(refined_content, 100)
+        refined_content = truncate_to_word_limit(refined_content, COMMAND_ASSIST_MAX_WORDS)
         word_count = len(refined_content.split())
         print(f"🔍 DEBUG - AI-refined content length: {len(refined_content)} characters ({word_count} words)")
         return refined_content
@@ -5595,7 +6060,9 @@ async def generate_scrapping_content(history, business_context, notes, current_q
     Use ONLY {industry.upper()} industry examples, trends, and insights.
     
     Generate a comprehensive, refined analysis that helps answer this business question: "{current_question}"
-    
+
+    ⚠️ ACTIVE QUESTION RELEVANCE (MANDATORY): The entire analysis must serve ONLY the question above. Do NOT introduce themes that belong to other Business Plan questions, later phases, or unrelated topics. Every section must directly help the user answer this active questionnaire step.
+
     Business Context (PRIMARY IDENTIFIERS):
     - Business Name: {business_name}
     - PRIMARY INDUSTRY: {industry.upper()} ⭐ (THIS IS THE CORE BUSINESS TYPE)
@@ -5615,29 +6082,10 @@ async def generate_scrapping_content(history, business_context, notes, current_q
     4. Offers strategic recommendations appropriate for a {business_type}
     5. Includes current {industry.upper()} industry trends and best practices (2024-2025)
     6. Provides actionable next steps
-    7. ⚠️ CRITICAL WORD LIMIT: Your response MUST be exactly 100 words or less. Be concise and focused. Do not exceed 100 words.
+    7. ⚠️ CRITICAL WORD LIMIT: Your entire analysis MUST be {COMMAND_ASSIST_MAX_WORDS} words or fewer.
     8. NEVER mentions unrelated industries - stay focused on {industry.upper()}
     
-    Structure your analysis with these sections:
-    **Business Context Analysis:**
-    [Overview of the {industry.upper()} business and how it relates to the question]
-    
-    **{industry.upper()} Industry-Specific Insights:**
-    [3-4 insights specific to the {industry.upper()} industry]
-    
-    **Market Opportunities in {industry.upper()}:**
-    [2-3 opportunities in the {location} market for {industry} businesses]
-    
-    **Strategic Recommendations for {industry.upper()} Business:**
-    [4-5 specific, actionable recommendations]
-    
-    **Implementation Priorities:**
-    [3-4 priority actions to take]
-    
-    **Key Success Factors for {industry.upper()}:**
-    [2-3 factors critical for success in {industry}]
-    
-    Make this comprehensive, strategic, and highly actionable.
+    Prefer one short overview plus 2–4 bullets; skip extra section headings if they push you over the limit.
     REMEMBER: This is a {industry.upper()} business - all analysis must be relevant to {industry.upper()}.
     """
     
@@ -5646,12 +6094,11 @@ async def generate_scrapping_content(history, business_context, notes, current_q
             model="gpt-4o",
             messages=[{"role": "user", "content": scrapping_prompt}],
             temperature=0.3,
-            max_tokens=500  # Reduced to enforce 100-word limit (approximately 500 tokens for 100 words)
+            max_tokens=800
         )
         
         scrapping_content = response.choices[0].message.content
-        # Enforce 100-word limit for scrapping
-        scrapping_content = truncate_to_word_limit(scrapping_content, 100)
+        scrapping_content = truncate_to_word_limit(scrapping_content, COMMAND_ASSIST_MAX_WORDS)
         word_count = len(scrapping_content.split())
         print(f"🔍 DEBUG - AI-generated scrapping content length: {len(scrapping_content)} characters ({word_count} words)")
         return scrapping_content
@@ -5720,13 +6167,11 @@ async def handle_support_command(reply, history, session_data=None):
         question_topic
     )
     
-    support_response = f"Here's some additional information to help you:\n\n{support_content}\n\n"
-    support_response += (
-        "When you're ready, choose the Draft quick action so I can assemble a full answer using these insights. "
-        "After I share the draft, you'll be able to Accept or Modify it."
+    support_response = (
+        f"Here's some additional information to help you:\n\n{support_content}\n\n"
+        "Tip: use **Draft** for a full answer you can Accept or Modify."
     )
-    
-    return support_response
+    return cap_full_command_assist_reply(support_response)
 
 async def generate_support_content(history, business_context, current_question="", research_results=None, question_topic=""):
     """Generate support content with research-backed insights and citations"""
@@ -5786,11 +6231,8 @@ async def generate_support_content(history, business_context, current_question="
     if question_topic == "competitive analysis":
         competitor_requirements = f"""
     
-    ⚔️ COMPETITOR REQUIREMENTS:
-        • Provide a ranked list of 5-7 named competitors active in {location or 'the primary market'} with one-line descriptions.
-        • Include 2024 or {current_year} data points (funding, locations, revenue, product launches, partnerships) for each competitor—avoid citing sources older than {previous_year}.
-        • Highlight differentiators and gaps that {business_name} can exploit versus each competitor.
-        • Summarize recent competitive moves and cite every data point with a source published in {previous_year} or {current_year} (or the most recent available if newer).
+    ⚔️ COMPETITORS (entire reply still ≤{COMMAND_ASSIST_MAX_WORDS} words):
+        Name up to 3 direct competitors with one differentiator each; add at most one recent fact or source per competitor.
         """
 
     support_prompt = f"""
@@ -5806,6 +6248,7 @@ async def generate_support_content(history, business_context, current_question="
         "{current_question}"
     
     ⚠️ CRITICAL REQUIREMENT: Your entire response must be DIRECTLY RELEVANT to answering this specific question. Do not provide general business advice or information that doesn't directly help answer this question. Stay focused and on-topic.
+    MANDATORY: Cover only this questionnaire step. Do not introduce themes that answer other Business Plan questions or later phases.
     
     Business Context (PRIMARY IDENTIFIERS):
     - Business Name: {business_name}
@@ -5816,45 +6259,15 @@ async def generate_support_content(history, business_context, current_question="
     Previous Context from Conversation:
     {' | '.join(previous_answers[-3:]) if previous_answers else 'No previous context available'}
     
-    Provide extremely detailed, research-backed guidance that DIRECTLY ANSWERS the current question:
-        1. Incorporates actual research findings, statistics, and data from authoritative sources
-    2. Cites specific sources and URLs when available from the research
-    3. Is highly specific to the {industry.upper()} industry with real examples and current data
-    4. Considers the {location} market dynamics with local data when available
-    5. Is appropriate for a {business_type} with practical, evidence-based implementation steps
-    6. Includes 5-7 concrete, actionable steps backed by research and industry data
-    7. References current {industry.upper()} industry trends, statistics, and best practices (2024-2025)
-    8. Addresses common challenges specific to {industry.upper()} businesses with data-driven solutions
-    9. Provides strategic insights backed by research and market data
-    10. ⚠️ STAYS FOCUSED on the current question - do not include unrelated information
-    11. CITES SOURCES throughout the response when referencing data or statistics
-    
-    Structure your response with:
-        **Additional Information for {question_topic.upper() if question_topic and question_topic != 'business planning' else industry.upper()}**
-    [Key findings from research with citations]
-    
-    **Understanding the Question**
-    [What this question means for their {industry.upper()} business, with relevant data]
-    
-    **Industry Data & Statistics**
-    [Specific data points, trends, and statistics for {industry.upper()} with sources]
-    
-    **Practical Action Steps (Evidence-Based)**
-    [5-7 numbered, detailed action steps backed by research and data]
-    
-    **Common Challenges & Data-Driven Solutions**
-    [2-3 challenges {industry} businesses face with research-backed solutions]
-    
-    **Best Practices (Industry Research)**
-    [3-4 best practices from authoritative sources and industry leaders]
-    
-    **Sources & Citations**
-    [List all sources referenced with URLs when available]
-    
-    Make the guidance extremely comprehensive, detailed, and research-backed. 
-    ⚠️ CRITICAL WORD LIMIT: Your response MUST be exactly 150 words or less. Be concise and focused. Do not exceed 150 words.
-    REMEMBER: This is a {industry.upper()} business - keep all examples, insights, and recommendations relevant to {industry.upper()}.
-    CITE YOUR SOURCES throughout the response using the research findings provided.
+    Write concise, research-backed guidance that DIRECTLY answers the current question.
+    Entire reply MUST be {COMMAND_ASSIST_MAX_WORDS} words or fewer (hard cap).
+    Format:
+    • 1–2 sentences: why this matters for {business_name} in {industry.upper()} ({location}).
+    • 2–4 tight bullets: the strongest facts from research; cite briefly (source or year) where you use data.
+    • 1 sentence: the single next step the founder should take.
+    Omit extra sections, long headings, and follow-up questions if they break the word budget.
+    Stay on the current question only; prioritise research findings when provided.
+    REMEMBER: This is a {industry.upper()} business—keep examples and advice specific to that industry.
     
     ⚠️ DO NOT include:
     - "Follow-up prompts:" or follow-up questions
@@ -5870,12 +6283,11 @@ async def generate_support_content(history, business_context, current_question="
             model="gpt-4o",
             messages=[{"role": "user", "content": support_prompt}],
             temperature=0.3,
-            max_tokens=800  # Reduced to enforce 150-word limit (approximately 800 tokens for 150 words)
+            max_tokens=800
         )
         
         generated_content = response.choices[0].message.content
-        # Enforce 150-word limit
-        generated_content = truncate_to_word_limit(generated_content, 150)
+        generated_content = truncate_to_word_limit(generated_content, COMMAND_ASSIST_MAX_WORDS)
         word_count = len(generated_content.split())
         print(f"✅ Support content generated with {len(generated_content)} characters ({word_count} words)")
         return generated_content
@@ -5913,12 +6325,13 @@ async def handle_draft_more_command(reply, history, session_data=None):
     
     # Generate additional content based on current question
     additional_content = await generate_additional_draft_content(history, business_context, current_question)
+    additional_content = _strip_followup_prompts(additional_content)
+    additional_content = _strip_draft_transition_bleed(additional_content)
     
     # Use consistent format with "Here's a draft" to trigger button detection
     # NOTE: Do NOT append thought starters to draft responses - they introduce irrelevant context
     draft_more_response = f"Here's a draft for you:\n\n{additional_content}\n\n"
-    
-    return draft_more_response
+    return cap_full_command_assist_reply(draft_more_response)
 
 async def generate_additional_draft_content(history, business_context, current_question=""):
     """Generate additional draft content based on current question using AI"""
@@ -5944,8 +6357,10 @@ async def generate_additional_draft_content(history, business_context, current_q
     Use ONLY {industry.upper()} industry examples, innovations, and insights.
     
     The user requested "Draft Answer" - they want additional, enhanced content on top of what was already provided.
-    
+
     Current Question: "{current_question}"
+
+    ⚠️ ACTIVE QUESTION RELEVANCE (MANDATORY): Stay strictly on the current question above. Do NOT introduce content that answers other Business Plan questions, later phases, or unrelated topics — the user wants MORE depth on THIS step, not coverage of additional steps.
     
     Business Context (PRIMARY IDENTIFIERS):
     - Business Name: {business_name}
@@ -5963,26 +6378,10 @@ async def generate_additional_draft_content(history, business_context, current_q
     4. Includes innovative ideas and creative approaches for {industry} businesses
     5. Offers cutting-edge {industry.upper()} industry trends and best practices (2024-2025)
     6. Makes it stand out with unique value propositions
-    7. ⚠️ CRITICAL WORD LIMIT: Your response MUST be exactly 100 words or less. Be concise and focused. Do not exceed 100 words.
+    7. ⚠️ CRITICAL WORD LIMIT: Your entire reply MUST be {COMMAND_ASSIST_MAX_WORDS} words or fewer.
     8. NEVER mentions unrelated industries - stay focused on {industry.upper()}
     
-    Structure your enhanced draft with:
-    **Enhanced Main Content:**
-    [Take the original concept and elevate it with unique insights for {industry.upper()}]
-    
-    **Unique Angles & Innovation for {industry.upper()}:**
-    [3-5 creative approaches specific to {industry} businesses]
-    
-    **Advanced Strategic Insights for {industry.upper()}:**
-    [Deep industry-specific strategies for {industry.upper()}]
-    
-    **Implementation Roadmap:**
-    [Detailed 5-7 step plan with specifics]
-    
-    **Competitive Edge Factors in {industry.upper()}:**
-    [What makes this approach uniquely powerful for {industry} businesses]
-    
-    Make this draft MORE creative, MORE detailed, and MORE strategic than a standard response. Think outside the box!
+    Keep to one or two short blocks (optional small bullet list); the word limit is strict.
     REMEMBER: This is a {industry.upper()} business - all enhanced content must be relevant to {industry.upper()}.
     
     ⚠️ DO NOT include:
@@ -5999,12 +6398,11 @@ async def generate_additional_draft_content(history, business_context, current_q
             model="gpt-4o",
             messages=[{"role": "user", "content": draft_more_prompt}],
             temperature=0.4,  # Slightly higher for more creativity
-            max_tokens=500  # Reduced to enforce 100-word limit (approximately 500 tokens for 100 words)
+            max_tokens=800
         )
         
         enhanced_content = response.choices[0].message.content
-        # Enforce 100-word limit
-        enhanced_content = truncate_to_word_limit(enhanced_content, 100)
+        enhanced_content = truncate_to_word_limit(enhanced_content, COMMAND_ASSIST_MAX_WORDS)
         word_count = len(enhanced_content.split())
         print(f"🔍 DEBUG - AI-generated enhanced draft length: {len(enhanced_content)} characters ({word_count} words)")
         return enhanced_content
@@ -7794,63 +8192,11 @@ Great progress on your business plan!
     return result
 
 async def generate_next_question(question_tag: str, session_data: dict) -> str:
-    """Generate the next business planning question based on the question tag"""
-    
-    # Business planning questions mapping (aligned with constant.py 45 questions)
-    business_plan_questions = {
-        "BUSINESS_PLAN.01": "Describe your business idea in detail.",
-        "BUSINESS_PLAN.02": "What product or service will you offer?",
-        "BUSINESS_PLAN.03": "What makes your product or service unique compared to others in the market?",
-        "BUSINESS_PLAN.04": "What is the current stage of your business?",
-        "BUSINESS_PLAN.05": "Business Name (if decided):",
-        "BUSINESS_PLAN.06": "What industry does your business fall into?",
-        "BUSINESS_PLAN.07": "What are your short-term (6 months to 1 year) business goals?",
-        "BUSINESS_PLAN.08": "Who is your target customer?",
-        "BUSINESS_PLAN.09": "Where will your business products or services be available for purchase?",
-        "BUSINESS_PLAN.10": "What problem(s) are you solving for your target customers?",
-        "BUSINESS_PLAN.11": "Here are some competitors for your business, including their strengths and weaknesses:",
-        "BUSINESS_PLAN.12": "Here are the trends currently affecting your industry and how they may impact your business:",
-        "BUSINESS_PLAN.13": "How do you plan to differentiate your business to stand out?",
-        "BUSINESS_PLAN.14": "Where will your business be located?",
-        "BUSINESS_PLAN.15": "What kind of facilities or resources will you need to operate?",
-        "BUSINESS_PLAN.16": "What will be your primary method of delivering your product/service?",
-        "BUSINESS_PLAN.17": "Here are some suggested short-term operational needs to launch your business.",
-        "BUSINESS_PLAN.18": "Business Mission Statement (What are your core values and mission?):",
-        "BUSINESS_PLAN.19": "How do you plan to market your business?",
-        "BUSINESS_PLAN.20": "Will you hire a sales team, contract with a marketing firm, self-market, or use some other method?",
-        "BUSINESS_PLAN.21": "What is your unique selling proposition (USP)?",
-        "BUSINESS_PLAN.22": "What promotional strategies will you use to launch your business?",
-        "BUSINESS_PLAN.23": "Here are some suggested short-term marketing needs. Is there anything else you'd like to add?",
-        "BUSINESS_PLAN.24": "What type of business structure will you have?",
-        "BUSINESS_PLAN.25": "Have you registered your business name?",
-        "BUSINESS_PLAN.26": "Here are the permits and/or licenses you will need to operate legally.",
-        "BUSINESS_PLAN.27": "Here are some suggested insurance policies you may need.",
-        "BUSINESS_PLAN.28": "How do you plan to ensure adherence to requirements to keep your business compliant?",
-        "BUSINESS_PLAN.29": "How will your business make money?",
-        "BUSINESS_PLAN.30": "What is your pricing strategy?",
-        "BUSINESS_PLAN.31": "How will you keep track of your business financials and accounting?",
-        "BUSINESS_PLAN.32": "What is your initial funding source?",
-        "BUSINESS_PLAN.33": "What are your financial goals for the first year?",
-        "BUSINESS_PLAN.34": "Here are the general main costs associated with starting your business.",
-        "BUSINESS_PLAN.35": "What are your plans for scaling your business in the future?",
-        "BUSINESS_PLAN.36": "What are your long-term (2-5 years) business goals?",
-        "BUSINESS_PLAN.37": "What are your long-term operational needs?",
-        "BUSINESS_PLAN.38": "What are your long-term financial needs?",
-        "BUSINESS_PLAN.39": "What are your long-term marketing goals?",
-        "BUSINESS_PLAN.40": "What will be your approach to expanding product/service lines or entering new markets?",
-        "BUSINESS_PLAN.41": "What are your long-term administrative goals?",
-        "BUSINESS_PLAN.42": "Here are some suggested contingency plans for potential challenges your business may face.",
-        "BUSINESS_PLAN.43": "How will you adapt if your market conditions change or new competitors enter the market?",
-        "BUSINESS_PLAN.44": "Will you seek additional funding to expand? If so, what sources and for what purposes?",
-        "BUSINESS_PLAN.45": "What is your overall vision for where you see this business in 5 years?"
-    }
-    
-    # Get the question text
-    question_text = business_plan_questions.get(question_tag, "Please provide additional information about your business.")
-    
-    # Return clean formatted question without any extra guidance/hints
-    # The system automatically adds thought starters - do NOT add "Consider:", "Think about:", etc.
-    return f"[[Q:{question_tag}]]\n\n**{question_text}**"
+    """Canonical next-question block (static wording). session_data reserved for callers."""
+    _ = session_data
+    n = _parse_business_plan_tag_number(question_tag)
+    tag = f"BUSINESS_PLAN.{n:02d}" if n is not None else question_tag
+    return format_static_business_plan_question(tag)
 
 def generate_problem_solution_draft(business_context, history):
     """Generate a specific problem-solution draft based on business context"""

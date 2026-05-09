@@ -19,6 +19,7 @@ from utils.constant import (
     DEFAULT_AFFIRMATION_INTENSITY,
     DEFAULT_CONSTRUCTIVE_FEEDBACK_INTENSITY,
 )
+from services.feedback_tone_resolver import TONE_SESSION_LOCKED_KEY
 from openai import AsyncOpenAI
 import re
 import os
@@ -287,6 +288,7 @@ async def update_response_config(session_id: str, request: Request):
             changed = True
 
     if changed:
+        bc[TONE_SESSION_LOCKED_KEY] = True
         await patch_session(session_id, {"business_context": bc})
 
     return {
@@ -305,8 +307,19 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     session = await get_session(session_id, user_id)
     history = await fetch_chat_history(session_id)
 
-    # Log the incoming message for debugging
-    print(f"📨 POST /chat - Received message: '{payload.content[:200]}...' (length: {len(payload.content)})")
+    modify_intent = payload.modify.model_dump() if payload.modify else None
+
+    if modify_intent:
+        print(
+            "📨 POST /chat - Modify request: "
+            f"guidance_len={len(modify_intent['user_guidance'])}, "
+            f"snapshot_len={len(modify_intent['assistant_snapshot'])}"
+        )
+    else:
+        print(
+            f"📨 POST /chat - Received message: '{payload.content[:200]}...' "
+            f"(length: {len(payload.content)})"
+        )
     
     # CRITICAL: Block normal chat processing during transition phases
     # User should interact with modals, not chat during transitions
@@ -346,12 +359,28 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
 
     # Extract and store key GKY answers (motivation, business_type, etc.)
     # so the transition message can personalize the recap.
+    # Skip when this turn is Modify iteration — user guidance is not a questionnaire answer.
     current_tag = session.get("asked_q", "")
-    if current_tag:
+    if current_tag and not modify_intent:
         await patch_session_context_from_response(session_id, payload.content, current_tag, session)
 
+    # CRITICAL: Capture the tag of the question the user just answered BEFORE
+    # get_angel_reply runs — angel_service mutates session["asked_q"] in-place to
+    # advance to the next question. Without this snapshot, last_tag == tag below
+    # and the sequential-progression check at the post-LLM tag-analysis block
+    # always fails → answered_count never increments. The capture used to live
+    # below the LLM call which silently broke GKY/BP progress tracking; the
+    # backend log showed this as `⚠️ Tag present but not sequential (X → X)` for
+    # every answer.
+    pre_update_asked_q = session.get("asked_q")
+
     # Get AI reply
-    angel_response = await get_angel_reply({"role": "user", "content": payload.content}, history, session)
+    angel_response = await get_angel_reply(
+        {"role": "user", "content": payload.content},
+        history,
+        session,
+        modify_intent=modify_intent,
+    )
     
     # Handle new return format
     if isinstance(angel_response, dict):
@@ -387,11 +416,8 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     else:
         print(f"🚫 Skipping chat history save for transition phase: {transition_phase} (will show modal instead)")
 
-    # CRITICAL: Capture the tag of the question the user just answered
-    # BEFORE angel_service's patch_session overwrites session["asked_q"]
-    # with the NEXT question tag.  Without this, last_tag == tag and the
-    # sequential-progression check always fails → answered_count never increments.
-    pre_update_asked_q = session.get("asked_q")
+    # `pre_update_asked_q` was captured before get_angel_reply (above) so it
+    # reflects the question the user just answered, not the post-LLM advanced tag.
 
     # Handle session updates (e.g., from Accept responses)
     if session_update:
@@ -601,7 +627,14 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     ]
     
     is_command_response = any(indicator in assistant_reply for indicator in command_indicators)
-    
+
+    # Structured Modify (/chat with payload.modify): revise-in-place — never advance questionnaire.
+    if modify_intent:
+        is_command_response = True
+        print(
+            "🔧 Modify revision — skipping tag/progression (user message is refinement, not an answer)"
+        )
+
     if is_command_response:
         print(f"🔧 Command response detected - skipping tag processing to prevent question skipping")
         tag = None
@@ -636,7 +669,8 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     # the question represented by last_tag.  Derive the expected next tag
     # deterministically instead of relying on the AI to emit [[Q:...]] tags.
     user_gave_answer = (
-        not is_command_response
+        not modify_intent
+        and not is_command_response
         and last_tag
         and payload.content.strip() != ""
         and payload.content.strip().lower() not in ["", "accept", "modify"]
@@ -840,8 +874,14 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
 
     # Extract question number from tag before removing it
     # For section summary: use pre_update_asked_q so frontend shows current Q (e.g. 4) not next (5)
+    # For Modify revision: same — stay on the current item while the draft text is reworked
     question_number = None
-    source_tag = (pre_update_asked_q if is_section_summary and pre_update_asked_q else tag)
+    if modify_intent and pre_update_asked_q:
+        source_tag = pre_update_asked_q
+    elif is_section_summary and pre_update_asked_q:
+        source_tag = pre_update_asked_q
+    else:
+        source_tag = tag
     if source_tag and "." in source_tag:
         try:
             question_number = int(source_tag.split(".")[1])
@@ -997,21 +1037,23 @@ async def handle_command(session_id: str, request: Request, payload: dict):
         }
     
     elif command == "modify":
-        # Process modification request
         history = await fetch_chat_history(session_id)
-        
-        modify_prompt = f"The user wants to modify this response based on their feedback:\n\nOriginal: {draft_content}\n\nFeedback: {modification_feedback}\n\nPlease provide an improved version."
-        
-        session_context = {
-            "current_phase": session.get("current_phase", "GKY"),
-            "industry": session.get("industry"),
-            "location": session.get("location")
-        }
-        
+        feedback = (modification_feedback or "").strip()
+        draft = (draft_content or "").strip()
+        if not draft or not feedback:
+            raise HTTPException(
+                status_code=400,
+                detail="modify requires draft_content and non-empty feedback",
+            )
+
         improved_response = await get_angel_reply(
-            {"role": "user", "content": modify_prompt},
+            {"role": "user", "content": feedback},
             history,
-            session_context
+            session,
+            modify_intent={
+                "assistant_snapshot": draft,
+                "user_guidance": feedback,
+            },
         )
         
         # Extract the reply content from the response object
@@ -2304,61 +2346,3 @@ async def roadmap_to_implementation_transition(session_id: str, request: Request
         }
     }
 
-@router.post("/sessions/{session_id}/upload-business-plan")
-async def upload_business_plan(
-    session_id: str,
-    request: Request,
-    file: UploadFile = File(...)
-):
-    """Upload and process a business plan document"""
-    user_id = request.state.user["id"]
-    
-    # Validate file type
-    allowed_types = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
-    if file.content_type not in allowed_types:
-        return {
-            "success": False,
-            "error": "Please upload a PDF, DOC, or DOCX file."
-        }
-    
-    # Validate file size (max 10MB)
-    if file.size > 10 * 1024 * 1024:
-        return {
-            "success": False,
-            "error": "File size must be less than 10MB."
-        }
-    
-    try:
-        # Create uploads directory if it doesn't exist
-        upload_dir = "uploads"
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        # Generate unique filename
-        file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'pdf'
-        unique_filename = f"{uuid.uuid4()}.{file_extension}"
-        file_path = os.path.join(upload_dir, unique_filename)
-        
-        # Save file
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-        
-        # Create a chat message about the uploaded document
-        upload_message = f"📄 **Business Plan Document Uploaded**\n\n**File:** {file.filename}\n**Size:** {file.size} bytes\n**Type:** {file.content_type}\n**Uploaded:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\nI've received your business plan document. I can help you:\n\n• **Analyze** the content and provide feedback\n• **Extract** key information for our business planning process\n• **Compare** it with our questionnaire responses\n• **Suggest** improvements or missing sections\n\nWould you like me to analyze this document and integrate it into our business planning process?"
-        
-        # Save the upload message to chat history
-        await save_chat_message(session_id, "assistant", upload_message)
-        
-        return {
-            "success": True,
-            "message": "Business plan uploaded successfully",
-            "filename": file.filename,
-            "file_id": unique_filename,
-            "chat_message": upload_message
-        }
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Failed to upload file: {str(e)}"
-        }
