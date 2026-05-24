@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 router = APIRouter()
 
-@router.post("/")
+@router.post("")
 async def upload_business_plan(
     request: Request,
     file: UploadFile = File(...),
@@ -32,8 +32,14 @@ async def upload_business_plan(
     Upload and process a business plan document (does NOT store in database)
     Simply extracts business info and returns it to frontend for session update
     Supports: PDF, DOCX, TXT files
-    
-    Endpoint: POST /upload-plan (router prefix + "/" = /upload-plan)
+
+    Endpoint: POST /upload-plan (router prefix + "" = /upload-plan).
+
+    Important: the route path is "" (not "/") so the canonical URL is
+    /upload-plan with NO trailing slash. The frontend posts to /upload-plan;
+    a trailing-slash mismatch causes FastAPI to 307-redirect, and many
+    deployment proxies (Vercel functions, IIS) drop the POST body across
+    that redirect, which surfaces as "Method Not Allowed" to the user.
     """
     temp_file_path = None
     

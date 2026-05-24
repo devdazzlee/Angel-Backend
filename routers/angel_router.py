@@ -31,6 +31,82 @@ router = APIRouter(
     dependencies=[Depends(verify_auth_token)]
 )
 
+
+# Ordered phases the questionnaire walks through. A "*.01" tag whose phase is
+# AFTER the user's last phase must satisfy the predecessor-complete check below
+# before we accept it as a real progression — otherwise we'd let the LLM
+# randomly skip an entire phase.
+_PHASE_ORDER = ("GKY", "BUSINESS_PLAN", "ROADMAP", "IMPLEMENTATION")
+_PHASE_TOTALS = {"GKY": 5, "BUSINESS_PLAN": 45}
+
+
+def _strip_phase_suffix(tag: str) -> tuple[str, int] | None:
+    """Parse a tag like ``GKY.05`` or ``GKY.05_ACK`` into ``(phase, num)``.
+    Returns ``None`` if the tag is malformed."""
+    if not tag or "." not in tag:
+        return None
+    try:
+        phase, rest = tag.split(".", 1)
+        num_str = rest.split("_", 1)[0]
+        return phase, int(num_str)
+    except (ValueError, IndexError):
+        return None
+
+
+def is_phase_transition_legal(last_tag: str | None, new_tag: str | None) -> bool:
+    """Return True only when the questionnaire is allowed to move from
+    ``last_tag``'s phase to ``new_tag``'s phase.
+
+    A phase transition is legal only when the *predecessor* phase has reached
+    its final question. The LLM emitting ``[[Q:BUSINESS_PLAN.01]]`` while the
+    user is still on ``GKY.04`` is the root cause of the intermittent "Question
+    5 sometimes missing" bug — gpt-4o, at non-zero temperature, occasionally
+    hallucinates an early phase jump, and the old guard accepted any
+    ``*.01`` tag without checking the predecessor was actually complete.
+    """
+    if not last_tag or not new_tag:
+        return False
+
+    parsed_last = _strip_phase_suffix(last_tag)
+    parsed_new = _strip_phase_suffix(new_tag)
+    if not parsed_last or not parsed_new:
+        return False
+
+    last_phase, last_num = parsed_last
+    new_phase, new_num = parsed_new
+
+    # Same-phase moves are handled by the sequential-progression check, not
+    # here. This helper is strictly about CROSS-phase legality.
+    if last_phase == new_phase:
+        return True
+
+    # The new phase must come immediately AFTER the last phase in the ordered
+    # walk. We don't permit skipping a whole phase (e.g., GKY → ROADMAP).
+    try:
+        last_idx = _PHASE_ORDER.index(last_phase)
+        new_idx = _PHASE_ORDER.index(new_phase)
+    except ValueError:
+        return False
+    if new_idx != last_idx + 1:
+        return False
+
+    # The transition target must be question 01 of the new phase.
+    if new_num != 1:
+        return False
+
+    # The user must have finished the last question of the previous phase.
+    # GKY.05_ACK is the post-completion acknowledgement state and also counts.
+    last_phase_total = _PHASE_TOTALS.get(last_phase)
+    if last_phase_total is None:
+        # Phases without a fixed question count (ROADMAP, IMPLEMENTATION) rely
+        # on dedicated state machines, so a tag-driven transition out of them
+        # is never trusted here.
+        return False
+    if last_num < last_phase_total and not last_tag.endswith("_ACK"):
+        return False
+
+    return True
+
 # Build a lookup of canonical question text keyed by tag (e.g., "GKY.01")
 QUESTION_TEXT_MAP = dict(
     re.findall(r'\[\[Q:([A-Z_]+\.\d{2})]]\s*([^\n]+)', ANGEL_SYSTEM_PROMPT)
@@ -678,25 +754,76 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
 
     if user_gave_answer:
         try:
-            last_phase, last_num_str = last_tag.split(".")
-            last_num = int(last_num_str)
-            expected_next_tag = f"{last_phase}.{last_num + 1:02d}"
+            parsed_last = _strip_phase_suffix(last_tag)
+            if not parsed_last:
+                raise ValueError(f"Unparseable last_tag '{last_tag}'")
+            last_phase, last_num = parsed_last
+            last_phase_total = _PHASE_TOTALS.get(last_phase)
+            expected_next_tag = (
+                f"{last_phase}.{last_num + 1:02d}"
+                if last_phase_total is None or last_num < last_phase_total
+                else None
+            )
 
-            # Use AI tag if available AND it matches expected progression
+            # Use AI tag if available AND it represents a real progression.
+            # A "real progression" is either the next sequential question in the
+            # same phase, OR a legal cross-phase transition. Cross-phase legality
+            # is now an explicit deterministic check — see is_phase_transition_legal
+            # — instead of the old naive "any *.01 in a new phase is fine" rule
+            # that allowed gpt-4o to silently skip GKY.05.
             if tag:
-                tag_phase, tag_num_str = tag.split(".")
-                tag_num = int(tag_num_str)
-                if (tag_phase == last_phase and tag_num == last_num + 1) or \
-                   (tag_phase != last_phase and tag_num_str == "01"):
-                    session["answered_count"] += 1
-                    print(f"✅ Tag-confirmed increment: answered_count → {session['answered_count']}")
+                parsed_tag = _strip_phase_suffix(tag)
+                if parsed_tag:
+                    tag_phase, tag_num = parsed_tag
+                    within_phase = (tag_phase == last_phase and tag_num == last_num + 1)
+                    cross_phase = (
+                        tag_phase != last_phase
+                        and is_phase_transition_legal(last_tag, tag)
+                    )
+                    if within_phase or cross_phase:
+                        session["answered_count"] += 1
+                        print(f"✅ Tag-confirmed increment: answered_count → {session['answered_count']}")
+                    elif (
+                        tag_phase != last_phase
+                        and not cross_phase
+                        and expected_next_tag is not None
+                    ):
+                        # LLM tried to jump out of the current phase before it
+                        # was complete. Force-correct so the user gets the next
+                        # in-phase question instead of having Q5 (or analogous)
+                        # silently disappear.
+                        print(
+                            f"⛔ Illegal phase jump: {last_tag} → {tag}. "
+                            f"Forcing back to {expected_next_tag} (predecessor phase not yet complete)."
+                        )
+                        tag = expected_next_tag
+                        session["answered_count"] += 1
+                        # Rewrite any cross-phase tag in the reply text so the
+                        # downstream display matches the corrected progression.
+                        assistant_reply = re.sub(
+                            r'\[\[Q:[A-Z_]+\.\d+\]\]',
+                            f'[[Q:{tag}]]',
+                            assistant_reply,
+                            count=1,
+                        )
+                    else:
+                        print(f"⚠️ Tag present but not sequential ({last_tag} → {tag}), no increment")
                 else:
-                    print(f"⚠️ Tag present but not sequential ({last_tag} → {tag}), no increment")
+                    print(f"⚠️ Unparseable AI tag '{tag}'")
             else:
-                # No tag in AI reply — derive deterministically
+                # No tag in AI reply — derive deterministically.
                 session["answered_count"] += 1
-                tag = expected_next_tag
-                print(f"✅ Deterministic increment (no tag in reply): answered_count → {session['answered_count']}, inferred tag → {tag}")
+                if expected_next_tag is not None:
+                    tag = expected_next_tag
+                    print(
+                        f"✅ Deterministic increment (no tag in reply): answered_count → {session['answered_count']}, inferred tag → {tag}"
+                    )
+                else:
+                    # Phase is complete; leave tag alone so the completion
+                    # handlers downstream can trigger the transition.
+                    print(
+                        f"✅ Deterministic increment (no tag, phase complete): answered_count → {session['answered_count']}"
+                    )
         except (ValueError, IndexError) as e:
             print(f"⚠️ Could not parse last_tag '{last_tag}': {e}")
     elif is_command_response:

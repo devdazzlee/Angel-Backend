@@ -29,6 +29,169 @@ logger = logging.getLogger(__name__)
 # Support, Draft, Scrapping (and Draft Answer): keep assistant blocks scannable; enforced via prompt + truncate_to_word_limit.
 COMMAND_ASSIST_MAX_WORDS = 150
 
+# Support is the only command that surfaces external knowledge to the user. We
+# require the model to enumerate sources alongside the narrative so the
+# founder can audit every claim — never just "trust me" guidance.
+SUPPORT_MAX_SOURCES = 6
+
+
+def format_support_sources_section(sources: list[dict]) -> str:
+    """Render a Markdown "Sources" section from a structured list. Each source
+    is expected to have ``label`` plus optional ``publisher``, ``title``,
+    ``year`` and ``url``. Returns an empty string when no usable source is
+    provided so the caller can omit the section cleanly."""
+    if not sources:
+        return ""
+
+    lines: list[str] = []
+    for idx, source in enumerate(sources, start=1):
+        label = str(source.get("label") or "").strip()
+        if not label:
+            continue
+        segments: list[str] = [f"**{label}**"]
+        title = str(source.get("title") or "").strip()
+        if title:
+            segments.append(f"_{title}_")
+        meta_bits: list[str] = []
+        publisher = str(source.get("publisher") or "").strip()
+        if publisher:
+            meta_bits.append(publisher)
+        year = source.get("year")
+        if isinstance(year, int) and 1900 < year < 2100:
+            meta_bits.append(str(year))
+        if meta_bits:
+            segments.append(f"({', '.join(meta_bits)})")
+        url = str(source.get("url") or "").strip()
+        if url:
+            segments.append(f"<{url}>")
+        lines.append(f"{idx}. " + " — ".join(segments))
+        if len(lines) >= SUPPORT_MAX_SOURCES:
+            break
+
+    if not lines:
+        return ""
+    return "**Sources:**\n" + "\n".join(lines)
+
+
+_CITATION_MARKER_REGEX = re.compile(r"\s*\[(\d+)\]")
+
+# The model sometimes serialises an unknown field as the literal text "null"
+# (or "none"/"undefined"/"n/a"), which my old normaliser then rendered
+# verbatim as " — (null)" beside every source. Treat these as missing.
+_NULLISH_STRINGS = frozenset({"", "null", "none", "undefined", "n/a", "na", "unknown"})
+
+
+def _clean_source_string(value: object) -> str | None:
+    """Coerce a model-supplied source field to a clean string or ``None``.
+
+    Returns ``None`` for actual ``None``, empty strings, and the literal text
+    markers the model uses when it has nothing to put in a field. The caller
+    should treat ``None`` as "omit this segment from the rendered citation".
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    cleaned = value.strip()
+    if cleaned.lower() in _NULLISH_STRINGS:
+        return None
+    return cleaned
+
+
+def reconcile_support_citations(content: str, sources: list[dict]) -> str:
+    """Strip any ``[N]`` citation marker whose 1-based index does not point at
+    a real entry in ``sources``. We never invent sources to satisfy a stray
+    marker — that would put the user one degree further from auditable truth.
+    The narrative loses the bracketed reference but keeps its factual claim,
+    which is the honest trade-off when the model over-cites.
+    """
+    if not content:
+        return content
+
+    max_index = len(sources)
+
+    if max_index == 0:
+        cleaned = re.sub(r"\s*\[\d+\]", "", content)
+    else:
+        def replace(match: re.Match[str]) -> str:
+            n = int(match.group(1))
+            if 1 <= n <= max_index:
+                return match.group(0)
+            return ""
+
+        cleaned = _CITATION_MARKER_REGEX.sub(replace, content)
+
+    # Tidy up the cosmetic fallout from removed markers: stray whitespace
+    # before punctuation (" ." → "."), double spaces, and double-blank lines.
+    cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def normalize_support_sources(raw: object) -> list[dict]:
+    """Coerce the model's ``sources`` field into a clean, deduplicated list.
+
+    Defensive against the three failure modes we have actually seen in the
+    wild:
+      1. ``"null"`` (string) sneaking into publisher/title/url fields — see
+         ``_clean_source_string`` for the full nullish-token set.
+      2. The same source repeated under multiple citation indices (the model
+         padding the array to match its inline ``[N]`` markers). Dedupe by
+         (label, publisher) so the panel doesn't show three identical rows.
+      3. Garbage entries (non-dicts, missing label, year as junk text) — these
+         are dropped instead of being rendered as broken citations.
+    Output is capped at ``SUPPORT_MAX_SOURCES`` so the UI never has to defend
+    against runaway lists.
+    """
+    if not isinstance(raw, list):
+        return []
+
+    cleaned: list[dict] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+
+        label = _clean_source_string(entry.get("label"))
+        if not label:
+            continue
+
+        publisher = _clean_source_string(entry.get("publisher"))
+        title = _clean_source_string(entry.get("title"))
+        url = _clean_source_string(entry.get("url"))
+
+        year_raw = entry.get("year")
+        year: int | None
+        if isinstance(year_raw, bool):
+            # bools are ints in Python — guard explicitly so True/False don't slip through.
+            year = None
+        elif isinstance(year_raw, int) and 1900 < year_raw < 2100:
+            year = year_raw
+        elif isinstance(year_raw, str) and year_raw.strip().isdigit():
+            year_int = int(year_raw.strip())
+            year = year_int if 1900 < year_int < 2100 else None
+        else:
+            year = None
+
+        dedupe_key = (label.lower(), (publisher or "").lower())
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+
+        cleaned.append({
+            "label": label,
+            "publisher": publisher,
+            "title": title,
+            "year": year,
+            "url": url,
+        })
+        if len(cleaned) >= SUPPORT_MAX_SOURCES:
+            break
+
+    return cleaned
+
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # pkpalstan
 # Web search throttling
@@ -6158,20 +6321,34 @@ async def handle_support_command(reply, history, session_data=None):
     # Conduct comprehensive web search
     research_results = await conduct_web_search(research_query)
     
-    # Generate support content based on conversation history, question, AND research
-    support_content = await generate_support_content(
+    # Generate support content based on conversation history, question, AND research.
+    # The model returns a (content, sources) tuple so we can render a citation list
+    # the user can audit — the content body is already word-capped.
+    support_content, support_sources = await generate_support_content(
         history,
         business_context,
         current_question,
         research_results,
-        question_topic
+        question_topic,
     )
-    
-    support_response = (
-        f"Here's some additional information to help you:\n\n{support_content}\n\n"
-        "Tip: use **Draft** for a full answer you can Accept or Modify."
-    )
-    return cap_full_command_assist_reply(support_response)
+
+    sources_section = format_support_sources_section(support_sources)
+    sections = [
+        "Here's some additional information to help you:",
+        "",
+        support_content,
+    ]
+    if sources_section:
+        sections.extend(["", sources_section])
+    # No trailing "Tip: use Draft..." footer here — the Accept / Modify /
+    # Draft Answer buttons rendered below the card already convey that
+    # affordance, and the old footer ended up bleeding into the Sources panel
+    # because it sat after the **Sources:** marker.
+    #
+    # We deliberately do NOT re-cap here: the `content` body is already capped to
+    # COMMAND_ASSIST_MAX_WORDS in generate_support_content. The sources list is a
+    # reference block and must stay verbatim so the user can verify every claim.
+    return "\n".join(sections).strip()
 
 async def generate_support_content(history, business_context, current_question="", research_results=None, question_topic=""):
     """Generate support content with research-backed insights and citations"""
@@ -6243,65 +6420,164 @@ async def generate_support_content(history, business_context, current_question="
     {research_section}
     Ensure all statistics, market metrics, and competitor moves reference sources from {previous_year} or {current_year} whenever available. Discard any data older than {previous_year - 1} unless no newer information exists.
     {competitor_requirements}
-    
+
     🎯 CURRENT QUESTION BEING ADDRESSED:
         "{current_question}"
-    
+
     ⚠️ CRITICAL REQUIREMENT: Your entire response must be DIRECTLY RELEVANT to answering this specific question. Do not provide general business advice or information that doesn't directly help answer this question. Stay focused and on-topic.
     MANDATORY: Cover only this questionnaire step. Do not introduce themes that answer other Business Plan questions or later phases.
-    
+
     Business Context (PRIMARY IDENTIFIERS):
     - Business Name: {business_name}
     - PRIMARY INDUSTRY: {industry.upper()} ⭐ (THIS IS THE CORE BUSINESS TYPE)
     - Business Structure: {business_type}
     - Location: {location}
-    
+
     Previous Context from Conversation:
     {' | '.join(previous_answers[-3:]) if previous_answers else 'No previous context available'}
-    
-    Write concise, research-backed guidance that DIRECTLY answers the current question.
-    Entire reply MUST be {COMMAND_ASSIST_MAX_WORDS} words or fewer (hard cap).
-    Format:
-    • 1–2 sentences: why this matters for {business_name} in {industry.upper()} ({location}).
-    • 2–4 tight bullets: the strongest facts from research; cite briefly (source or year) where you use data.
-    • 1 sentence: the single next step the founder should take.
-    Omit extra sections, long headings, and follow-up questions if they break the word budget.
+
+    📦 OUTPUT CONTRACT — RETURN A SINGLE JSON OBJECT, NOTHING ELSE:
+        {{
+          "content": "<markdown body>",
+          "sources": [
+            {{
+              "label": "<organization or author name, e.g. U.S. Small Business Administration>",
+              "publisher": "<domain or publication, e.g. sba.gov, Harvard Business Review>",
+              "title": "<specific report or article title, or null>",
+              "year": <4-digit integer or null>,
+              "url": null
+            }}
+          ]
+        }}
+
+    Hard rules for the JSON:
+    - Do NOT wrap the JSON in markdown fences or prose. Return raw JSON only.
+    - `content` body MUST be {COMMAND_ASSIST_MAX_WORDS} words or fewer (hard cap).
+    - `content` MUST use real markdown structure with line breaks (use the JSON string escape
+      `\\n` between paragraphs and bullets). Layout it EXACTLY like this — one blank line between
+      each block, every bullet on its own line starting with `- ` (dash + space, ASCII only — NEVER
+      use the `•` character or numbered bullets):
+
+          <one short paragraph: 1–2 sentences explaining why this matters for {business_name} in
+          {industry.upper()} ({location})>
+
+          - <bullet 1: strongest research-backed fact, citation marker [1] at end>
+          - <bullet 2: ..., [2]>
+          - <bullet 3: ..., [3]>
+
+          **Next step:** <one sentence, the single most important action>
+
+    - 2–4 bullets total. Each bullet ends with the bracketed citation marker like `[1]`, `[2]`
+      whose 1-based index matches the corresponding entry in `sources`.
+    - 🔒 CITATION ALIGNMENT (HARD RULE — failures are auto-rejected downstream):
+        • Every `[N]` you write in `content` MUST resolve to `sources[N-1]`. If your highest
+          citation is `[3]`, `sources` MUST contain at least 3 entries.
+        • Conversely, every entry in `sources` should be referenced by at least one `[N]` marker
+          in `content`. No orphan entries, no dangling pointers.
+        • Number citations in the order they first appear: the first bullet uses `[1]`, the
+          second uses `[2]`, and so on. Do NOT skip numbers (e.g., never go [1] → [3] without
+          having a [2]).
+    - `sources` MUST list every distinct organization, study, dataset, or publication that backs a
+      claim in `content`. If you say "according to {industry} reports" or quote a statistic, the
+      underlying publisher belongs in `sources`. Never leave a citation unmatched.
+    - Use only real, verifiable publishers (sba.gov, bls.gov, ftc.gov, hbr.org, mckinsey.com,
+      bloomberg.com, statista.com, ibisworld.com, etc.). Do NOT invent organizations or fabricate
+      report titles. If you cannot back a claim with a concrete source, drop the claim.
+    - Up to {SUPPORT_MAX_SOURCES} sources. If you genuinely have no concrete sources, return an empty
+      array — never pad with vague "industry reports".
+    - `url` is always JSON `null`. We do not browse the live web; the frontend does not link out.
+    - 🚫 FORBIDDEN PATTERNS — these are bugs, not "good enough":
+        • Do NOT use the research query or topic as a source label
+          (e.g., NEVER "Scalable Startup Business Planning in the United States: 2025-2026").
+          That is the question, not a publisher. Cite the underlying publishers (e.g., NVCA,
+          CB Insights, Crunchbase, Pitchbook, BLS) that produced the data.
+        • Do NOT list the same publisher more than once. If you only have one real source, return a
+          one-element `sources` array — better than three duplicates.
+        • Do NOT write the string `"null"` (or `"none"`, `"unknown"`, `"n/a"`) in any field. Use JSON
+          `null` literally when a field is genuinely unknown.
+        • Every `publisher` value MUST be a real domain or publication name. If you cannot name
+          one, set `publisher` to JSON `null` — never invent it.
+
+    ✅ WORKED EXAMPLE — copy this structure EXACTLY (different topic, same shape):
+        {{
+          "content": "Pricing a mid-market SaaS for owner-operated buyers needs both anchoring and elasticity. First-time founders typically under-price by 20–40%.\\n\\n- Average mid-market SaaS contract value grew from $14k to $19k between 2022 and 2024 [1]\\n- 73% of buyers compare three or more vendors before committing, so a public pricing page lifts pipeline ~30% [2]\\n- Annual prepay deals close 22% faster than monthly billing for this segment [3]\\n\\n**Next step:** Publish three plan tiers plus a 'contact sales' enterprise tier within the next two weeks.",
+          "sources": [
+            {{ "label": "OPEXEngine SaaS Benchmarks", "publisher": "opexengine.com", "title": null, "year": 2024, "url": null }},
+            {{ "label": "Gartner B2B Buying Survey", "publisher": "gartner.com", "title": null, "year": 2024, "url": null }},
+            {{ "label": "ProfitWell Pricing Index", "publisher": "profitwell.com", "title": null, "year": 2024, "url": null }}
+          ]
+        }}
+        ↑ Notice: three `[N]` markers, exactly three `sources` entries, indices match by position,
+        every bullet begins with `- ` and ends with its marker, blank line between every block.
+
     Stay on the current question only; prioritise research findings when provided.
     REMEMBER: This is a {industry.upper()} business—keep examples and advice specific to that industry.
-    
-    ⚠️ DO NOT include:
+
+    ⚠️ DO NOT include inside `content`:
     - "Follow-up prompts:" or follow-up questions
     - Additional questions for the user
     - "Would you like to explore..." or similar prompts
     - Thought starters or tips
     - "Ready to proceed?" or "Shall we continue?" or similar
+    - A literal "Sources:" section — the caller renders that from the `sources` array.
     Just provide the informational content itself.
     """
-    
+
     try:
         response = await client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": support_prompt}],
+            response_format={"type": "json_object"},
             temperature=0.3,
-            max_tokens=800
+            max_tokens=1100,
         )
-        
-        generated_content = response.choices[0].message.content
-        generated_content = truncate_to_word_limit(generated_content, COMMAND_ASSIST_MAX_WORDS)
-        word_count = len(generated_content.split())
-        print(f"✅ Support content generated with {len(generated_content)} characters ({word_count} words)")
-        return generated_content
+
+        raw_payload = response.choices[0].message.content or ""
+        try:
+            parsed = json.loads(raw_payload)
+        except json.JSONDecodeError as parse_err:
+            print(f"❌ Support JSON parse failed ({parse_err}); raw head: {raw_payload[:200]!r}")
+            # Treat the whole payload as plain content so the user still sees guidance.
+            fallback_content = truncate_to_word_limit(raw_payload.strip(), COMMAND_ASSIST_MAX_WORDS)
+            return fallback_content, []
+
+        if not isinstance(parsed, dict):
+            print(f"⚠️ Support JSON returned non-object root: {type(parsed).__name__}")
+            return "", []
+
+        content = str(parsed.get("content") or "").strip()
+        sources = normalize_support_sources(parsed.get("sources"))
+        # Reconcile BEFORE truncation: stripping a dangling [3] can shrink the
+        # word count, and we want the cap applied to the final user-visible text.
+        content = reconcile_support_citations(content, sources)
+        content = truncate_to_word_limit(content, COMMAND_ASSIST_MAX_WORDS)
+        word_count = len(content.split())
+        print(
+            f"✅ Support content generated: {len(content)} chars / {word_count} words, "
+            f"{len(sources)} source(s) cited"
+        )
+        return content, sources
     except Exception as e:
         print(f"❌ Dynamic support generation failed: {e}")
-        # Fallback to basic guidance with research if available
+        # Fallback to basic guidance with research if available. Sources are
+        # empty because we genuinely don't have a structured list to back the
+        # fallback narrative — we will not invent citations.
         if research_results:
-            return f"""Based on research findings for your {industry} business:
-
-{research_results}
-
-Let me help you apply this to your specific situation in {location}. Consider how this data relates to your {business_type} structure and the unique aspects of your {industry} business."""
+            fallback = (
+                f"Based on research findings for your {industry} business:\n\n"
+                f"{research_results}\n\n"
+                f"Let me help you apply this to your specific situation in {location}. "
+                f"Consider how this data relates to your {business_type} structure and the "
+                f"unique aspects of your {industry} business."
+            )
         else:
-            return f"Let me help you think through this question for your {industry} business. Consider the specific challenges and opportunities in the {industry} sector, especially in {location}. Focus on how this relates to your {business_type} structure and the unique aspects of your industry."
+            fallback = (
+                f"Let me help you think through this question for your {industry} business. "
+                f"Consider the specific challenges and opportunities in the {industry} sector, "
+                f"especially in {location}. Focus on how this relates to your {business_type} "
+                f"structure and the unique aspects of your industry."
+            )
+        return truncate_to_word_limit(fallback, COMMAND_ASSIST_MAX_WORDS), []
     
     
 
