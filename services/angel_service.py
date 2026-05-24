@@ -3819,13 +3819,17 @@ async def get_angel_reply(
             }
     
     # ── Handle BUSINESS_PLAN_INTRO phase ──
-    # User responded to the GKY-completion / transition message.
-    # Now we switch to BUSINESS_PLAN and return the first BP question.
+    # The user just confirmed (e.g. "yes") on the GKY → BP transition message.
+    # Deliver BP.01 deterministically: it's canonical questionnaire text, there
+    # is no prior BP context to tailor against, and the transition handler has
+    # already shown a full welcome paragraph. Routing this through the LLM with
+    # ANGEL_SYSTEM_PROMPT was misfiring — its input-guardrail occasionally
+    # classified the user's one-word confirmation as off-topic and emitted the
+    # "I can't accommodate that request" refusal instead of Q1.
     if session_data and session_data.get("current_phase") == "BUSINESS_PLAN_INTRO":
         print("🎯 User responded to GKY transition message — starting Business Planning phase with Q1")
-        bp_q1 = await generate_dynamic_business_question("BUSINESS_PLAN.01", session_data, history)
         return {
-            "reply": bp_q1,
+            "reply": format_static_business_plan_question("BUSINESS_PLAN.01"),
             "web_search_status": {"is_searching": False, "query": None},
             "immediate_response": None,
             "patch_session": {

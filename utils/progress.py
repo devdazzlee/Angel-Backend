@@ -33,6 +33,13 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
     """
     Progress = number of questions the user has ANSWERED, not the question
     they are currently viewing.  Q1 visible but unanswered → 0 / 5 = 0 %.
+
+    `asked_q` is the session's source of truth for *which* question the user
+    is on. We always pass it through so the frontend can render the question
+    header reliably — on command turns (Support/Draft/Scrapping/Modify) the
+    router sets `question_number = None` because no new tag is parsed, and
+    the question-number display would otherwise blink out. Keeping `asked_q`
+    in the progress contract closes that gap at the source.
     """
     transition_phases = [
         "PLAN_TO_SUMMARY_TRANSITION",
@@ -48,7 +55,8 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
             "phase": current_phase,
             "answered": total_in_phase,
             "total": total_in_phase,
-            "percent": 100
+            "percent": 100,
+            "asked_q": current_tag,
         }
 
     total_in_phase = TOTALS_BY_PHASE.get(current_phase, 1)
@@ -61,13 +69,18 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
         "phase": current_phase,
         "answered": answered,
         "total": total_in_phase,
-        "percent": percent
+        "percent": percent,
+        "asked_q": current_tag,
     }
 
 def calculate_combined_progress(current_phase: str, answered_count: int, current_tag: str = None) -> dict:
     """
     Overall progress across GKY (5) + Business Plan (45) = 50 total questions.
     Based strictly on answered_count — never on the tag of the question being viewed.
+
+    Includes `asked_q` for the same reason as `calculate_phase_progress`:
+    it's the only stable identifier the frontend can use to render the
+    question header across command turns and tag-less LLM replies.
     """
     GKY_TOTAL = 5
     BP_TOTAL = 45
@@ -91,6 +104,7 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
             "total": COMBINED_TOTAL,
             "percent": percent,
             "combined": True,
+            "asked_q": current_tag,
             "phase_breakdown": {
                 "gky_completed": gky_done,
                 "gky_total": GKY_TOTAL,
@@ -108,5 +122,6 @@ def calculate_combined_progress(current_phase: str, answered_count: int, current
         "answered": answered,
         "total": total_in_phase,
         "percent": percent,
-        "combined": False
+        "combined": False,
+        "asked_q": current_tag,
     }
