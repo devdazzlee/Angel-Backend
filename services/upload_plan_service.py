@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import asyncio
 from typing import Dict, Any, Optional, List, Tuple
 import PyPDF2
 import docx
@@ -9,6 +10,25 @@ import tempfile
 from openai import AsyncOpenAI
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+# Model used for every extraction call in this pipeline. Configurable via env
+# so the model can be rolled forward without touching code.
+#
+# Default is `gpt-4o`, which is the most-capable model guaranteed to be
+# enabled on every OpenAI account today AND supports the strict JSON Schema
+# structured-output mode this extractor relies on. To roll forward to gpt-5
+# (or any successor) set `OPENAI_EXTRACTION_MODEL=gpt-5` in the backend env;
+# no code change required. If the configured model is not enabled on the
+# account, `extract_per_question_answers` will fail loudly so the
+# misconfiguration surfaces immediately instead of producing silent 0%
+# extraction results.
+_EXTRACTION_MODEL = os.getenv("OPENAI_EXTRACTION_MODEL", "gpt-4o")
+
+# Input cap. gpt-5 / gpt-4o have a 128k+ token window; 150k chars (~37k tokens)
+# covers a 70-page business plan with room left for the questions list, schema,
+# and JSON output. Larger than this almost certainly indicates a non-plan upload.
+_EXTRACTION_MAX_CHARS = 150_000
 
 
 _CANONICAL_BP_QUESTIONS_CACHE: Optional[List[Tuple[int, str]]] = None
@@ -54,72 +74,207 @@ def parse_canonical_business_plan_questions() -> List[Tuple[int, str]]:
     return result
 
 
-async def extract_per_question_answers(content: str) -> Dict[int, Optional[str]]:
-    """
-    Single LLM pass: for each canonical BUSINESS_PLAN question, extract an answer
-    from the document or return None. Returns a mapping {question_number: answer}.
+def _group_canonical_questions(
+    questions: List[Tuple[int, str]],
+) -> List[Tuple[str, List[Tuple[int, str]]]]:
+    """Group the 45 canonical questions into the 8 UI categories used by the
+    analysis modal. Group ordering matches `_category_for_question` so the
+    extraction pipeline maps 1:1 to what the user sees in the modal."""
+    buckets: Dict[str, List[Tuple[int, str]]] = {
+        "Business Overview": [],
+        "Market & Customers": [],
+        "Operations": [],
+        "Brand & Marketing": [],
+        "Legal & Regulatory": [],
+        "Financials": [],
+        "Growth & Long-Term": [],
+        "Risk & Vision": [],
+    }
+    for num, text in questions:
+        buckets[_category_for_question(num)].append((num, text))
+    return [(name, qs) for name, qs in buckets.items() if qs]
 
-    This is the source-of-truth extraction. Other helpers (business_info summary,
-    completeness analysis) derive from this single result so the upload pipeline
-    cannot drift from Angel's actual questionnaire.
+
+def _build_extraction_schema(group_questions: List[Tuple[int, str]]) -> Dict[str, Any]:
+    """Build an OpenAI structured-output JSON Schema for a single extraction
+    group. Strict mode forces the API to return every question number as a key
+    with either a string answer or null — no missing keys, no extra keys, no
+    type ambiguity to parse around on the Python side."""
+    keys = [str(num) for num, _ in group_questions]
+    answer_properties = {
+        str(num): {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "description": text,
+        }
+        for num, text in group_questions
+    }
+    return {
+        "name": "extracted_answers",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "answers": {
+                    "type": "object",
+                    "properties": answer_properties,
+                    "required": keys,
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["answers"],
+            "additionalProperties": False,
+        },
+    }
+
+
+_EXTRACTION_SYSTEM_PROMPT = (
+    "You extract structured answers from business plan documents. "
+    "Your job is recall: if the document contains information that answers a "
+    "question — anywhere, in any wording, in narrative paragraphs OR in table "
+    "cells — you must extract it. Only return null when the document genuinely "
+    "has no information on that topic. Never invent. Return strict JSON only."
+)
+
+
+async def _extract_group(
+    group_name: str,
+    group_questions: List[Tuple[int, str]],
+    document_text: str,
+    model: str,
+) -> Dict[int, Optional[str]]:
+    """Run extraction for one category. Returns {q_num: answer or None} for
+    exactly the questions in this group. The full document is provided to every
+    group call so cross-section evidence (e.g. legal structure mentioned inside
+    the Operations table) is never missed."""
+    questions_block = "\n".join(f"Q{num}. {text}" for num, text in group_questions)
+
+    user_prompt = f"""CATEGORY: {group_name}
+
+QUESTIONS TO ANSWER:
+{questions_block}
+
+DOCUMENT (full text — narrative sections AND table rows):
+{document_text}
+
+RULES:
+1. Read the ENTIRE document. Answers often live inside tables — Company Overview, Financial Projections, Risk Matrix, Implementation Timeline, Marketing Channels, Operations Structure, etc. — and not only in narrative paragraphs. Treat table cells as a primary source.
+2. The document may phrase things differently than the question. Match by meaning, not by literal wording (e.g. "Revenue Streams: Subscription fees" answers "How will your business make money?"; "Funding Requirements: $350,000, Personal savings, angel investors, venture capital" answers both the funding-source and total-cost questions).
+3. EXPLICIT "NOT YET" ENTRIES ARE VALID ANSWERS, NOT NULLS. If the document says things like "Not yet specified", "Not yet decided", "TBD", "To be determined", "Currently in the idea stage", "Not yet defined", etc. for a topic — that is the founder's current position on that question. Return it verbatim (or paraphrased: "Not yet decided — the founder has not chosen an X yet."). Do NOT return null for these.
+4. For each question, write a 1-4 sentence answer in the founder's voice using only information present in the document.
+5. Only return null when the document genuinely contains nothing on that question's topic — not present, not even as "TBD". Wording mismatch is never a reason to return null.
+6. Do not include the question text in the answer. Do not invent details that are not in the document.
+
+Respond with strict JSON matching the provided schema."""
+
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0,
+        seed=1,
+        response_format={"type": "json_schema", "json_schema": _build_extraction_schema(group_questions)},
+    )
+
+    parsed = json.loads(response.choices[0].message.content)
+    answers_raw = parsed["answers"]
+
+    out: Dict[int, Optional[str]] = {}
+    for num, _ in group_questions:
+        value = answers_raw.get(str(num))
+        if isinstance(value, str):
+            cleaned = value.strip()
+            out[num] = cleaned if cleaned and cleaned.upper() not in {"NULL", "N/A", "NOT_FOUND"} else None
+        else:
+            # Strict-schema guarantees string|null, so anything else means the
+            # value was the literal JSON null — surface as Python None.
+            out[num] = None
+    return out
+
+
+async def extract_per_question_answers(content: str) -> Dict[int, Optional[str]]:
+    """Source-of-truth extraction for the upload pipeline.
+
+    Architecture
+    ------------
+    The canonical 45 questions are split into 8 category groups (the same
+    groups the analysis modal renders), and each group runs as a separate
+    LLM call with the full document attached. All 8 calls execute in
+    parallel via asyncio.gather, so wall-clock time matches a single call
+    while each call only has to focus on 5-7 closely-related questions.
+
+    Why per-category instead of one giant call
+    ------------------------------------------
+    A single 45-question call was missing answers buried in later sections
+    of long documents — the model triaged attention across too many disparate
+    topics and output-token pressure clipped late answers. With 8 focused
+    calls, each call has plenty of output budget and a coherent topic to
+    nail. Cost is essentially flat (input dominates and is the same total
+    text); recall is dramatically higher.
+
+    Determinism
+    -----------
+    Every call uses temperature=0 and a fixed seed, plus OpenAI's strict
+    JSON Schema structured outputs. Same document in → same answers out.
     """
     questions = parse_canonical_business_plan_questions()
     if not questions:
         return {}
 
-    questions_payload = "\n".join([f"Q{n}. {t}" for n, t in questions])
-    last_q = questions[-1][0]
+    truncated_content = content[:_EXTRACTION_MAX_CHARS]
+    truncation_notice = (
+        f"\n\n[Document is {len(content):,} chars; first {_EXTRACTION_MAX_CHARS:,} included.]"
+        if len(content) > _EXTRACTION_MAX_CHARS
+        else ""
+    )
+    document_text = truncated_content + truncation_notice
 
-    prompt = f"""Extract answers to the following business plan questions using ONLY the document content provided. Do not invent details.
+    groups = _group_canonical_questions(questions)
+    print(
+        f"📑 Extracting {len(questions)} questions in {len(groups)} parallel groups "
+        f"using {_EXTRACTION_MODEL} ({len(document_text):,} chars of document)"
+    )
 
-QUESTIONS (Q1 through Q{last_q}):
-{questions_payload}
+    tasks = [
+        _extract_group(group_name, group_qs, document_text, _EXTRACTION_MODEL)
+        for group_name, group_qs in groups
+    ]
+    group_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-DOCUMENT CONTENT (first 12,000 chars):
-{content[:12000]}
+    merged: Dict[int, Optional[str]] = {num: None for num, _ in questions}
+    failures: List[Tuple[str, BaseException]] = []
+    successes = 0
+    for (group_name, group_qs), result in zip(groups, group_results):
+        if isinstance(result, BaseException):
+            failures.append((group_name, result))
+            print(f"⚠️ Extraction group '{group_name}' failed: {type(result).__name__}: {result}")
+            continue
+        successes += 1
+        for num in (n for n, _ in group_qs):
+            merged[num] = result.get(num)
 
-INSTRUCTIONS:
-- For each question, return a 1-4 sentence answer drawn from the document, written naturally as the founder would write it.
-- If the document does not address a question, return null for that question.
-- Do NOT copy the question text; return only the answer.
-- Return ONE valid JSON object with this exact shape (no commentary, no markdown fences):
-  {{ "answers": {{ "1": "...", "2": null, "3": "...", ... }} }}
-- Keys MUST be string question numbers from "1" through "{last_q}"."""
+    # A single transient failure must not erase the other groups' answers —
+    # those questions just stay null and the analysis modal renders them as
+    # missing. But if EVERY group failed, the cause is systemic (bad model
+    # name, no API key, rate limit, account out of credits, etc.) and the
+    # right behaviour is to raise so the upload endpoint returns a real 500
+    # with the actual OpenAI error. Returning all-null silently turns this
+    # into "extractor doesn't work" with no diagnosis path for the user.
+    if successes == 0 and failures:
+        first_group, first_exc = failures[0]
+        raise RuntimeError(
+            f"All {len(groups)} extraction groups failed using model "
+            f"{_EXTRACTION_MODEL!r}. First error from '{first_group}': "
+            f"{type(first_exc).__name__}: {first_exc}"
+        ) from first_exc
 
-    try:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You extract structured answers from business documents. Use only document content. Return strict JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-            max_tokens=4000,
-        )
-        text = response.choices[0].message.content.strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        parsed = json.loads(text)
-        answers_raw = parsed.get("answers", {}) if isinstance(parsed, dict) else {}
-
-        out: Dict[int, Optional[str]] = {}
-        for q_num, _ in questions:
-            value = answers_raw.get(str(q_num))
-            if value is None:
-                out[q_num] = None
-            elif isinstance(value, str):
-                v = value.strip()
-                out[q_num] = v if v and v.upper() not in {"NULL", "N/A", "NOT_FOUND"} else None
-            else:
-                try:
-                    serialized = json.dumps(value, ensure_ascii=False)
-                    out[q_num] = serialized if serialized and serialized != "null" else None
-                except Exception:
-                    out[q_num] = None
-        return out
-    except Exception as e:
-        print(f"⚠️ extract_per_question_answers failed: {e}")
-        return {q_num: None for q_num, _ in questions}
+    filled = sum(1 for v in merged.values() if v)
+    print(
+        f"📑 Extraction complete: {filled}/{len(questions)} answered "
+        f"({successes}/{len(groups)} groups succeeded)"
+    )
+    return merged
 
 
 # Maps canonical question numbers (1–45) to legacy business_info summary keys that
@@ -252,52 +407,16 @@ async def extract_business_info_from_plan(
     `per_question_answers` is normally provided by the caller (already extracted
     from the document) so we don't double-call the LLM. When omitted, this helper
     extracts on demand for backward compatibility.
+
+    When extraction yields nothing, the summary is empty — that is the correct
+    signal. We do NOT fabricate a fake summary from keyword regexes; an "all
+    empty" result from the 8-group structured extractor means the document
+    genuinely isn't a business plan, and the upload modal should say so.
     """
     if per_question_answers is None:
         per_question_answers = await extract_per_question_answers(content)
 
-    if not any(per_question_answers.values()):
-        # Last-resort heuristic fallback when AI extraction yielded nothing.
-        return create_fallback_business_info(content)
-
     return _summary_from_per_question(per_question_answers)
-
-def create_fallback_business_info(content: str) -> Dict[str, Any]:
-    """Create basic business info when AI extraction fails"""
-    return {
-        "business_name": extract_basic_info(content, ["company", "business", "organization"]),
-        "business_type": extract_basic_info(content, ["service", "product", "technology"]),
-        "industry": extract_basic_info(content, ["industry", "sector", "market"]),
-        "mission": extract_basic_info(content, ["mission", "purpose"]),
-        "vision": extract_basic_info(content, ["vision", "goal"]),
-        "tagline": extract_basic_info(content, ["tagline", "slogan"]),
-        "target_market": extract_basic_info(content, ["customer", "client", "target"]),
-        "value_proposition": extract_basic_info(content, ["value", "benefit", "advantage"]),
-        "revenue_model": extract_basic_info(content, ["revenue", "income", "pricing"]),
-        "competitive_advantage": extract_basic_info(content, ["competitive", "unique", "differentiation"]),
-        "problem_solved": extract_basic_info(content, ["problem", "challenge", "issue"]),
-        "solution": extract_basic_info(content, ["solution", "approach", "method"]),
-        "market_size": None,
-        "business_structure": extract_basic_info(content, ["LLC", "corporation", "partnership"]),
-        "location": extract_basic_info(content, ["location", "address", "city"]),
-        "founding_year": extract_basic_info(content, ["founded", "established", "started"]),
-        "team_size": None,
-        "funding_needs": extract_basic_info(content, ["funding", "investment", "capital"]),
-        "key_metrics": None,
-        "goals": extract_basic_info(content, ["goal", "objective", "target"])
-    }
-
-def extract_basic_info(content: str, keywords: list) -> Optional[str]:
-    """Extract basic information using keyword matching"""
-    content_lower = content.lower()
-    
-    for keyword in keywords:
-        pattern = rf'{keyword}[:\s]*([^\n\r]{{10,100}})'
-        match = re.search(pattern, content_lower)
-        if match:
-            return match.group(1).strip()
-    
-    return None
 
 async def validate_business_plan_content(content: str) -> Dict[str, Any]:
     """
@@ -390,36 +509,27 @@ async def analyze_plan_completeness(
 
     completeness_score = round(len(found_question_numbers) / len(canonical), 2)
 
-    # The summary flags in the analysis modal must be forgiving across adjacent
-    # canonical questions: the LLM extraction often classifies a topic into a
-    # neighbouring Q number (e.g., target-market detail may land in Q9 not Q8,
-    # business-structure in Q25 not Q24). Single-question checks made the modal
-    # misleadingly show ✗ for topics that are clearly present in the document.
-    def _any_filled(*nums: int) -> bool:
-        return any(bool(per_question_answers.get(n)) for n in nums)
+    # Each summary flag is anchored to the SINGLE primary canonical question
+    # for that topic. The previous version OR'd in adjacent questions as a
+    # forgiveness layer for inconsistent single-call extraction; with the new
+    # per-category strict-schema extractor that hedge is no longer needed and
+    # was actively misleading users — e.g. lighting up "Business Name ✓" in
+    # the summary while showing "Q5 Business Name" in the missing list. The
+    # summary now agrees with the missing list by construction.
+    def _filled(num: int) -> bool:
+        return bool(per_question_answers.get(num))
 
     found_information = {
-        # Business name lives in Q5; Q1 (idea) often mentions it as well.
-        "business_name": _any_filled(5, 1),
-        # Mission lives in Q18; idea/USP (Q1, Q21) frequently encode the same intent.
-        "mission_vision": _any_filled(18, 1, 21),
-        # Either side of the problem/solution pair counts — we'll catch the gap
-        # in missing_questions for whichever specific Q wasn't covered.
-        "problem_solution": _any_filled(10, 2, 3),
-        # Customer demographics (Q8) or distribution channel (Q9) both indicate
-        # the founder has thought about who the customer is and where to reach them.
-        "target_market": _any_filled(8, 9),
-        # Competitors (Q11) or differentiation framing (Q13) both reflect
-        # competitive awareness.
-        "competitors": _any_filled(11, 13),
-        "financial_projections": _any_filled(29, 30, 31, 32, 33, 34),
-        "marketing_strategy": _any_filled(19, 20, 21, 22, 23),
-        "operational_plan": _any_filled(14, 15, 16, 17),
-        # Legal structure family: entity (Q24), name registration (Q25),
-        # permits (Q26), insurance (Q27), compliance (Q28).
-        "legal_structure": _any_filled(24, 25, 26, 27, 28),
-        # Risk family: contingency (Q42), market adaptation (Q43), funding fallback (Q44).
-        "risk_analysis": _any_filled(42, 43, 44),
+        "business_name": _filled(5),
+        "mission_vision": _filled(18),
+        "problem_solution": _filled(10),
+        "target_market": _filled(8),
+        "competitors": _filled(11),
+        "financial_projections": _filled(29),
+        "marketing_strategy": _filled(19),
+        "operational_plan": _filled(14),
+        "legal_structure": _filled(24),
+        "risk_analysis": _filled(42),
     }
 
     if completeness_score >= 0.85:

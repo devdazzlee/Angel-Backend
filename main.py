@@ -2,7 +2,7 @@
 # logging.basicConfig(level=logging.DEBUG)
 # Version: 1.0.1 - Fixed implementation router paths (removed duplicate /implementation/)
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -49,6 +49,7 @@ async def root():
 # ✅ CORS Support
 origins = [
     "https://angle-ai-zsdt.vercel.app",
+    "https://angle-ai-oatf.vercel.app",
     "https://azure-angel-frontend.vercel.app",
     "https://angle-ai.vercel.app",
     "https://founderport.ai",
@@ -67,6 +68,22 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+# Explicit catch-all preflight handler. Some proxies (Vercel functions in
+# particular) don't always let CORSMiddleware reply to OPTIONS cleanly,
+# which surfaces as a 405 on the *next* request. Replying here guarantees
+# the browser gets a 200 + the headers it needs before the real call.
+@app.options("/{full_path:path}")
+async def cors_preflight(request: Request, full_path: str):
+    origin = request.headers.get("origin")
+    response = Response(status_code=200)
+    response.headers["Access-Control-Allow-Origin"] = origin if origin in origins else "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Max-Age"] = "86400"
+    return response
 
 # ✅ Routers
 app.include_router(auth_router, prefix="/auth")
