@@ -8446,64 +8446,202 @@ WHAT YOU MUST NOT DO:
 7. Keep your response to 2-3 sentences MAX before the research results are injected
 """
 
-    question_prompt = f"""{critical_context_warning}You are asking the next question in the business plan questionnaire for {business_identifier}{industry_context}{business_type_context}{location_context}.
+    # ────────────────────────────────────────────────────────────────────
+    # ROOT-CAUSE ARCHITECTURE
+    # The previous version asked the LLM to produce the entire reply —
+    # tag, acknowledgment, AND the bolded canonical question — with ~17
+    # buried "do nots" expecting it to copy the question verbatim and not
+    # bleed previous-question follow-ups into the body. In practice gpt-4o
+    # routinely wandered (Q3-territory questions ending up in Q4 card
+    # bodies, "Next Question" blocks containing a second acknowledgment,
+    # USP follow-ups appearing under "current stage" toplines, etc.).
+    #
+    # The backend ALREADY has the canonical question text. The LLM has no
+    # business generating it. So we now:
+    #   1. Ask the LLM for ONLY the acknowledgment, via a strict JSON
+    #      schema with a no-questions invariant.
+    #   2. Compose the final markdown deterministically from the canonical
+    #      text. The topline question can no longer be wrong because the
+    #      LLM doesn't write it.
+    #   3. One bounded retry if the ack still contains a '?' (the model
+    #      slipped a follow-up question into the ack body).
+    # ────────────────────────────────────────────────────────────────────
 
-EXACT QUESTION FROM QUESTIONNAIRE: "{canonical_question_text}"
-QUESTION TAG: {question_tag}
-{auto_suggest_instruction}
+    # Auto-suggest questions (Q11, Q12, Q17, Q23, Q26, Q27, Q34, Q35, Q42)
+    # still want a brief intro that sets up the research the system injects
+    # after the canonical line. Regular questions want a tight one-sentence
+    # acknowledgment — long acks consistently drift into the previous
+    # question's territory (Q7 ack ended up duplicating Q6's content). The
+    # word cap below is the structural fence; the token cap on the API call
+    # backs it up so the model physically can't ramble.
+    if is_auto_suggest:
+        ack_length_hint = "2 SHORT sentences setting up the research that will be presented next"
+        ack_word_cap = 45
+    else:
+        ack_length_hint = "ONE SHORT sentence affirming the user's previous answer in one clause"
+        ack_word_cap = 30
 
-⚠️ CRITICAL - YOU MUST USE THE EXACT QUESTION ABOVE AS YOUR TOPLINE QUESTION.
-You may add a brief acknowledgment of the user's previous answer (1-2 sentences max), but the TOPLINE QUESTION you ask MUST be the exact question from the questionnaire above, formatted in **bold**.
+    ack_user_prompt = f"""{critical_context_warning}You are writing ONLY the acknowledgment paragraph that precedes the next questionnaire question. The system supplies the canonical question itself — you must NOT include it, rewrite it, or invent your own.
 
-Do NOT rephrase, summarize, or create your own version of the question.
-Do NOT add follow-up questions, sub-questions, thought starters, or hints.
-The system automatically adds thought starters - do NOT generate your own.
+Business context:
+- Business: {business_identifier}{industry_context}{business_type_context}{location_context}
+- Industry: {industry}
+- Business type: {business_type}
 
-{business_info_summary}
+The NEXT canonical question Angel will ask (the system inserts this verbatim AFTER your acknowledgment — do NOT write it yourself):
+"{canonical_question_text}"
 
-Generate the response now:"""
-    
-    if is_missing_question:
-        question_prompt += "\n\nNOTE: This information was missing from the user's uploaded business plan. Mention this contextually."
-    
-    # Define formatting instruction for question generation
-    formatting_instruction = f"""
-FORMATTING REQUIREMENTS:
-- Start with [[Q:{question_tag}]] tag on its own line
-- Add a brief 1-2 sentence acknowledgment of the previous answer (if context available)
-- Then present the EXACT question from the questionnaire in **bold** on its own line
-- CRITICAL: Never include newlines or paragraph breaks (\n\n) INSIDE the bold tags.
-- Use clear, conversational language
-- Do NOT include "Question X" text - the UI displays it automatically
-- Do NOT add follow-up prompts, hints, "Thought Starter" lines, or sub-questions
-- Do NOT add "Follow-up prompts:" sections at the end
-- The system automatically adds thought starters - do NOT generate your own
-- Ask ONLY the one question specified - nothing more
+{auto_suggest_instruction if auto_suggest_instruction else ''}
 
-EXAMPLE FORMAT:
-[[Q:BUSINESS_PLAN.15]]
+Your task — return STRICT JSON matching the schema with ONE field:
+  {{"acknowledgment": "<{ack_length_hint}>"}}
 
-Great progress on your business plan!
+🔒 HARD INVARIANTS for the acknowledgment string (validated downstream — failures are auto-rejected):
+  • STRICT WORD CAP: under {ack_word_cap} words total. Count them. If you write more, your output will be rejected.
+  • MUST NOT contain a '?' character anywhere. No follow-up questions, no sub-questions, no rhetorical questions. Not one.
+  • MUST NOT mention the canonical question text or paraphrase it. The system places the question after your text.
+  • MUST NOT contain ANY of these transition phrases (banned — they're transitions the system already provides):
+    "Next Question", "Now let's", "Now, let's", "Let's discuss", "Let's explore", "Let's move",
+    "Let's now", "Let's turn", "Moving on to", "Moving forward", "Now we'll", "Now you'll",
+    "Here's the next", "Up next", "Coming up", "On to the next", "Continue to", "Proceed to",
+    "Now, we", "Now we", "let's discuss your", "let's explore your"
+  • MUST NOT discuss a different questionnaire item or different business-plan topic than the one being asked. If the user just answered "what makes your product unique" (Q3) and we're now asking "current stage of business" (Q4), the acknowledgment must NOT keep probing uniqueness — it must bridge cleanly to the stage topic.
+  • MUST NOT add a "Thought Starter", "Tip:", "Consider:", or bulleted list — the system appends those separately.
+  • MUST be in plain prose, no headings, no markdown bold, no bullets, no multi-paragraph rambles. ONE paragraph at most.
+  • MUST NOT repeat the prior turn's acknowledgment. Each acknowledgment is a fresh, brief affirmation specific to this turn's user answer.
 
-**What kind of facilities or resources will you need to operate (e.g., office space, warehouse, equipment)?**
-"""
-    
-    response = await client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": ANGEL_SYSTEM_PROMPT},
-            {"role": "system", "content": TAG_PROMPT},
-            {"role": "system", "content": formatting_instruction},
-            {"role": "user", "content": question_prompt}
-        ],
-        temperature=0.4,  # Lower temperature to stick closer to questionnaire script
-        max_tokens=500
+✅ GOOD example (regular question): "Got it — having a clear MVP focus will keep early development tight."
+❌ BAD example (drifts + transitions + too long): "Certainly, Ahmed. For HealSync Technologies as a small business in the HealthTech industry, focusing on AI-powered healthcare software is a strategic choice. Your emphasis on accessibility for smaller providers can set you apart. Now, let's explore your short-term goals to better understand your strategic direction."
+
+{business_info_summary}{('\n\nNOTE: This information was missing from the user' + chr(39) + 's uploaded business plan. Mention this contextually in ONE clause.') if is_missing_question else ''}
+
+Return the JSON now. Acknowledgment only. {ack_word_cap}-word cap. No transitions. No questions."""
+
+    ack_schema = {
+        "name": "question_acknowledgment",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "acknowledgment": {
+                    "type": "string",
+                    "description": (
+                        "Plain-prose acknowledgment paragraph. No '?' characters. "
+                        "No question text. No thought starters. No headings/bullets."
+                    ),
+                },
+            },
+            "required": ["acknowledgment"],
+            "additionalProperties": False,
+        },
+    }
+
+    # Banned transition phrases — every one of these is the LLM pre-announcing
+    # the next questionnaire item ("Now, let's explore your short-term goals…")
+    # which (a) duplicates the canonical question that follows two lines later
+    # and (b) consistently triggers the body-drift bug where the ack ends up
+    # discussing the PREVIOUS topic at length before announcing the next one.
+    # Detection is case-insensitive substring match; if any hit, we retry once.
+    _BANNED_ACK_TRANSITIONS = (
+        "next question",
+        "now let's", "now, let's",
+        "let's discuss", "let's explore", "let's move", "let's now", "let's turn",
+        "let's tailor", "let's focus", "let's refine", "let's dive", "let's look",
+        "let's continue", "let's proceed", "let's get into", "let's break", "let's go",
+        "moving on to", "moving forward",
+        "now we'll", "now you'll", "now, we", "now we",
+        "here's the next", "up next", "coming up", "on to the next",
+        "continue to", "proceed to",
+        # Multi-paragraph framing markers — these were appearing as headings
+        # for the rambling bullet sections the cap should now prevent, but
+        # they're banned as belt-and-suspenders so any leak gets flagged.
+        "considerations for your", "opportunities for your", "enhancements for your",
+        "considerations:", "opportunities:", "enhancements:",
     )
-    
-    result = response.choices[0].message.content
-    # Post-processing: strip any follow-up prompts the AI may have added
-    result = _strip_followup_prompts(result)
-    return result
+
+    def _has_banned_transition(text: str) -> str | None:
+        """Return the first banned transition phrase found in `text`, or None.
+        Case-insensitive, substring match. Used for the retry trigger and
+        the surgical-strip pass below."""
+        lower = text.lower()
+        for phrase in _BANNED_ACK_TRANSITIONS:
+            if phrase in lower:
+                return phrase
+        return None
+
+    async def _request_ack(extra_instruction: str = "") -> str:
+        prompt = ack_user_prompt + (f"\n\n{extra_instruction}" if extra_instruction else "")
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": ANGEL_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_schema", "json_schema": ack_schema},
+            temperature=0.4,
+            # 120 tokens ≈ 80-90 words. Combined with the in-prompt word cap
+            # (30 for regular, 45 for auto-suggest), the model physically
+            # cannot produce the multi-paragraph rambles that were duplicating
+            # the previous turn's content.
+            max_tokens=120,
+        )
+        try:
+            parsed = json.loads(response.choices[0].message.content or "")
+        except (json.JSONDecodeError, AttributeError):
+            return ""
+        ack = str((parsed or {}).get("acknowledgment") or "").strip()
+        # The schema doesn't enforce the content invariants (no '?', no
+        # banned transitions) — only the structural shape — so a single
+        # defensive pass strips any stray `?`-suffixed sentences. This is
+        # BOUNDED cleanup (one line of regex on at most a 3-sentence string),
+        # not a fallback layer.
+        return _strip_followup_prompts(ack).strip()
+
+    ack = await _request_ack()
+
+    # Validate both invariants together. If EITHER leaks ('?' OR a banned
+    # transition phrase), one bounded retry with a rejection notice that names
+    # the specific violation. Same proven pattern as the '?' guard — extended
+    # to cover the second class of LLM drift.
+    leaked_question_mark = "?" in ack
+    leaked_transition = _has_banned_transition(ack)
+
+    if leaked_question_mark or leaked_transition:
+        reasons: list[str] = []
+        if leaked_question_mark:
+            reasons.append("contained a '?' character (no questions allowed in the acknowledgment — the system asks the question after your text)")
+        if leaked_transition:
+            reasons.append(f"contained the banned transition phrase '{leaked_transition}' (the system handles transitions — your job is the brief affirmation only)")
+        print(f"⚠️ Acknowledgment violated invariants: {'; '.join(reasons)} — retrying")
+        retry_addendum = (
+            "🚨 REJECTED — your previous acknowledgment " + " AND ".join(reasons) + ". "
+            f"Regenerate UNDER {ack_word_cap} WORDS, no question marks, no transition phrases "
+            "like 'Now let's', 'Let's explore', 'Moving on to', etc. Just a brief declarative "
+            "affirmation of the user's previous answer. One sentence."
+        )
+        ack = await _request_ack(retry_addendum)
+
+        # Surgical strip pass — if the retry STILL leaks either invariant, we
+        # clean up rather than ask again. Each step is a single deterministic
+        # pass, not a retry loop.
+        if "?" in ack:
+            sentences = re.split(r"(?<=[.!?])\s+", ack)
+            ack = " ".join(s for s in sentences if not s.rstrip().endswith("?")).strip()
+        if _has_banned_transition(ack):
+            # Drop any sentence containing a banned transition phrase. The
+            # remainder still carries the actual acknowledgment content.
+            sentences = re.split(r"(?<=[.!?])\s+", ack)
+            ack = " ".join(s for s in sentences if not _has_banned_transition(s)).strip()
+
+    # Final fallback: if every defensive layer ate the ack, ship a neutral
+    # one-liner so the canonical question still gets a graceful intro.
+    if not ack:
+        ack = "Got it."
+
+    # Deterministic composition. Canonical question text is supplied by the
+    # backend; the LLM can no longer mangle it, replace it, or shadow it
+    # with a different question.
+    return f"[[Q:{question_tag}]]\n\n{ack}\n\n**{canonical_question_text}**"
 
 async def generate_next_question(question_tag: str, session_data: dict) -> str:
     """Canonical next-question block (static wording). session_data reserved for callers."""
