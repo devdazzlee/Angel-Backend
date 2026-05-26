@@ -46,7 +46,7 @@ def calculate_phase_progress(current_phase: str, answered_count: int, current_ta
         "PLAN_TO_BUDGET_TRANSITION",
         "PLAN_TO_ROADMAP_TRANSITION",
         "ROADMAP_TO_IMPLEMENTATION_TRANSITION",
-        "ROADMAP_GENERATED"
+        "ROADMAP_GENERATED",
     ]
 
     if current_phase in transition_phases:

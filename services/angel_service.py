@@ -455,7 +455,7 @@ Requirements:
 • Preserve [[ACCEPT_MODIFY_BUTTONS]] in the revised reply when the snapshot included it.
 • Do not invent business facts the user did not supply unless they appear in the snapshot or their revision request.
 • Keep useful structure (headings, bullets) unless they asked to change it.
-• Avoid excessive apology; stay constructive and direct."""
+• No apologies. Do not open with "Apologies", "Sorry", "My apologies", "I apologize", "I appreciate your patience", or similar. Acknowledge the user's guidance with a direct phrase ("Got it." / "Updated.") at most, then deliver the revised content. Angel only acknowledges a specific error when the user has explicitly pointed one out — and even then it does so without the word "sorry" or "apologies"."""
 
 
 def format_modify_revision_user_turn(assistant_snapshot: str, user_guidance: str) -> str:
@@ -6484,11 +6484,23 @@ async def generate_support_content(history, business_context, current_question="
     - `sources` MUST list every distinct organization, study, dataset, or publication that backs a
       claim in `content`. If you say "according to {industry} reports" or quote a statistic, the
       underlying publisher belongs in `sources`. Never leave a citation unmatched.
-    - Use only real, verifiable publishers (sba.gov, bls.gov, ftc.gov, hbr.org, mckinsey.com,
-      bloomberg.com, statista.com, ibisworld.com, etc.). Do NOT invent organizations or fabricate
-      report titles. If you cannot back a claim with a concrete source, drop the claim.
-    - Up to {SUPPORT_MAX_SOURCES} sources. If you genuinely have no concrete sources, return an empty
-      array — never pad with vague "industry reports".
+    - 🛑 SOURCES ARE MANDATORY. `sources` MUST contain AT LEAST 2 entries and AT MOST
+      {SUPPORT_MAX_SOURCES}. There is no business-plan topic without authoritative sources —
+      every claim you would make is documented somewhere in:
+        • U.S. government data: SBA (sba.gov), BLS (bls.gov), Census (census.gov), FTC (ftc.gov),
+          IRS (irs.gov), FDA (fda.gov), DOL (dol.gov), USDA (usda.gov), EPA (epa.gov).
+        • Industry research: McKinsey, Bain, Deloitte, Gartner, Forrester, IBISWorld, Statista,
+          PwC, EY, KPMG, Accenture, BCG.
+        • Trade press: Harvard Business Review, Bloomberg, Reuters, WSJ, Financial Times,
+          The Economist, Fortune, Forbes, Inc., Entrepreneur.
+        • Sector trade associations (e.g., NRA for retail, NRF for retail, NACS for convenience,
+          NACDS for pharmacy, IFA for franchising, NAR for real estate, etc.).
+      Pick whichever publishers actually support your claims. NEVER return an empty `sources`
+      array — if you do, the response is rejected and the user sees an error.
+    - Use only real, verifiable publishers from the families above. Do NOT invent organizations or
+      fabricate report titles. If you cannot back a specific claim with a specific publisher, swap
+      the claim for one you CAN cite (e.g., default to SBA / BLS market-size or industry-trend
+      data, which exist for every U.S. industry).
     - `url` is always JSON `null`. We do not browse the live web; the frontend does not link out.
     - 🚫 FORBIDDEN PATTERNS — these are bugs, not "good enough":
         • Do NOT use the research query or topic as a source label
@@ -6527,30 +6539,52 @@ async def generate_support_content(history, business_context, current_question="
     Just provide the informational content itself.
     """
 
-    try:
+    # The "sources are mandatory" rule lives in the system prompt, but gpt-4o
+    # occasionally still ships an empty array on the first attempt. We don't
+    # accept that silently — one targeted retry that calls out the empty
+    # array gets sources almost every time without changing the LLM contract.
+    async def _call_support_model(user_prompt: str) -> tuple[str, list[dict]]:
         response = await client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "user", "content": support_prompt}],
+            messages=[{"role": "user", "content": user_prompt}],
             response_format={"type": "json_object"},
             temperature=0.3,
             max_tokens=1100,
         )
-
         raw_payload = response.choices[0].message.content or ""
         try:
             parsed = json.loads(raw_payload)
         except json.JSONDecodeError as parse_err:
             print(f"❌ Support JSON parse failed ({parse_err}); raw head: {raw_payload[:200]!r}")
-            # Treat the whole payload as plain content so the user still sees guidance.
-            fallback_content = truncate_to_word_limit(raw_payload.strip(), COMMAND_ASSIST_MAX_WORDS)
-            return fallback_content, []
-
+            fallback = truncate_to_word_limit(raw_payload.strip(), COMMAND_ASSIST_MAX_WORDS)
+            return fallback, []
         if not isinstance(parsed, dict):
             print(f"⚠️ Support JSON returned non-object root: {type(parsed).__name__}")
             return "", []
+        body = str(parsed.get("content") or "").strip()
+        srcs = normalize_support_sources(parsed.get("sources"))
+        return body, srcs
 
-        content = str(parsed.get("content") or "").strip()
-        sources = normalize_support_sources(parsed.get("sources"))
+    try:
+        content, sources = await _call_support_model(support_prompt)
+
+        # Senior contract: Support is the one command that MUST cite sources.
+        # If the first pass came back empty, do exactly one corrective retry
+        # — no silent acceptance, no fabricated padding. The retry restates
+        # the contract in stronger terms so the model commits to publishers
+        # it can actually back up.
+        if not sources:
+            print("⚠️ Support model returned 0 sources on first pass — retrying with hard requirement")
+            retry_addendum = (
+                "\n\n🚨 REJECTED — your previous response returned an empty `sources` array, which is "
+                "not allowed for Support. Regenerate the response and you MUST include at least 2 "
+                "concrete `sources` entries from real publishers (SBA, BLS, Census, FTC, McKinsey, "
+                "Gartner, IBISWorld, Statista, HBR, Bloomberg, sector trade associations, etc.). "
+                "Every `[N]` marker in `content` must resolve to a `sources[N-1]` entry. Do NOT "
+                "return another empty array."
+            )
+            content, sources = await _call_support_model(support_prompt + retry_addendum)
+
         # Reconcile BEFORE truncation: stripping a dangling [3] can shrink the
         # word count, and we want the cap applied to the final user-visible text.
         content = reconcile_support_citations(content, sources)
