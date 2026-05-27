@@ -10,7 +10,16 @@ from services.angel_service import (
     generate_business_plan_artifact,
     extract_business_context_from_history,
 )
-from utils.progress import parse_tag, TOTALS_BY_PHASE, calculate_phase_progress, calculate_combined_progress, smart_trim_history
+from utils.progress import (
+    parse_tag,
+    TOTALS_BY_PHASE,
+    calculate_phase_progress,
+    calculate_combined_progress,
+    build_phase_scoped_overall_progress,
+    derive_phase_answered_from_tag,
+    smart_trim_history,
+)
+from utils.section_summary import is_section_summary_reply
 from middlewares.auth import verify_auth_token
 from fastapi.middleware.cors import CORSMiddleware
 from db.supabase import supabase
@@ -567,8 +576,9 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
                     "asked_q": "GKY.05",
                     "overall_progress": {
                         "answered": 5,
-                        "total": 50,
-                        "percent": 10,
+                        "total": 5,
+                        "percent": 100,
+                        "scope": "gky",
                         "phase_breakdown": {
                             "gky_completed": 5,
                             "gky_total": 5,
@@ -729,15 +739,12 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     print(f"  - Current answered_count: {session.get('answered_count', 0)}")
     print(f"  - Assistant reply preview: {assistant_reply[:100]}...")
 
-    # Section summary: user must Accept before we advance to next question
-    section_summary_markers = ["Section Complete", "Summary of Your Information", "Ready to Continue"]
-    is_section_summary = (
-        show_accept_modify
-        and assistant_reply
-        and any(m in assistant_reply for m in section_summary_markers)
+    # Section summary: not a questionnaire step — user must Accept before next question
+    is_section_summary = is_section_summary_reply(
+        assistant_reply, show_accept_modify=show_accept_modify
     )
     if is_section_summary:
-        print(f"📋 Section summary detected - NOT advancing asked_q until user accepts")
+        print("📋 Section summary detected - NOT advancing asked_q until user accepts")
 
     # ── Deterministic progress increment ──
     # The user just sent a message (payload.content).  If it's a real answer
@@ -950,44 +957,44 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         if is_command_response:
             print(f"🔧 Command response - maintaining current session state without tag updates")
 
-    # Calculate progress based on current phase and CURRENT TAG (not answered_count)
-    # CRITICAL: Use asked_q as the source of truth for what question we're on
+    # Progress is derived from asked_q (session position), not a drifting counter.
     current_phase = session["current_phase"]
-    answered_count = session["answered_count"]
     current_tag = session.get("asked_q")
-    
+
+    if current_phase in ("GKY", "BUSINESS_PLAN") and current_tag:
+        session["answered_count"] = derive_phase_answered_from_tag(
+            current_phase,
+            current_tag,
+            section_summary_pause=is_section_summary,
+        )
+
+    answered_count = session["answered_count"]
+
     print(f"📈 Progress Calculation Input:")
     print(f"  - current_phase: {current_phase}")
-    print(f"  - answered_count: {answered_count}")
+    print(f"  - answered_count (from asked_q): {answered_count}")
     print(f"  - current_tag (asked_q): {current_tag}")
     print(f"  - Parsed tag from reply: {tag}")
-    print(f"  - session data: {session}")
-    
-    # Calculate phase-specific progress for phase indicator
-    phase_progress = calculate_phase_progress(current_phase, answered_count, current_tag)
+    print(f"  - section_summary_pause: {is_section_summary}")
+
+    phase_progress = calculate_phase_progress(
+        current_phase,
+        answered_count,
+        current_tag,
+        section_summary_pause=is_section_summary,
+    )
     print(f"📊 Phase Progress Output: {phase_progress}")
-    
-    # For GKY and Business Plan phases, also calculate combined progress (Overall Progress)
-    print(f"🔍 CHECKING PHASE: {current_phase} in ['GKY', 'BUSINESS_PLAN']: {current_phase in ['GKY', 'BUSINESS_PLAN']}")
+
     if current_phase in ["GKY", "BUSINESS_PLAN"]:
-        print(f"🔍 ENTERING COMBINED PROGRESS CALCULATION")
-        combined_progress = calculate_combined_progress(current_phase, answered_count, current_tag)
-        print(f"📊 Combined Progress Output (for Overall Progress): {combined_progress}")
-        # Add combined progress info to phase_progress for frontend
-        phase_progress["overall_progress"] = {
-            "answered": combined_progress["answered"],
-            "total": combined_progress["total"],
-            "percent": combined_progress["percent"],
-            "phase_breakdown": combined_progress.get("phase_breakdown", {
-                "gky_completed": 0,
-                "gky_total": 5,
-                "bp_completed": 0,
-                "bp_total": 45
-            })
-        }
-        print(f"🔍 ADDED phase_breakdown TO overall_progress")
+        scoped = build_phase_scoped_overall_progress(
+            current_phase,
+            current_tag,
+            section_summary_pause=is_section_summary,
+        )
+        phase_progress["overall_progress"] = scoped
+        print(f"📊 Phase-scoped UI progress: {scoped}")
     else:
-        print(f"🔍 SKIPPING COMBINED PROGRESS - PHASE: {current_phase}")
+        print(f"🔍 SKIPPING PHASE-SCOPED PROGRESS - PHASE: {current_phase}")
     
     print(f"📊 Final Progress Data Sent to Frontend: {phase_progress}")
     print(f"📊 Phase Breakdown Data: {phase_progress.get('overall_progress', {}).get('phase_breakdown', 'NOT FOUND')}")
@@ -999,21 +1006,20 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         "current_phase": session["current_phase"]
     })
 
-    # Extract question number from tag before removing it
-    # For section summary: use pre_update_asked_q so frontend shows current Q (e.g. 4) not next (5)
-    # For Modify revision: same — stay on the current item while the draft text is reworked
+    # Question number is for active questionnaire items only — not section summaries.
+    # Session position stays on asked_q (e.g. BUSINESS_PLAN.04) until Accept; the UI
+    # uses is_section_summary for the badge label instead of question_number.
     question_number = None
-    if modify_intent and pre_update_asked_q:
-        source_tag = pre_update_asked_q
-    elif is_section_summary and pre_update_asked_q:
-        source_tag = pre_update_asked_q
-    else:
-        source_tag = tag
-    if source_tag and "." in source_tag:
-        try:
-            question_number = int(source_tag.split(".")[1])
-        except (ValueError, IndexError):
-            question_number = None
+    if not is_section_summary:
+        if modify_intent and pre_update_asked_q:
+            source_tag = pre_update_asked_q
+        else:
+            source_tag = tag
+        if source_tag and "." in source_tag:
+            try:
+                question_number = int(source_tag.split(".")[1])
+            except (ValueError, IndexError):
+                question_number = None
     
     # Clean response
     display_reply = re.sub(r'Question \d+ of \d+ \(\d+%\):', '', assistant_reply, flags=re.IGNORECASE)
@@ -1044,7 +1050,8 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
             "web_search_status": web_search_status,
             "immediate_response": immediate_response,
             "show_accept_modify": show_accept_modify,
-            "question_number": question_number
+            "question_number": question_number,
+            "is_section_summary": is_section_summary,
         }
     }
 
@@ -1471,18 +1478,26 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                 answered_count = updated_session.get("answered_count", 0)
                 current_tag = updated_session.get("asked_q", "")
                 
-                phase_progress = calculate_phase_progress(current_phase, answered_count, current_tag)
-                combined_progress = calculate_combined_progress(current_phase, answered_count, current_tag)
-                
+                if current_phase in ("GKY", "BUSINESS_PLAN") and current_tag:
+                    answered_count = derive_phase_answered_from_tag(
+                        current_phase, current_tag, section_summary_pause=False
+                    )
+                    updated_session["answered_count"] = answered_count
+
+                phase_progress = calculate_phase_progress(
+                    current_phase, answered_count, current_tag, section_summary_pause=False
+                )
+                if current_phase in ("GKY", "BUSINESS_PLAN"):
+                    phase_progress["overall_progress"] = build_phase_scoped_overall_progress(
+                        current_phase, current_tag, section_summary_pause=False
+                    )
+
                 return {
                     "success": True,
                     "message": "Returned to previous question",
                     "result": {
                         "reply": reply,
-                        "progress": {
-                            **phase_progress,
-                            "overall_progress": combined_progress
-                        }
+                        "progress": phase_progress,
                     }
                 }
                 

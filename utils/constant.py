@@ -804,12 +804,21 @@ CONSTRUCTIVE_FEEDBACK_SCALE = {
 
 # ---------------------------------------------------------------------------
 # Confidence-score thresholds
-# After generating a reply the service runs a lightweight relevance check.
-# If the score falls below the threshold the reply is regenerated with
-# stronger grounding.
+# Lightweight check after each reply — only retries when a real industry
+# contradiction is detected (e.g. restaurant type but software-only reply).
+# GKY category labels (Scalable startup, Small business, Side hustle) skip
+# this entirely — they are not industry keywords.
 # ---------------------------------------------------------------------------
 CONFIDENCE_THRESHOLD = 0.6          # 0.0–1.0  (below this → regenerate)
-CONFIDENCE_MAX_RETRIES = 1          # how many times to retry on low confidence
+CONFIDENCE_MAX_RETRIES = 1          # how many times to retry on contradiction
+
+# GKY.03 answers — business model categories, not industries (no keyword retry)
+GENERIC_BUSINESS_TYPE_LABELS = frozenset({
+    "scalable startup",
+    "small business",
+    "side hustle",
+    "side-hustle",
+})
 
 # ---------------------------------------------------------------------------
 # Business-type grounding prompt template

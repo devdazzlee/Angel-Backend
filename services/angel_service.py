@@ -15,6 +15,7 @@ from utils.constant import (
     DEFAULT_CONSTRUCTIVE_FEEDBACK_INTENSITY,
     CONFIDENCE_THRESHOLD,
     CONFIDENCE_MAX_RETRIES,
+    GENERIC_BUSINESS_TYPE_LABELS,
     BUSINESS_TYPE_GROUNDING_PROMPT,
 )
 import logging
@@ -3567,31 +3568,41 @@ def build_business_grounding(session_data: Optional[dict], history: list) -> str
     )
 
 
+def is_generic_business_type_label(business_type: str) -> bool:
+    """GKY.03 category labels (e.g. 'Scalable startup') — not industry-specific."""
+    if not business_type or not str(business_type).strip():
+        return True
+    normalized = " ".join(str(business_type).lower().split())
+    if normalized in GENERIC_BUSINESS_TYPE_LABELS:
+        return True
+    return any(
+        label in normalized
+        for label in ("small business", "scalable startup", "side hustle", "side-hustle")
+    )
+
+
 def score_response_confidence(reply: str, business_type: str) -> float:
-    """Heuristic confidence score (0.0–1.0) measuring how relevant the
-    reply is to the declared business type.
+    """Heuristic confidence (0.0–1.0) without an extra LLM call.
 
-    The score is computed WITHOUT an extra LLM call — it uses keyword overlap
-    and contradiction detection against the known business type."""
+    Returns 1.0 (pass) unless the reply clearly contradicts a *specific*
+    industry/business type. GKY category labels always pass — keyword overlap
+    against 'Scalable startup' was forcing a costly false-positive retry on
+    every message."""
 
-    if not business_type or not reply:
+    if not business_type or not reply or is_generic_business_type_label(business_type):
         return 1.0
 
     bt_lower = business_type.lower()
     reply_lower = reply.lower()
 
     bt_keywords = set(re.findall(r"[a-z]{3,}", bt_lower))
-    bt_keywords.discard("business")
-    bt_keywords.discard("the")
-    bt_keywords.discard("and")
-    bt_keywords.discard("for")
+    for stop in ("business", "the", "and", "for", "your", "type", "kind"):
+        bt_keywords.discard(stop)
 
     if not bt_keywords:
         return 1.0
 
     reply_words = set(re.findall(r"[a-z]{3,}", reply_lower))
-    overlap = bt_keywords & reply_words
-    keyword_score = len(overlap) / len(bt_keywords) if bt_keywords else 1.0
 
     CONTRADICTING_PAIRS = [
         ({"restaurant", "food", "dining", "cafe", "bakery", "catering"},
@@ -3600,7 +3611,7 @@ def score_response_confidence(reply: str, business_type: str) -> float:
          {"entertainment", "music", "film", "gaming", "media", "streaming"}),
         ({"consulting", "advisory", "coaching", "mentoring"},
          {"manufacturing", "factory", "production", "warehouse"}),
-        ({"ecommerce", "online store", "retail", "shop"},
+        ({"ecommerce", "online", "retail", "shop"},
          {"construction", "building", "contractor", "renovation"}),
     ]
 
@@ -3613,10 +3624,12 @@ def score_response_confidence(reply: str, business_type: str) -> float:
 
         if (bt_in_a and reply_in_b and not reply_in_a) or \
            (bt_in_b and reply_in_a and not reply_in_b):
-            penalty += 0.4
+            penalty += 0.5
 
-    score = max(0.0, min(1.0, 0.5 + keyword_score * 0.5 - penalty))
-    return round(score, 2)
+    if penalty <= 0:
+        return 1.0
+
+    return round(max(0.0, 1.0 - penalty), 2)
 
 
 async def get_angel_reply(
@@ -4503,12 +4516,26 @@ CRITICAL INSTRUCTIONS:
 
     if declared_business_type:
         conf = score_response_confidence(reply_content, declared_business_type)
-        logger.info("Confidence score: %.2f for business_type='%s'", conf, declared_business_type)
+        if is_generic_business_type_label(declared_business_type):
+            logger.debug(
+                "Skipping confidence retry for GKY category label: '%s'",
+                declared_business_type,
+            )
+        else:
+            logger.info(
+                "Confidence score: %.2f for business_type='%s'",
+                conf,
+                declared_business_type,
+            )
 
-        if conf < CONFIDENCE_THRESHOLD:
+        if (
+            not is_generic_business_type_label(declared_business_type)
+            and conf < CONFIDENCE_THRESHOLD
+        ):
             logger.warning(
-                "Low confidence (%.2f < %.2f) — regenerating with stronger grounding",
-                conf, CONFIDENCE_THRESHOLD,
+                "Industry contradiction detected (%.2f < %.2f) — regenerating once",
+                conf,
+                CONFIDENCE_THRESHOLD,
             )
             stronger_grounding = (
                 f"\n\n🚨 CRITICAL CORRECTION: Your previous draft was scored as potentially "
