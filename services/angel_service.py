@@ -1096,13 +1096,46 @@ Include key points and current information. Keep response brief and actionable."
             max_tokens = 400  # Shorter response
         else:
             query_lower = query.lower()
+            # Order matters: more-specific topics first. `is_competitor`
+            # comes BEFORE the generic fall-through because Q11's query
+            # already mentions "competitors", "market position", "strengths",
+            # "weaknesses" — and the generic template was treating that as
+            # vague "market data" instead of structuring it as a proper
+            # competitive landscape report.
+            is_competitor = any(kw in query_lower for kw in [
+                "competitor", "competing with", "competitive position",
+                "competitive landscape", "main competitors", "rival companies",
+            ])
             is_permits_licenses = any(kw in query_lower for kw in ["permit", "license", "zoning", "regulatory"])
             is_insurance = any(kw in query_lower for kw in ["insurance", "liability", "property insurance"])
             is_costs = any(kw in query_lower for kw in ["startup cost", "main cost", "expense", "operating cost"])
             is_scaling = any(kw in query_lower for kw in ["scaling", "growth plan", "expansion strategy", "long-term goals"])
             is_contingency = any(kw in query_lower for kw in ["contingency", "risk management", "challenges", "obstacles"])
 
-            if is_permits_licenses:
+            if is_competitor:
+                # Q11 (competitive analysis) — the prior version fell through
+                # to a generic 4-bullet template that mentioned "competitive
+                # landscape" as just one bullet. Users reported the auto-
+                # generated research did NOT clearly call out competitors,
+                # their position, and what it means for THEIR business. The
+                # template below enforces that structure: each competitor
+                # gets a name + positioning paragraph + an explicit
+                # implication clause aimed at the user's venture.
+                numbered_sections = (
+                    "1. **Direct Competitors (name 3-5 real companies)**: For each competitor write a block in this exact shape — "
+                    "`**<Company Name>** — <one-sentence description of what they do>. *Position:* <market share, scale, or "
+                    "where they sit in the market>. *Strengths:* <2-3 concrete strengths>. *Weaknesses:* <2-3 concrete "
+                    "weaknesses or gaps>.` Use REAL companies only. No 'Competitor A' placeholders.\n"
+                    "2. **Competitive Position Map**: One short paragraph summarising where these competitors cluster "
+                    "(price tier, target customer, feature focus, geography) so the founder can see the white space.\n"
+                    "3. **Insights for This Business**: 3-5 actionable insights specifically for the founder's business "
+                    "(named in the query). Each insight should reference at least one named competitor and explain HOW "
+                    "the founder can differentiate, exploit a gap, or learn from that competitor's strength/weakness. "
+                    "Format as bullets starting with a verb (e.g. 'Out-price Shopify on…', 'Counter Fiverr's high fees by…').\n"
+                    "4. **What to Watch**: 1-2 emerging or adjacent competitors the founder should keep an eye on as the "
+                    "category evolves."
+                )
+            elif is_permits_licenses:
                 numbered_sections = (
                     "1. **Required Permits & Licenses**: List each specific permit/license, the issuing authority, and estimated cost/timeline\n"
                     "2. **Actionable insights**: Step-by-step recommendations for obtaining them\n"
@@ -4672,9 +4705,23 @@ CRITICAL INSTRUCTIONS:
                     name_for_query = business_name if len(business_name) > 20 else ""
                     context_for_query = name_for_query or product_info or business_idea or f"{industry} {business_type}"
                     
-                    search_query = f"top 5 real companies competing with a business that does: {context_for_query[:200]}. Include their specific strengths, weaknesses, and market position in the {industry} sector"
+                    # Phrase the query so `conduct_web_search` routes it to
+                    # the dedicated `is_competitor` template (which enforces
+                    # named competitors + position + insights for THIS
+                    # business). Including the literal words "competitors",
+                    # "competitive position", and naming the business is
+                    # what triggers that branch.
+                    biz_label = name_for_query or business_name or f"a {business_type} in the {industry} sector"
+                    search_query = (
+                        f"Identify the top direct competitors for {biz_label}, "
+                        f"a business that does: {context_for_query[:200]}. "
+                        f"For each competitor, provide their competitive position "
+                        f"(strengths, weaknesses, market share/positioning) in the "
+                        f"{industry} sector, and give actionable insights for how "
+                        f"{biz_label} should compete against or differentiate from them."
+                    )
                     if location:
-                        search_query += f" in {location}"
+                        search_query += f" Geography: {location}."
                     print(f"🔍 Q11 competitor research query: {search_query}")
                     search_result = await conduct_web_search(search_query)
                     if _is_valid_research(search_result):
