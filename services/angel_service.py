@@ -1071,6 +1071,284 @@ async def _generate_auto_research_fallback(
         return "\n\nPlease share what you know about this topic, and I'll incorporate it into your business plan."
 
 
+# Business Plan questions where the backend must inject research after the
+# canonical prompt (not only on the main get_angel_reply LLM path).
+AUTO_RESEARCH_BUSINESS_PLAN_TAGS = {
+    "BUSINESS_PLAN.11": "competitor research",
+    "BUSINESS_PLAN.12": "industry trends research",
+    "BUSINESS_PLAN.17": "short-term operational needs",
+    "BUSINESS_PLAN.23": "short-term marketing needs",
+    "BUSINESS_PLAN.26": "permits and licenses",
+    "BUSINESS_PLAN.27": "insurance policies",
+    "BUSINESS_PLAN.34": "main costs and expenses",
+    "BUSINESS_PLAN.35": "scaling and growth plan",
+    "BUSINESS_PLAN.42": "contingency plans",
+}
+
+
+def _detect_business_plan_tag_from_reply(reply_content: str) -> str | None:
+    tag_match = re.search(r"\[\[Q:([A-Za-z_]+\.\d+)\]\]", reply_content, re.IGNORECASE)
+    if not tag_match:
+        return None
+    raw_tag = tag_match.group(1)
+    parts = raw_tag.split(".", 1)
+    if len(parts) == 2 and parts[0].upper() == "BUSINESS_PLAN":
+        return f"BUSINESS_PLAN.{int(parts[1]):02d}"
+    return None
+
+
+async def apply_business_plan_auto_research(
+    reply_content: str,
+    session_data: dict | None,
+    history: list,
+    *,
+    is_command_response: bool = False,
+) -> tuple[str, bool, str | None]:
+    """
+    Inject web-research (or structured LLM synthesis) for auto-suggest BP questions.
+
+    Must run on every code path that emits an auto-suggest question — including
+    early returns that call generate_dynamic_business_question() without the main
+    LLM pipeline (Q35 Accept → Q42, session refresh, jump-to-question, etc.).
+    """
+    auto_research_triggered = False
+    detected_tag = _detect_business_plan_tag_from_reply(reply_content)
+    if not detected_tag or is_command_response:
+        return reply_content, False, detected_tag
+
+    if detected_tag not in AUTO_RESEARCH_BUSINESS_PLAN_TAGS:
+        return reply_content, False, detected_tag
+
+    research_type = AUTO_RESEARCH_BUSINESS_PLAN_TAGS[detected_tag]
+    print(f"🔍 AUTO-RESEARCH TRIGGERED for {detected_tag} ({research_type})")
+
+    business_context = extract_business_context_from_history(history)
+    if session_data:
+        saved_ctx = session_data.get("business_context") or {}
+        for key in ("industry", "location", "business_name", "business_type"):
+            val = saved_ctx.get(key, "")
+            if val and (
+                not business_context.get(key)
+                or len(str(val)) > len(str(business_context.get(key, "")))
+            ):
+                business_context[key] = val
+
+    industry = business_context.get("industry", "") or "business"
+    location = business_context.get("location", "")
+    business_name = business_context.get("business_name", "") or "your business"
+    business_type = business_context.get("business_type", "") or "business"
+
+    print(
+        f"🔍 Auto-research context: industry='{industry}', type='{business_type}', "
+        f"name='{business_name[:50]}', location='{location}'"
+    )
+    current_year = datetime.now().year
+    previous_year = current_year - 1
+
+    try:
+        if detected_tag == "BUSINESS_PLAN.11":
+            product_info = ""
+            for h in reversed(history[-20:]):
+                content_text = h.get("content", "") or h.get("answer", "")
+                if h.get("role") == "user" and content_text and len(content_text) > 20:
+                    lower = content_text.lower()
+                    if lower.strip() not in (
+                        "accept",
+                        "draft",
+                        "modify",
+                        "yes",
+                        "no",
+                        "support",
+                        "scrapping",
+                    ):
+                        product_info = content_text[:200]
+                        break
+
+            business_idea = business_context.get("business_idea", "")
+            name_for_query = business_name if len(business_name) > 20 else ""
+            context_for_query = (
+                name_for_query or product_info or business_idea or f"{industry} {business_type}"
+            )
+            biz_label = (
+                name_for_query
+                or business_name
+                or f"a {business_type} in the {industry} sector"
+            )
+            search_query = (
+                f"Identify the top direct competitors for {biz_label}, "
+                f"a business that does: {context_for_query[:200]}. "
+                f"For each competitor, provide their competitive position "
+                f"(strengths, weaknesses, market share/positioning) in the "
+                f"{industry} sector, and give actionable insights for how "
+                f"{biz_label} should compete against or differentiate from them."
+            )
+            if location:
+                search_query += f" Geography: {location}."
+            print(f"🔍 Q11 competitor research query: {search_query}")
+            search_result = await conduct_web_search(search_query)
+            if is_valid_research_result(search_result):
+                reply_content += f"\n\n🔍 **Competitor Research Results:**\n\n{search_result}"
+                reply_content += f"\n\n*Research based on {industry} market data ({previous_year}-{current_year})*"
+                reply_content += "\n\nPlease review these findings. Is there anything you'd like me to adjust or explore further?"
+                auto_research_triggered = True
+                print("✅ Auto-research completed for Q11 - competitor analysis injected")
+            else:
+                fallback_query = (
+                    f"major competitors for {business_type} in {industry} "
+                    f"market analysis {current_year}"
+                )
+                print(f"🔍 Q11 fallback query: {fallback_query}")
+                search_result = await conduct_web_search(fallback_query)
+                if is_valid_research_result(search_result):
+                    reply_content += f"\n\n🔍 **Competitor Research:**\n\n{search_result}"
+                    reply_content += "\n\nPlease review these findings. Is there anything you'd like me to adjust or explore further?"
+                    auto_research_triggered = True
+                    print("✅ Auto-research fallback completed for Q11")
+
+        elif detected_tag == "BUSINESS_PLAN.12":
+            search_result = await conduct_web_search(
+                f"{industry} industry trends {previous_year} {current_year} market analysis impact"
+            )
+            if is_valid_research_result(search_result):
+                reply_content += f"\n\n🔍 **Industry Trends Research:**\n\n{search_result}"
+                reply_content += f"\n\n*Research based on {previous_year}-{current_year} data*"
+                reply_content += "\n\nHow do you think these trends will impact your business? Is there anything you'd like me to explore further?"
+                auto_research_triggered = True
+                print("✅ Auto-research completed for Q12 - industry trends injected")
+
+        elif detected_tag == "BUSINESS_PLAN.17":
+            search_result = await conduct_web_search(
+                f"{industry} {business_type} short-term operational needs startup launch requirements {location} {previous_year} hiring staff securing space"
+            )
+            if is_valid_research_result(search_result):
+                reply_content += f"\n\n🔍 **Suggested Short-Term Operational Needs for {business_name}:**\n\n{search_result}"
+                reply_content += f"\n\n*Research based on {industry} industry data ({previous_year}-{current_year})*"
+                reply_content += "\n\nIs there anything else you'd like to add or modify?"
+                auto_research_triggered = True
+                print("✅ Auto-research completed for Q17 - operational needs injected")
+
+        elif detected_tag == "BUSINESS_PLAN.23":
+            search_result = await conduct_web_search(
+                f"{industry} {business_type} short-term marketing needs advertising budget online presence {location} {previous_year}"
+            )
+            if is_valid_research_result(search_result):
+                reply_content += f"\n\n🔍 **Suggested Short-Term Marketing Needs for {business_name}:**\n\n{search_result}"
+                reply_content += f"\n\n*Research based on {industry} marketing data ({previous_year}-{current_year})*"
+                reply_content += "\n\nIs there anything else you'd like to add?"
+                auto_research_triggered = True
+                print("✅ Auto-research completed for Q23 - marketing needs injected")
+
+        elif detected_tag == "BUSINESS_PLAN.26":
+            search_result = await conduct_web_search(
+                f"{industry} business permits licenses required {location} zoning laws regulatory requirements {previous_year}"
+            )
+            if is_valid_research_result(search_result):
+                reply_content += f"\n\n🔍 **Permits & Licenses Research for {business_name}:**\n\n{search_result}"
+                reply_content += f"\n\n*Research based on {location} regulatory data ({previous_year}-{current_year})*"
+                reply_content += "\n\nPlease evaluate to confirm if this looks correct or if you have any questions."
+                auto_research_triggered = True
+                print("✅ Auto-research completed for Q26 - permits/licenses injected")
+
+        elif detected_tag == "BUSINESS_PLAN.27":
+            search_result = await conduct_web_search(
+                f"{industry} {business_type} business insurance policies needed liability property {location} {previous_year}"
+            )
+            if is_valid_research_result(search_result):
+                reply_content += f"\n\n🔍 **Suggested Insurance Policies for {business_name}:**\n\n{search_result}"
+                reply_content += f"\n\n*Research based on {industry} insurance requirements ({previous_year}-{current_year})*"
+                reply_content += "\n\nPlease evaluate to confirm if this looks correct or if you have any questions."
+                auto_research_triggered = True
+                print("✅ Auto-research completed for Q27 - insurance policies injected")
+
+        elif detected_tag == "BUSINESS_PLAN.34":
+            search_result = await conduct_web_search(
+                f"{industry} {business_type} startup costs main expenses production marketing salaries {location} {previous_year} monthly operating expenses"
+            )
+            if is_valid_research_result(search_result):
+                reply_content += f"\n\n🔍 **Estimated Costs & Expenses for {business_name}:**\n\n{search_result}"
+                reply_content += f"\n\n*Research based on {industry} industry cost data ({previous_year}-{current_year})*"
+                reply_content += "\n\nIs there anything else you'd like me to add?"
+                auto_research_triggered = True
+                print("✅ Auto-research completed for Q34 - costs/expenses injected")
+
+        elif detected_tag == "BUSINESS_PLAN.35":
+            search_result = await conduct_web_search(
+                f"{industry} {business_type} realistic scaling strategy milestones year 1 to 5 operational financial marketing expansion {location} {previous_year}"
+            )
+            if is_valid_research_result(search_result):
+                reply_content += f"\n\n🔍 **Suggested Scaling & Growth Plan for {business_name}:**\n\n{search_result}"
+                reply_content += f"\n\n*Research based on {industry} growth data ({previous_year}-{current_year})*"
+                reply_content += "\n\nPlease review this suggested plan. You can Accept to use it as your scaling answer and continue to the next question, or ask me to adjust anything."
+                auto_research_triggered = True
+                print("✅ Auto-research completed for Q35 - scaling plan injected")
+
+        elif detected_tag == "BUSINESS_PLAN.42":
+            search_query = (
+                f"contingency plans and risk management for {business_name}, "
+                f"a {business_type} in the {industry} industry. "
+                f"List specific potential challenges, obstacles, mitigation strategies, "
+                f"and early warning signs"
+            )
+            if location:
+                search_query += f" operating in {location}"
+            search_query += f" ({previous_year}-{current_year})"
+            print(f"🔍 Q42 contingency research query: {search_query}")
+            search_result = await conduct_web_search(search_query)
+            if is_valid_research_result(search_result):
+                reply_content += f"\n\n🔍 **Suggested Contingency Plans for {business_name}:**\n\n{search_result}"
+                reply_content += f"\n\n*Research based on {industry} risk analysis ({previous_year}-{current_year})*"
+                reply_content += "\n\nPlease review these suggestions. Is there anything you'd like me to adjust or explore further?"
+                auto_research_triggered = True
+                print("✅ Auto-research completed for Q42 - contingency plans injected")
+
+    except Exception as e:
+        print(f"⚠️ Auto-research error for {detected_tag}: {e}")
+        import traceback
+
+        traceback.print_exc()
+
+    if not auto_research_triggered:
+        print(f"⚠️ Auto-research for {detected_tag} did NOT produce results - generating fallback content")
+        fallback = await _generate_auto_research_fallback(
+            detected_tag, business_name, industry, business_type, location, session_data, history
+        )
+        reply_content += fallback
+        auto_research_triggered = True
+
+    hold_on_patterns = [
+        r"Please hold on while I conduct this research\.{0,3}\s*\n*",
+        r"Let me research this for you\.{0,3}\s*\n*",
+        r"I\'ll now conduct some research\.{0,3}\s*\n*",
+        r"Now I will do some initial research[^.]*\.{0,3}\s*\n*",
+        r"Please wait while I gather[^.]*\.{0,3}\s*\n*",
+        r"Hold on while I look[^.]*\.{0,3}\s*\n*",
+    ]
+    for pattern in hold_on_patterns:
+        reply_content = re.sub(pattern, "", reply_content, flags=re.IGNORECASE)
+
+    return reply_content, auto_research_triggered, detected_tag
+
+
+async def _dynamic_bp_reply_with_auto_research(
+    reply_content: str,
+    session_data: dict,
+    history: list,
+    *,
+    patch_session: dict | None = None,
+) -> dict:
+    """Wrap a generate_dynamic_business_question result with mandatory auto-research."""
+    reply_content, triggered, _ = await apply_business_plan_auto_research(
+        reply_content, session_data, history
+    )
+    return {
+        "reply": reply_content,
+        "web_search_status": {"is_searching": False, "query": None, "completed": False},
+        "immediate_response": None,
+        "patch_session": patch_session,
+        "show_accept_modify": triggered,
+    }
+
+
 async def conduct_web_search(query, fast_mode: bool = False):
     """Generate research-quality content using AI knowledge base
     
@@ -3712,17 +3990,17 @@ async def get_angel_reply(
                     # Update business_context
                     business_context["missing_questions"] = missing_questions
                     business_context["uploaded_plan_mode"] = True
-                    
-                    return {
-                        "reply": reply_content,
-                        "web_search_status": {"is_searching": False, "query": None},
-                        "immediate_response": None,
-                        "patch_session": {
+
+                    return await _dynamic_bp_reply_with_auto_research(
+                        reply_content,
+                        session_data,
+                        history,
+                        patch_session={
                             "current_phase": "BUSINESS_PLAN",
                             "asked_q": target_tag,
-                            "business_context": business_context  # Store in business_context JSON
-                        }
-                    }
+                            "business_context": business_context,
+                        },
+                    )
             except Exception as e:
                 print(f"⚠️ Error checking missing questions from session: {e}")
         
@@ -3751,8 +4029,12 @@ async def get_angel_reply(
         elif current_phase == "BUSINESS_PLAN":
             current_tag = session_data.get("asked_q", "BUSINESS_PLAN.01")
             if current_tag and current_tag.startswith("BUSINESS_PLAN."):
-                # Generate dynamic, context-aware question
-                return await generate_dynamic_business_question(current_tag, session_data, history)
+                reply_content = await generate_dynamic_business_question(
+                    current_tag, session_data, history
+                )
+                return await _dynamic_bp_reply_with_auto_research(
+                    reply_content, session_data, history
+                )
         
         # If user refreshes while on the transition message, re-show it
         elif current_phase == "BUSINESS_PLAN_INTRO":
@@ -3840,29 +4122,29 @@ async def get_angel_reply(
             
             # Generate dynamic question for missing information
             reply_content = await generate_dynamic_business_question(
-                target_tag, 
-                session_data, 
+                target_tag,
+                session_data,
                 history,
-                is_missing_question=True
+                is_missing_question=True,
             )
-            
+
             # Store missing questions in business_context JSON
             business_context = session_data.get("business_context", {}) or {}
             if not isinstance(business_context, dict):
                 business_context = {}
             business_context["missing_questions"] = missing_questions
             business_context["uploaded_plan_mode"] = True
-            
-            return {
-                "reply": reply_content,
-                "web_search_status": {"is_searching": False, "query": None},
-                "immediate_response": None,
-                "patch_session": {
-                    "current_phase": "BUSINESS_PLAN",  # Ensure phase is set
+
+            return await _dynamic_bp_reply_with_auto_research(
+                reply_content,
+                session_data,
+                history,
+                patch_session={
+                    "current_phase": "BUSINESS_PLAN",
                     "asked_q": target_tag,
-                    "business_context": business_context  # Store in business_context JSON
-                }
-            }
+                    "business_context": business_context,
+                },
+            )
     
     # ── Handle BUSINESS_PLAN_INTRO phase ──
     # The user just confirmed (e.g. "yes") on the GKY → BP transition message.
@@ -4100,29 +4382,8 @@ async def get_angel_reply(
     if is_accept_command and session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
         current_tag = session_data.get("asked_q", "")
         print(f"✅ Accept command detected at {current_tag} - treating as answer to move to next question")
-        
-        # Q35 DECISION TREE: If user accepts the auto-generated scaling plan,
-        # skip sub-questions Q36-Q41 (already covered by the research) and jump to Q42
-        if current_tag == "BUSINESS_PLAN.35":
-            print(f"🚀 Q35 Accept - skipping sub-questions Q36-Q41, jumping to Q42 (contingency plans)")
-            # Update session to jump past sub-questions
-            session_data["asked_q"] = "BUSINESS_PLAN.41"  # Set to Q41 so next question will be Q42
-            session_data["answered_count"] = session_data.get("answered_count", 0) + 7  # Account for Q35-Q41
-            patch_session = {
-                "asked_q": "BUSINESS_PLAN.41",
-                "answered_count": session_data["answered_count"]
-            }
-            # Generate Q42 directly
-            next_question = await generate_dynamic_business_question("BUSINESS_PLAN.42", session_data, history)
-            formatted_reply = next_question
-            
-            return {
-                "reply": formatted_reply,
-                "web_search_status": {"is_searching": False, "query": None, "completed": False},
-                "immediate_response": None,
-                "patch_session": patch_session,
-                "show_accept_modify": False
-            }
+        # Accept on auto-research questions (Q11, Q35, Q42, etc.) advances ONE step only.
+        # Do not skip Q36–Q41 after Q35 — those sub-questions are required in sequence.
         
         # CRITICAL FIX: When user Accepts a Draft/Support response on a section-ending
         # question (Q4, Q7, Q13, etc.), we must still show the section summary.
@@ -4465,6 +4726,16 @@ CRITICAL INSTRUCTIONS:
     
     # If the user clicked Accept, steer the model without giving a phrase it will copy verbatim every turn
     if is_accept_command:
+        accept_next_hint = ""
+        if session_data and session_data.get("current_phase") == "BUSINESS_PLAN":
+            answered_n = _parse_business_plan_tag_number(session_data.get("asked_q"))
+            if answered_n is not None and answered_n < 45:
+                next_n = answered_n + 1
+                accept_next_hint = (
+                    f" The user just accepted the answer for BUSINESS_PLAN.{answered_n:02d}. "
+                    f"You MUST emit exactly [[Q:BUSINESS_PLAN.{next_n:02d}]] as the next question — "
+                    f"never skip ahead (e.g. do not jump from Q35 to Q42 or Q43)."
+                )
         msgs.append({
             "role": "system",
             "content": (
@@ -4473,6 +4744,7 @@ CRITICAL INSTRUCTIONS:
                 "Write one short, natural acknowledgment in your own words (vary wording across turns; "
                 "do not repeat the same canned line). Tie it briefly to what they accepted if context is clear. "
                 "Then immediately continue with the next sequential question per session rules and one [[Q:...]] tag."
+                + accept_next_hint
             ),
         })
         
@@ -4665,229 +4937,13 @@ CRITICAL INSTRUCTIONS:
     elif section_summary_info:
         print(f"🔒 Section summary active - NOT updating asked_q (staying at {current_tag_before_update})")
     
-    # Use module-level validation function for research results
-    _is_valid_research = is_valid_research_result
-    
-    # AUTO-RESEARCH: For specific questions, automatically conduct web search
-    # and inject research results into the response with Accept/Modify buttons
-    auto_research_questions = {
-        "BUSINESS_PLAN.11": "competitor research",
-        "BUSINESS_PLAN.12": "industry trends research",
-        "BUSINESS_PLAN.17": "short-term operational needs",
-        "BUSINESS_PLAN.23": "short-term marketing needs",
-        "BUSINESS_PLAN.26": "permits and licenses",
-        "BUSINESS_PLAN.27": "insurance policies",
-        "BUSINESS_PLAN.34": "main costs and expenses",
-        "BUSINESS_PLAN.35": "scaling and growth plan",
-        "BUSINESS_PLAN.42": "contingency plans",
-    }
-    auto_research_triggered = False  # Track if auto-research ran for this response
-    detected_tag = None
-    if tag_match and not is_command_response:
-        raw_tag = tag_match.group(1)
-        parts = raw_tag.split(".", 1)
-        if len(parts) == 2 and parts[0].upper() == "BUSINESS_PLAN":
-            detected_tag = f"BUSINESS_PLAN.{int(parts[1]):02d}"
-    if detected_tag and not is_command_response:
-        if detected_tag in auto_research_questions:
-            research_type = auto_research_questions[detected_tag]
-            print(f"🔍 AUTO-RESEARCH TRIGGERED for {detected_tag} ({research_type})")
-            
-            # Extract business context for targeted research
-            business_context = extract_business_context_from_history(history)
-            # Merge session_data.business_context (nested dict) — only override
-            # if the session value is non-empty, so we don't wipe extracted data
-            if session_data:
-                saved_ctx = session_data.get("business_context") or {}
-                for key in ("industry", "location", "business_name", "business_type"):
-                    val = saved_ctx.get(key, "")
-                    if val and (not business_context.get(key) or len(str(val)) > len(str(business_context.get(key, "")))):
-                        business_context[key] = val
-            
-            industry = business_context.get("industry", "") or "business"
-            location = business_context.get("location", "")
-            business_name = business_context.get("business_name", "") or "your business"
-            business_type = business_context.get("business_type", "") or "business"
-            
-            print(f"🔍 Auto-research context: industry='{industry}', type='{business_type}', name='{business_name[:50]}', location='{location}'")
-            current_year = datetime.now().year
-            previous_year = current_year - 1
-            
-            try:
-                if detected_tag == "BUSINESS_PLAN.11":
-                    # Competitor research - get REAL company names, not placeholders
-                    # Extract product/service info from recent user answers
-                    product_info = ""
-                    for h in reversed(history[-20:]):
-                        content_text = h.get("content", "") or h.get("answer", "")
-                        if h.get("role") == "user" and content_text and len(content_text) > 20:
-                            lower = content_text.lower()
-                            # Skip command words
-                            if lower.strip() not in ("accept", "draft", "modify", "yes", "no", "support", "scrapping"):
-                                product_info = content_text[:200]
-                                break
-                    
-                    # Build a rich query using business idea + context
-                    business_idea = business_context.get("business_idea", "")
-                    # Prefer business_name if it contains a descriptive answer (not just the name)
-                    name_for_query = business_name if len(business_name) > 20 else ""
-                    context_for_query = name_for_query or product_info or business_idea or f"{industry} {business_type}"
-                    
-                    # Phrase the query so `conduct_web_search` routes it to
-                    # the dedicated `is_competitor` template (which enforces
-                    # named competitors + position + insights for THIS
-                    # business). Including the literal words "competitors",
-                    # "competitive position", and naming the business is
-                    # what triggers that branch.
-                    biz_label = name_for_query or business_name or f"a {business_type} in the {industry} sector"
-                    search_query = (
-                        f"Identify the top direct competitors for {biz_label}, "
-                        f"a business that does: {context_for_query[:200]}. "
-                        f"For each competitor, provide their competitive position "
-                        f"(strengths, weaknesses, market share/positioning) in the "
-                        f"{industry} sector, and give actionable insights for how "
-                        f"{biz_label} should compete against or differentiate from them."
-                    )
-                    if location:
-                        search_query += f" Geography: {location}."
-                    print(f"🔍 Q11 competitor research query: {search_query}")
-                    search_result = await conduct_web_search(search_query)
-                    if _is_valid_research(search_result):
-                        reply_content += f"\n\n🔍 **Competitor Research Results:**\n\n{search_result}"
-                        reply_content += f"\n\n*Research based on {industry} market data ({previous_year}-{current_year})*"
-                        reply_content += "\n\nPlease review these findings. Is there anything you'd like me to adjust or explore further?"
-                        auto_research_triggered = True
-                        print(f"✅ Auto-research completed for Q11 - competitor analysis injected")
-                    else:
-                        # Secondary fallback with simpler query
-                        fallback_query = f"major competitors for {business_type} SaaS AI automation workflow tools market analysis {current_year}"
-                        print(f"🔍 Q11 fallback query: {fallback_query}")
-                        search_result = await conduct_web_search(fallback_query)
-                        if _is_valid_research(search_result):
-                            reply_content += f"\n\n🔍 **Competitor Research:**\n\n{search_result}"
-                            reply_content += "\n\nPlease review these findings. Is there anything you'd like me to adjust or explore further?"
-                            auto_research_triggered = True
-                            print(f"✅ Auto-research fallback completed for Q11")
-                
-                elif detected_tag == "BUSINESS_PLAN.12":
-                    # Industry trends research
-                    search_result = await conduct_web_search(
-                        f"{industry} industry trends {previous_year} {current_year} market analysis impact"
-                    )
-                    if _is_valid_research(search_result):
-                        reply_content += f"\n\n🔍 **Industry Trends Research:**\n\n{search_result}"
-                        reply_content += f"\n\n*Research based on {previous_year}-{current_year} data*"
-                        reply_content += "\n\nHow do you think these trends will impact your business? Is there anything you'd like me to explore further?"
-                        auto_research_triggered = True
-                        print(f"✅ Auto-research completed for Q12 - industry trends injected")
+    reply_content, auto_research_triggered, detected_tag = await apply_business_plan_auto_research(
+        reply_content,
+        session_data,
+        history,
+        is_command_response=is_command_response,
+    )
 
-                elif detected_tag == "BUSINESS_PLAN.17":
-                    # Short-term operational needs research
-                    search_result = await conduct_web_search(
-                        f"{industry} {business_type} short-term operational needs startup launch requirements {location} {previous_year} hiring staff securing space"
-                    )
-                    if _is_valid_research(search_result):
-                        reply_content += f"\n\n🔍 **Suggested Short-Term Operational Needs for {business_name}:**\n\n{search_result}"
-                        reply_content += f"\n\n*Research based on {industry} industry data ({previous_year}-{current_year})*"
-                        reply_content += "\n\nIs there anything else you'd like to add or modify?"
-                        auto_research_triggered = True
-                        print(f"✅ Auto-research completed for Q17 - operational needs injected")
-
-                elif detected_tag == "BUSINESS_PLAN.23":
-                    # Short-term marketing needs research
-                    search_result = await conduct_web_search(
-                        f"{industry} {business_type} short-term marketing needs advertising budget online presence {location} {previous_year}"
-                    )
-                    if _is_valid_research(search_result):
-                        reply_content += f"\n\n🔍 **Suggested Short-Term Marketing Needs for {business_name}:**\n\n{search_result}"
-                        reply_content += f"\n\n*Research based on {industry} marketing data ({previous_year}-{current_year})*"
-                        reply_content += "\n\nIs there anything else you'd like to add?"
-                        auto_research_triggered = True
-                        print(f"✅ Auto-research completed for Q23 - marketing needs injected")
-
-                elif detected_tag == "BUSINESS_PLAN.26":
-                    # Permits and licenses research
-                    search_result = await conduct_web_search(
-                        f"{industry} business permits licenses required {location} zoning laws regulatory requirements {previous_year}"
-                    )
-                    if _is_valid_research(search_result):
-                        reply_content += f"\n\n🔍 **Permits & Licenses Research for {business_name}:**\n\n{search_result}"
-                        reply_content += f"\n\n*Research based on {location} regulatory data ({previous_year}-{current_year})*"
-                        reply_content += "\n\nPlease evaluate to confirm if this looks correct or if you have any questions."
-                        auto_research_triggered = True
-                        print(f"✅ Auto-research completed for Q26 - permits/licenses injected")
-
-                elif detected_tag == "BUSINESS_PLAN.27":
-                    # Insurance policies research
-                    search_result = await conduct_web_search(
-                        f"{industry} {business_type} business insurance policies needed liability property {location} {previous_year}"
-                    )
-                    if _is_valid_research(search_result):
-                        reply_content += f"\n\n🔍 **Suggested Insurance Policies for {business_name}:**\n\n{search_result}"
-                        reply_content += f"\n\n*Research based on {industry} insurance requirements ({previous_year}-{current_year})*"
-                        reply_content += "\n\nPlease evaluate to confirm if this looks correct or if you have any questions."
-                        auto_research_triggered = True
-                        print(f"✅ Auto-research completed for Q27 - insurance policies injected")
-
-                elif detected_tag == "BUSINESS_PLAN.34":
-                    # Main costs and expenses research
-                    search_result = await conduct_web_search(
-                        f"{industry} {business_type} startup costs main expenses production marketing salaries {location} {previous_year} monthly operating expenses"
-                    )
-                    if _is_valid_research(search_result):
-                        reply_content += f"\n\n🔍 **Estimated Costs & Expenses for {business_name}:**\n\n{search_result}"
-                        reply_content += f"\n\n*Research based on {industry} industry cost data ({previous_year}-{current_year})*"
-                        reply_content += "\n\nIs there anything else you'd like me to add?"
-                        auto_research_triggered = True
-                        print(f"✅ Auto-research completed for Q34 - costs/expenses injected")
-
-                elif detected_tag == "BUSINESS_PLAN.35":
-                    search_result = await conduct_web_search(
-                        f"{industry} {business_type} realistic scaling strategy milestones year 1 to 5 operational financial marketing expansion {location} {previous_year}"
-                    )
-                    if _is_valid_research(search_result):
-                        reply_content += f"\n\n🔍 **Suggested Scaling & Growth Plan for {business_name}:**\n\n{search_result}"
-                        reply_content += f"\n\n*Research based on {industry} growth data ({previous_year}-{current_year})*"
-                        reply_content += "\n\nWould you like to accept this suggested plan, or would you prefer to answer the sub-questions yourself?"
-                        auto_research_triggered = True
-                        print(f"✅ Auto-research completed for Q35 - scaling plan injected")
-
-                elif detected_tag == "BUSINESS_PLAN.42":
-                    # Contingency plans research
-                    search_result = await conduct_web_search(
-                        f"{industry} {business_type} contingency plans potential challenges obstacles risk management {location} {previous_year}"
-                    )
-                    if _is_valid_research(search_result):
-                        reply_content += f"\n\n🔍 **Suggested Contingency Plans for {business_name}:**\n\n{search_result}"
-                        reply_content += f"\n\n*Research based on {industry} risk analysis ({previous_year}-{current_year})*"
-                        reply_content += "\n\nPlease review these suggestions. Is there anything you'd like me to adjust or explore further?"
-                        auto_research_triggered = True
-                        print(f"✅ Auto-research completed for Q42 - contingency plans injected")
-
-            except Exception as e:
-                print(f"⚠️ Auto-research error for {detected_tag}: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            if not auto_research_triggered and detected_tag in auto_research_questions:
-                print(f"⚠️ Auto-research for {detected_tag} did NOT produce results - generating fallback content")
-                fallback = await _generate_auto_research_fallback(detected_tag, business_name, industry, business_type, location, session_data, history)
-                reply_content += fallback
-                auto_research_triggered = True
-    
-    # POST-PROCESSING: Strip "Please hold on" / "while I conduct research" lines
-    # The AI sometimes generates these even when told not to - clean them up
-    hold_on_patterns = [
-        r'Please hold on while I conduct this research\.{0,3}\s*\n*',
-        r'Let me research this for you\.{0,3}\s*\n*',
-        r'I\'ll now conduct some research\.{0,3}\s*\n*',
-        r'Now I will do some initial research[^.]*\.{0,3}\s*\n*',
-        r'Please wait while I gather[^.]*\.{0,3}\s*\n*',
-        r'Hold on while I look[^.]*\.{0,3}\s*\n*',
-    ]
-    for pattern in hold_on_patterns:
-        reply_content = re.sub(pattern, '', reply_content, flags=re.IGNORECASE)
-    
     # Also strip floating sub-instruction lines for Q11 that AI generates as separate paragraphs
     if detected_tag == "BUSINESS_PLAN.11":
         # Remove standalone "List top 5..." and "Look for both small and large..." lines
@@ -8493,15 +8549,16 @@ CRITICAL - WHAT YOU MUST NOT DO:
 WHAT YOU MUST DO:
 1. Write a brief 2-3 sentence introduction acknowledging the user's business and leading into the scaling plan
 2. The system will AUTOMATICALLY inject detailed, business-specific research after your text
-3. End with a clear call to action: the user can Accept the plan or answer follow-up questions themselves
+3. End with a clear call to action: the user can Accept this suggested plan as their answer to the scaling question, then Angel will continue with the next questions in order (long-term goals, operations, etc.)
 
 WHAT YOU MUST NOT DO:
 1. Do NOT list sub-questions or internal question numbers
-2. Do NOT generate vague/generic growth advice — the SYSTEM provides research-backed data
-3. Do NOT add thought starters — the system handles those automatically
-4. Do NOT say "Please hold on" or similar waiting messages
-5. Do NOT use bullet points or numbered lists in your introduction — keep it to clean paragraphs
-6. Keep your response to 2-3 sentences MAX before the research results are injected
+2. Do NOT imply that Accept skips ahead to contingency planning or the end of the business plan
+3. Do NOT generate vague/generic growth advice — the SYSTEM provides research-backed data
+4. Do NOT add thought starters — the system handles those automatically
+5. Do NOT say "Please hold on" or similar waiting messages
+6. Do NOT use bullet points or numbered lists in your introduction — keep it to clean paragraphs
+7. Keep your response to 2-3 sentences MAX before the research results are injected
 """
         else:
             auto_suggest_instruction = f"""
