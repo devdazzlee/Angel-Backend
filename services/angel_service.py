@@ -4199,6 +4199,7 @@ CRITICAL:
 - Do NOT include any "Thought Starter:", "Consider:", "Think about:", or similar guidance hints
 - This is a SUMMARY only - no follow-up questions or hints
 - Your summary MUST reference ALL answers from this section, not just the last one
+- Use exactly ONE blank line between sections; do NOT add extra blank lines after headings or between bullet points
 """
                 # Build messages for summary generation
                 summary_msgs = [{"role": "system", "content": ANGEL_SYSTEM_PROMPT}]
@@ -4994,6 +4995,7 @@ CRITICAL:
 - Do NOT include any "Thought Starter:", "Consider:", "Think about:", or similar guidance hints
 - This is a SUMMARY only - no follow-up questions or hints
 - Your summary MUST reference ALL answers from this section, not just the last one
+- Use exactly ONE blank line between sections; do NOT add extra blank lines after headings or between bullet points
 """
         # Add this instruction to the messages
         msgs.append({"role": "system", "content": summary_instruction})
