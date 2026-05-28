@@ -1,9 +1,23 @@
 from openai import AsyncOpenAI
 import os
+import re
 from datetime import datetime
 from utils.business_context import coerce_business_context, prompt_labels, clean_context_value
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def _build_stage_6_insurance_row(insurance_detail: str = "") -> str:
+    """Canonical insurance task row for Stage 6 — Public Launch."""
+    detail = f" {insurance_detail.strip()}" if insurance_detail and insurance_detail.strip() else ""
+    return (
+        "| Obtain Business Insurance | "
+        "Secure and activate required commercial insurance policies identified in the business plan "
+        "(e.g., general liability, professional liability, property, workers compensation as applicable). "
+        f"Confirm coverage is bound and certificates are on file before full public launch.{detail} | "
+        "Legal formation complete; operations scope defined | "
+        "Apply business-plan insurance recommendations; compare carriers; store certificates of insurance | "
+        "🔜 |"
+    )
 
 async def generate_founderport_style_roadmap(session_data, history):
     """
@@ -131,10 +145,11 @@ async def generate_founderport_style_roadmap(session_data, history):
     
     | Task | Description | Dependencies | Angel's Role | Status |
     |------|-------------|--------------|--------------|--------|
-    | 6.1 Launch Publicly | Make product/service available to general public. | Beta approved | Manage launch communications | 🔜 |
-    | 6.2 Activate Marketing Campaigns | Full marketing push across all channels. | Site live | Monitor conversions, optimize campaigns | 🔜 |
-    | 6.3 Build Customer Pipeline | Set up sales processes and customer onboarding. | Marketing active | Create sales templates, onboarding flows | 🔜 |
-    | 6.4 Track KPIs | Monitor CAC, LTV, churn, retention, revenue. | Launch active | Build dashboard templates | 🔜 |
+    | 6.1 Obtain Business Insurance | Secure and activate required commercial insurance (general liability, professional liability, property, workers compensation as applicable). Bind coverage and store certificates before full public launch. Use policies identified in the business plan (Q27). | Legal formation complete; operations scope defined | Compare carriers; confirm coverage limits; file certificates | 🔜 |
+    | 6.2 Launch Publicly | Make product/service available to general public. | Beta approved; business insurance active | Manage launch communications | 🔜 |
+    | 6.3 Activate Marketing Campaigns | Full marketing push across all channels. | Site live | Monitor conversions, optimize campaigns | 🔜 |
+    | 6.4 Build Customer Pipeline | Set up sales processes and customer onboarding. | Marketing active | Create sales templates, onboarding flows | 🔜 |
+    | 6.5 Track KPIs | Monitor CAC, LTV, churn, retention, revenue. | Launch active | Build dashboard templates | 🔜 |
     
     ### **Stage 7 — Scaling & Expansion**
     **Goal**: Grow the business and expand offerings.
@@ -167,10 +182,13 @@ async def generate_founderport_style_roadmap(session_data, history):
     6. Use markdown tables with columns: Task | Description | Dependencies | Angel's Role | Status
     7. Status indicators: ✅ (complete), ⏳ (in progress), 🔜 (upcoming)
     8. Make it look EXACTLY like the Founderport roadmap example
+    9. **MANDATORY — Stage 6 (Public Launch)**: MUST include task "Obtain Business Insurance" before "Launch Publicly". Use insurance policies from the business plan (Question 27 / legal & compliance section). Do not omit insurance from the roadmap.
     
     Generate the complete roadmap now with all 8 stages and specific tasks for {business_name}.
     """
     
+    insurance_detail = extract_insurance_context_from_history(history, session_data)
+
     try:
         response = await client.chat.completions.create(
             model="gpt-4o",
@@ -178,11 +196,105 @@ async def generate_founderport_style_roadmap(session_data, history):
             temperature=0.3,
             max_tokens=4500  # Increased for comprehensive 8-stage roadmap
         )
-        return response.choices[0].message.content
+        roadmap_content = response.choices[0].message.content or ""
+        return ensure_public_launch_insurance_task(roadmap_content, insurance_detail)
     except Exception as e:
         print(f"Error generating Founderport-style roadmap: {e}")
         # Fallback to basic structure
-        return generate_fallback_roadmap(business_name, founder_name, location, legal_structure, state)
+        fallback = generate_fallback_roadmap(business_name, founder_name, location, legal_structure, state)
+        return ensure_public_launch_insurance_task(fallback, insurance_detail)
+
+def extract_insurance_context_from_history(history, session_data=None) -> str:
+    """
+    Pull insurance recommendations from Business Plan Q27 discussion so Stage 6
+    can reference specific policy types the founder already identified.
+    """
+    snippets: list[str] = []
+
+    if isinstance(history, list):
+        for msg in history:
+            if not isinstance(msg, dict):
+                continue
+            content = (msg.get("content") or "").strip()
+            if len(content) < 40:
+                continue
+            lower = content.lower()
+            if "insurance" not in lower:
+                continue
+            if any(
+                kw in lower
+                for kw in (
+                    "liability",
+                    "policy",
+                    "policies",
+                    "coverage",
+                    "workers comp",
+                    "property insurance",
+                    "professional liability",
+                    "general liability",
+                )
+            ):
+                snippets.append(content[:600])
+
+    if isinstance(history, str):
+        for line in history.splitlines():
+            lower = line.lower()
+            if "insurance" in lower and (
+                "liability" in lower or "policy" in lower or "coverage" in lower
+            ):
+                snippets.append(line[:400])
+
+    if session_data and isinstance(session_data.get("business_context"), dict):
+        ctx = session_data["business_context"]
+        for key in ("insurance_policies", "insurance_summary", "insurance"):
+            val = ctx.get(key)
+            if isinstance(val, str) and val.strip():
+                snippets.append(val.strip()[:400])
+
+    if not snippets:
+        return ""
+
+    combined = " ".join(snippets[-2:])
+    combined = re.sub(r"\s+", " ", combined).strip()
+    if len(combined) > 220:
+        combined = combined[:217].rstrip() + "..."
+    return f"Policies to confirm: {combined}"
+
+
+def ensure_public_launch_insurance_task(roadmap_content: str, insurance_detail: str = "") -> str:
+    """
+    Guarantee Stage 6 — Public Launch includes a business insurance task.
+    The LLM occasionally omits it; this enforces the product requirement at the source.
+    """
+    if not roadmap_content or not roadmap_content.strip():
+        return roadmap_content
+
+    stage6_match = re.search(
+        r"(###\s*\*\*Stage\s*6\s*[—–-]\s*Public\s*Launch\*\*.*?)"
+        r"(?=###\s*\*\*Stage\s*7|\Z)",
+        roadmap_content,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not stage6_match:
+        return roadmap_content
+
+    stage6_block = stage6_match.group(1)
+    if re.search(r"insurance", stage6_block, re.IGNORECASE):
+        return roadmap_content
+
+    row = _build_stage_6_insurance_row(insurance_detail)
+
+    table_header = re.search(
+        r"(\| Task \| Description \| Dependencies \| Angel's Role \| Status \|\n\|[-\s|:]+\|\n)",
+        stage6_block,
+        flags=re.IGNORECASE,
+    )
+    if not table_header:
+        return roadmap_content
+
+    insert_at = stage6_match.start(1) + table_header.end()
+    return roadmap_content[:insert_at] + row + "\n" + roadmap_content[insert_at:]
+
 
 def extract_state_from_location(location):
     """Extract state from location string"""
@@ -237,6 +349,13 @@ def generate_fallback_roadmap(business_name, founder_name, location, legal_struc
 
 ## Stage 3 — Product Development
 [Additional stages will be generated based on your business plan responses]
+
+## Stage 6 — Public Launch
+
+| Task | Description | Dependencies | Angel's Role | Status |
+|------|-------------|--------------|--------------|--------|
+| Obtain Business Insurance | Secure required commercial insurance before full public launch. | Legal formation complete | Compare carriers; confirm coverage | ⏳ |
+| Launch Publicly | Release to the general public. | Insurance active | Launch communications | 🔜 |
 
 **Note:** Your complete roadmap is being generated with full details for all 8 stages.
 """
