@@ -5,6 +5,7 @@ from services.angel_service import client, ANGEL_SYSTEM_PROMPT
 from services.session_service import get_session
 from services.chat_service import save_chat_message
 from middlewares.auth import verify_auth_token
+from utils.business_context import business_context_from_session, prompt_labels
 
 router = APIRouter(
     tags=["Roadmap Edit"],
@@ -26,7 +27,8 @@ async def regenerate_roadmap_section(session_id: str, request: Request, payload:
         raise HTTPException(status_code=400, detail="Missing required fields")
     
     try:
-        # Generate regeneration prompt
+        ctx = business_context_from_session(session)
+        labels = prompt_labels(ctx)
         regeneration_prompt = f"""
         Regenerate the roadmap section: "{section_title}"
         
@@ -34,10 +36,10 @@ async def regenerate_roadmap_section(session_id: str, request: Request, payload:
         {current_content}
         
         Business context:
-        - Business Name: {session.get('business_name', 'Your Business')}
-        - Industry: {session.get('industry', 'general business')}
-        - Location: {session.get('location', 'United States')}
-        - Business Type: {session.get('business_type', 'startup')}
+        - Business Name: {labels['business_name']}
+        - Industry: {labels['industry']}
+        - Location: {labels['location']}
+        - Business Type: {labels['business_type']}
         
         Please regenerate this section with:
         1. More detailed and actionable steps

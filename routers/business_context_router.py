@@ -193,7 +193,7 @@ async def extract_business_context_from_history_api(
             elif current_business_name and str(current_business_name).lower().strip() not in invalid_values:
                 final_context["business_name"] = current_business_name
             else:
-                final_context["business_name"] = "Your Business"
+                final_context["business_name"] = ""
                 print(f"⚠️ No valid business name found in chat history")
         
         # Industry
@@ -204,7 +204,7 @@ async def extract_business_context_from_history_api(
         elif current_industry and str(current_industry).lower().strip() not in invalid_values:
             final_context["industry"] = current_industry
         else:
-            final_context["industry"] = "General Business"
+            final_context["industry"] = ""
         
         # Location
         extracted_location = extracted_context.get("location", "").strip()
@@ -214,7 +214,7 @@ async def extract_business_context_from_history_api(
         elif current_location and str(current_location).lower().strip() not in invalid_values:
             final_context["location"] = current_location
         else:
-            final_context["location"] = "United States"
+            final_context["location"] = ""
         
         # Business Type
         extracted_type = extracted_context.get("business_type", "").strip()
@@ -224,7 +224,7 @@ async def extract_business_context_from_history_api(
         elif current_business_type and str(current_business_type).lower().strip() not in invalid_values:
             final_context["business_type"] = current_business_type
         else:
-            final_context["business_type"] = "Startup"
+            final_context["business_type"] = ""
         
         # Update session with extracted context
         try:

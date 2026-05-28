@@ -4302,13 +4302,16 @@ async def get_angel_reply(
             current_year = datetime.now().year
             previous_year = current_year - 1
             
+            from utils.business_context import coerce_business_context, prompt_labels
+
+            search_ctx = prompt_labels(coerce_business_context(session_data))
             # ENHANCED COMPETITOR RESEARCH DETECTION
             competitor_keywords = ["competitors", "competition", "main competitors", "who are my competitors", "competing companies", "rival companies"]
             if any(keyword in user_content.lower() for keyword in competitor_keywords):
                 competitor_research_requested = True
-                web_search_query = f"main competitors in {session_data.get('industry', 'business')} industry {previous_year}"
+                web_search_query = f"main competitors in {search_ctx['industry']} {previous_year}"
             elif "market" in user_content.lower() or "trends" in user_content.lower():
-                web_search_query = f"market trends {session_data.get('industry', 'business')} {session_data.get('location', '')} {previous_year}"
+                web_search_query = f"market trends {search_ctx['industry']} {search_ctx['location']} {previous_year}"
             elif "domain" in user_content.lower():
                 web_search_query = "domain registration availability check websites"
             elif "wine" in user_content.lower() or "influencer" in user_content.lower():
@@ -5991,31 +5994,6 @@ This staffing structure will help you build a strong foundation for your busines
     elif any(keyword in current_question for keyword in ['supplier', 'vendor', 'partner', 'relationship', 'key partners']):
         return generate_supplier_relationships_draft(business_context, history)
     
-        return f"""Based on your business vision, here's a draft for your key features and benefits:
-
-{business_context.get('business_name', 'Your business')} offers advanced AI-powered features that provide significant productivity benefits to customers. The main components include intelligent voice recognition technology, automated text formatting, and seamless integration capabilities.
-
-**Key Features:**
-- Advanced AI-powered voice recognition with 95%+ accuracy
-- Automated text formatting and organization
-- Multiple output formats (plain text, formatted documents, blog posts)
-- Real-time processing with instant results
-- Cloud-based storage and access
-- Integration with popular productivity tools
-
-**Customer Benefits:**
-- Dramatic time savings (up to 80% reduction in transcription time)
-- Improved accuracy compared to manual transcription
-- Enhanced productivity and workflow efficiency
-- Cost-effective solution for content creation
-- Easy-to-use interface requiring no technical expertise
-
-**How It Works:**
-Customers experience seamless results through a simple three-step process: 1) Upload voice recordings via web interface, 2) AI processes and transcribes audio with intelligent formatting, 3) Download formatted text in preferred format. The entire process takes under 5 minutes for most recordings.
-
-**Measurable Results:**
-Customers can expect 95%+ transcription accuracy, processing times under 5 minutes, and significant productivity improvements in their content creation workflows."""
-    
     elif any(keyword in current_question for keyword in ['intellectual property', 'patents', 'trademarks', 'copyrights', 'proprietary technology', 'unique processes', 'formulas', 'legal protections']):
         return generate_intellectual_property_draft(business_context, history)
     
@@ -6151,7 +6129,10 @@ Focus on validating your concept before full development through market research
         return "Based on your business requirements, here's a draft for your supplier and vendor relationships: You'll need to identify key suppliers and vendors who can provide essential products, services, or resources for your business operations. Consider building relationships with reliable partners who offer competitive pricing, quality products, and consistent service. Key partners might include suppliers for raw materials, service providers for essential business functions, and strategic partners who can help you reach your target market or enhance your offerings. Focus on reliability, quality, pricing, and long-term partnership potential."
     
     elif any(keyword in recent_text for keyword in ['key features and benefits', 'how does it work', 'main components', 'steps involved', 'value or results']):
-        return f"Based on your business vision, here's a draft for your key features and benefits: {business_context.get('business_name', 'Your business')} offers advanced AI-powered features that provide significant productivity benefits to customers. The main components include intelligent voice recognition technology, automated text formatting, and seamless integration capabilities. Customers will experience dramatic time savings and improved accuracy through a process that involves uploading audio files, AI processing, and downloading formatted results. Focus on clearly articulating the technical aspects, user experience, and measurable results customers can expect from using your solution."
+        from utils.business_context import prompt_labels as _prompt_labels
+
+        _draft_labels = _prompt_labels(business_context)
+        return f"Based on your business vision, here's a draft for your key features and benefits: {_draft_labels['business_name']} offers advanced AI-powered features that provide significant productivity benefits to customers. The main components include intelligent voice recognition technology, automated text formatting, and seamless integration capabilities. Customers will experience dramatic time savings and improved accuracy through a process that involves uploading audio files, AI processing, and downloading formatted results. Focus on clearly articulating the technical aspects, user experience, and measurable results customers can expect from using your solution."
     
     elif any(keyword in recent_text for keyword in ['product', 'service', 'core offering', 'what will you be offering']):
         return "Based on your business vision, here's a draft for your core product or service: Your core offering is [product/service description] designed to [key benefits]. Consider what specific features, benefits, or outcomes customers will receive and how customers will interact with or use your product/service. Focus on your unique value proposition and how you'll deliver exceptional customer experience. Think about the key features that differentiate you from competitors and the specific outcomes customers can expect."
@@ -6205,7 +6186,10 @@ async def handle_scrapping_command(reply, notes, history, session_data=None):
     if notes and len(notes.strip()) > 3:
         search_query = notes.strip()
     else:
-        search_query = f"{business_context.get('business_name', 'business')} {business_context.get('industry', 'business')} {get_question_topic(current_question)}"
+        from utils.business_context import prompt_labels as _scrapping_labels_fn
+
+        _scrapping_labels = _scrapping_labels_fn(business_context)
+        search_query = f"{_scrapping_labels['business_name']} {_scrapping_labels['industry']} {get_question_topic(current_question)}"
     
     # Actually perform the web search NOW (not deferred)
     print(f"🔍 Scrapping - performing web search inline for: '{search_query}'")
@@ -6443,7 +6427,7 @@ async def handle_support_command(reply, history, session_data=None):
     question_topic = get_question_topic(current_question)
     current_year = datetime.now().year
     previous_year = current_year - 1
-    primary_location = location or "United States"
+    primary_location = location or ""
     
     if question_topic == "competitive analysis":
         research_query = (
@@ -7281,10 +7265,13 @@ async def generate_business_plan_artifact_async(session_data, conversation_histo
 
 async def generate_business_plan_artifact(session_data, conversation_history):
     """Generate comprehensive business plan artifact with deep research"""
+    from utils.business_context import prompt_labels
+
+    labels = prompt_labels(session_data)
+    industry = labels['industry']
+    location = labels['location']
     
     # Conduct comprehensive research for business plan
-    industry = session_data.get('industry', 'general business')
-    location = session_data.get('location', 'United States')
     
     current_year = datetime.now().year
     previous_year = current_year - 1
@@ -7394,9 +7381,9 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     - Extract ACTUAL business information from user's answers
     - Replace ALL placeholders like "[Extract from conversation]" with REAL data from the conversation
     - If information is not found in the conversation, state "Not yet specified" instead of using placeholders
-    - Use the actual business name: {session_data.get('business_name', 'Your Business')}
-    - Use the actual industry: {session_data.get('industry', 'General Business')}
-    - Use the actual location: {session_data.get('location', 'United States')}
+    - Use the actual business name: {labels['business_name']}
+    - Use the actual industry: {labels['industry']}
+    - Use the actual location: {labels['location']}
     - Extract mission statements, value propositions, target markets, revenue models, etc. from actual user answers
     - DO NOT make up information - only use what's in the conversation history
     
@@ -7613,9 +7600,9 @@ async def generate_business_plan_artifact(session_data, conversation_history):
        - "## Section 7 - Financial Projections & Funding"
        - "## Section 8 - Operations, Risk Management & Implementation Timeline"
     5. **MANDATORY**: Extract ALL information from the conversation history - replace ALL [Extract from conversation] placeholders with ACTUAL data
-    6. **MANDATORY**: Use actual business name: {session_data.get('business_name', 'Your Business')}
-    7. **MANDATORY**: Use actual industry: {session_data.get('industry', 'General Business')}
-    8. **MANDATORY**: Use actual location: {session_data.get('location', 'United States')}
+    6. **MANDATORY**: Use actual business name: {labels['business_name']}
+    7. **MANDATORY**: Use actual industry: {labels['industry']}
+    8. **MANDATORY**: Use actual location: {labels['location']}
     9. **MANDATORY**: All tables must be properly formatted markdown tables with | separators
     10. **MANDATORY**: DO NOT create traditional sections like "Executive Summary", "Company Description", etc. - ONLY use Section 1-8 format
     11. **MANDATORY**: DO NOT create sections beyond Section 8 - the document MUST end after Section 8
@@ -7901,16 +7888,21 @@ Generate the business plan NOW starting with "## Section 1 - Executive Summary &
 
 async def generate_roadmap_artifact(session_data, business_plan_data):
     """Generate comprehensive roadmap based on business plan"""
-    
-    # Research current tools and vendors
-    industry = session_data.get('industry', 'general business')
-    business_type = session_data.get('business_type', 'startup')
-    
+    from utils.business_context import prompt_labels
+
+    roadmap_labels = prompt_labels(session_data)
+    industry = roadmap_labels["industry"]
+    business_type = roadmap_labels["business_type"]
+
     current_year = datetime.now().year
     previous_year = current_year - 1
-    
-    vendor_research = await conduct_web_search(f"best business tools vendors {industry} {business_type} {previous_year}")
-    legal_research = await conduct_web_search(f"business formation requirements {session_data.get('location', 'United States')}")
+
+    vendor_research = await conduct_web_search(
+        f"best business tools vendors {industry} {business_type} {previous_year}"
+    )
+    legal_research = await conduct_web_search(
+        f"business formation requirements {roadmap_labels['location']}"
+    )
     
     roadmap_prompt = f"""
     Create a detailed, chronological roadmap for launching this business:
@@ -8024,7 +8016,7 @@ def parse_roadmap_step_tables(roadmap_content: str) -> List[Dict[str, Any]]:
 async def generate_step_substeps(step: Dict[str, Any], session_data: Dict[str, Any]) -> List[str]:
     """Generate 3-5 actionable substeps for a roadmap step"""
     prompt = f"""
-    You are assisting an entrepreneur in the {session_data.get('industry', 'general business')} industry located in {session_data.get('location', 'the United States')}.
+    You are assisting an entrepreneur in the {prompt_labels(session_data)['industry']} industry located in {prompt_labels(session_data)['location']}.
     Break the following roadmap task into 3-5 sequential, actionable substeps that help them complete the task end-to-end.
 
     Task Name: {step.get('step_name', 'Unnamed Task')}
@@ -8170,10 +8162,16 @@ async def handle_roadmap_to_implementation_transition(session_data, history):
     if not isinstance(business_context, dict):
         business_context = {}
     
-    # Extract business details with proper fallbacks
-    business_name = extracted_context.get('business_name') or business_context.get('business_name') or 'your business'
-    industry = extracted_context.get('industry') or business_context.get('industry') or 'general business'
-    location = extracted_context.get('location') or business_context.get('location') or 'United States'
+    from utils.business_context import prompt_labels, is_meaningful_context_value, clean_context_value
+
+    merged_ctx = dict(business_context)
+    for key, value in (extracted_context or {}).items():
+        if is_meaningful_context_value(value):
+            merged_ctx[key] = clean_context_value(value)
+    labels = prompt_labels({**session_data, **merged_ctx})
+    business_name = labels['business_name']
+    industry = labels['industry']
+    location = labels['location']
     
     # Get a dynamic motivational quote
     motivational_quote = pick_motivational_quote()

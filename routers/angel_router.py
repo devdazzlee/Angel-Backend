@@ -20,6 +20,10 @@ from utils.progress import (
     smart_trim_history,
 )
 from utils.section_summary import is_section_summary_reply
+from utils.business_context import (
+    ensure_session_business_context,
+    resolve_session_business_context,
+)
 from middlewares.auth import verify_auth_token
 from fastapi.middleware.cors import CORSMiddleware
 from db.supabase import supabase
@@ -131,12 +135,7 @@ PHASE_SEQUENCE = [
     "IMPLEMENTATION",
 ]
 
-BUSINESS_CONTEXT_KEYS = ["business_name", "industry", "location", "business_type"]
 DEFAULT_BUSINESS_CONTEXT = {
-    "business_name": "Your Business",
-    "industry": "General Business",
-    "location": "United States",
-    "business_type": "Startup",
     "affirmation_intensity": DEFAULT_AFFIRMATION_INTENSITY,
     "constructive_feedback_intensity": DEFAULT_CONSTRUCTIVE_FEEDBACK_INTENSITY,
 }
@@ -162,30 +161,6 @@ def _question_progress(asked_q: str):
         question_number = -1
     return _phase_index(phase), question_number
 
-
-def _normalize_business_context(context: dict) -> dict:
-    normalized = DEFAULT_BUSINESS_CONTEXT.copy()
-    if not context or not isinstance(context, dict):
-        return normalized
-    for key in BUSINESS_CONTEXT_KEYS:
-        value = context.get(key)
-        if isinstance(value, str):
-            value = value.strip()
-        if value:
-            normalized[key] = value
-    return normalized
-
-
-def _has_meaningful_context(context: dict) -> bool:
-    if not context or not isinstance(context, dict):
-        return False
-    for key in BUSINESS_CONTEXT_KEYS:
-        value = context.get(key)
-        if isinstance(value, str):
-            value = value.strip()
-        if value:
-            return True
-    return False
 
 def enforce_question_tag(reply: str, question_tag: str) -> str:
     """
@@ -250,41 +225,13 @@ async def get_business_context(session_id: str, request: Request):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    stored_context = session.get("business_context") if isinstance(session.get("business_context"), dict) else {}
-    if stored_context is None:
-        stored_context = {}
-
-    needs_refresh = (
-        not stored_context
-        or any(
-            not stored_context.get(key) or not str(stored_context.get(key)).strip()
-            for key in BUSINESS_CONTEXT_KEYS
-        )
+    normalized, source, updated = await ensure_session_business_context(
+        session_id,
+        session,
+        fetch_history=fetch_chat_history,
+        extract_from_history=extract_business_context_from_history,
+        patch_session=lambda sid, updates: patch_session(sid, user_id, updates),
     )
-
-    source = "stored"
-    updated = False
-
-    if needs_refresh:
-        history = await fetch_chat_history(session_id)
-        extracted_context = extract_business_context_from_history(history) or {}
-        if extracted_context:
-            merged_context = stored_context.copy()
-            for key, value in extracted_context.items():
-                if isinstance(value, str):
-                    value = value.strip()
-                if value and merged_context.get(key) != value:
-                    merged_context[key] = value
-                    updated = True
-            if updated:
-                await patch_session(session_id, {"business_context": merged_context})
-                session["business_context"] = merged_context
-                stored_context = merged_context
-                source = "extracted"
-        else:
-            source = "fallback"
-
-    normalized = _normalize_business_context(stored_context)
 
     return {
         "success": True,
@@ -1792,6 +1739,8 @@ async def generate_roadmap_plan(session_id: str, request: Request):
             print(f"⚠️ Roadmap format unclear or missing tables - regenerating with Founderport-style 8-stage format")
             is_new_format = False
     
+    resolved_ctx = resolve_session_business_context(session)
+
     # If we have new format roadmap, return it
     if is_new_format and existing_content:
         return {
@@ -1800,8 +1749,8 @@ async def generate_roadmap_plan(session_id: str, request: Request):
                 "plan": existing_content,
                 "generated_at": roadmap_data.get("metadata", {}).get("generated_at") if isinstance(roadmap_data, dict) else datetime.now().isoformat(),
                 "research_conducted": True,
-                "industry": session.get("business_context", {}).get("industry", "General Business") if isinstance(session.get("business_context"), dict) else "General Business",
-                "location": session.get("business_context", {}).get("location", "United States") if isinstance(session.get("business_context"), dict) else "United States",
+                "industry": resolved_ctx.get("industry", ""),
+                "location": resolved_ctx.get("location", ""),
             }
         }
     
@@ -1833,8 +1782,8 @@ async def generate_roadmap_plan(session_id: str, request: Request):
             "plan": roadmap_content,
             "generated_at": datetime.now().isoformat(),
             "research_conducted": True,
-            "industry": session.get("business_context", {}).get("industry", "General Business") if isinstance(session.get("business_context"), dict) else "General Business",
-            "location": session.get("business_context", {}).get("location", "United States") if isinstance(session.get("business_context"), dict) else "United States",
+            "industry": resolved_ctx.get("industry", ""),
+            "location": resolved_ctx.get("location", ""),
         }
     }
 

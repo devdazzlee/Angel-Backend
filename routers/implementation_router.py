@@ -7,6 +7,10 @@ from services.service_provider_tables_service import generate_provider_table, ge
 from services.session_service import get_session, patch_session
 from services.chat_service import fetch_chat_history
 from middlewares.auth import verify_auth_token
+from utils.business_context import (
+    fetch_authoritative_business_context,
+    business_context_from_session,
+)
 from openai import AsyncOpenAI
 import json
 import os
@@ -267,63 +271,23 @@ async def get_current_implementation_task(session_id: str, request: Request):
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         
-        # Extract business context from session data (if available)
-        stored_context = session.get("business_context") or {}
-        if not isinstance(stored_context, dict):
-            stored_context = {}
+        from services.angel_service import extract_business_context_from_history
+        from utils.business_context import ensure_session_business_context
+
+        normalized_context, ctx_source, _ctx_updated = await ensure_session_business_context(
+            session_id,
+            session,
+            fetch_history=fetch_chat_history,
+            extract_from_history=extract_business_context_from_history,
+            patch_session=lambda sid, updates: patch_session(sid, user_id, updates),
+        )
         session_data = {
-            "business_name": stored_context.get("business_name") or session.get("business_name"),
-            "industry": stored_context.get("industry") or session.get("industry"),
-            "location": stored_context.get("location") or session.get("location"),
-            "business_type": stored_context.get("business_type") or session.get("business_type")
+            "business_name": normalized_context.get("business_name", ""),
+            "industry": normalized_context.get("industry", ""),
+            "location": normalized_context.get("location", ""),
+            "business_type": normalized_context.get("business_type", ""),
         }
-        
-        # If session data doesn't have business context, extract from chat history
-        if not session_data.get("business_name") or not session_data.get("industry"):
-            print(f"📊 Session data missing business context - extracting from chat history")
-            history = await fetch_chat_history(session_id)
-            
-            # Simple extraction from chat history
-            for msg in history:
-                if msg.get('role') == 'user':
-                    content = msg.get('content', '')
-                    content_lower = content.lower()
-                    
-                    # Extract domain business name
-                    if ('.com' in content or '.net' in content or '.org' in content) and len(content) < 100:
-                        session_data["business_name"] = content.strip()
-                    
-                    # Extract location (common city names)
-                    cities = ['karachi', 'lahore', 'islamabad', 'san francisco', 'new york', 'london', 'dubai']
-                    for city in cities:
-                        if city in content_lower:
-                            session_data["location"] = city.title()
-                            break
-                    
-                    # Extract business structure
-                    structures = ['llc', 'corporation', 'partnership', 'private limited']
-                    for structure in structures:
-                        if structure in content_lower:
-                            session_data["business_type"] = structure.upper()
-                            break
-                    
-                    # Extract industry
-                    industries = {'beverage': ['beverage', 'drink', 'coke', 'soda'], 
-                                'food': ['food', 'restaurant', 'cafe'],
-                                'technology': ['tech', 'software', 'app', 'platform'],
-                                'retail': ['retail', 'store', 'shop', 'marketplace']}
-                    for industry, keywords in industries.items():
-                        if any(keyword in content_lower for keyword in keywords):
-                            session_data["industry"] = industry.title()
-                            break
-        
-        # Apply defaults if still missing
-        session_data["business_name"] = session_data.get("business_name") or "Your Business"
-        session_data["industry"] = session_data.get("industry") or "General Business"
-        session_data["location"] = session_data.get("location") or "United States"
-        session_data["business_type"] = session_data.get("business_type") or "Startup"
-        
-        print(f"📊 Implementation task - final business context: {session_data}")
+        print(f"📊 Implementation task - business context ({ctx_source}): {session_data}")
         
         # Get completed tasks from session business_context or database
         completed_tasks = []
@@ -486,13 +450,7 @@ async def get_implementation_help(
         raise HTTPException(status_code=400, detail="Task ID is required")
     
     try:
-        # Get session data
-        session_data = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
-        }
+        session_data = await fetch_authoritative_business_context(session_id, user_id)
         
         # Get guidance from specialized agents
         agent_guidance = await agents_manager.get_multi_agent_guidance(
@@ -554,13 +512,7 @@ async def get_implementation_kickstart(session_id: str, task_id: str, request: R
     user_id = request.state.user["id"]
     
     try:
-        # Get session data
-        session_data = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
-        }
+        session_data = await fetch_authoritative_business_context(session_id, user_id)
         
         # Get task-specific providers
         providers = await get_task_providers(task_id, f"implementation task {task_id}", session_data)
@@ -639,13 +591,7 @@ async def get_implementation_service_providers(
         raise HTTPException(status_code=400, detail="Task ID is required")
     
     try:
-        # Get session data
-        session_data = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
-        }
+        session_data = await fetch_authoritative_business_context(session_id, user_id)
         
         # Get service providers for the task
         provider_table = await generate_provider_table(
@@ -723,12 +669,7 @@ async def complete_implementation_task(
             
             # CRITICAL: Check if all substeps for this task are now completed
             # If so, automatically mark the main task as completed
-            session_data = {
-                "business_name": session.get("business_name", "Your Business"),
-                "industry": session.get("industry", "General Business"),
-                "location": session.get("location", "United States"),
-                "business_type": session.get("business_type", "Startup")
-            }
+            session_data = business_context_from_session(session)
             
             # Get all substeps for this task
             substeps = await task_manager._generate_substeps(task_id, session_data)
@@ -748,12 +689,7 @@ async def complete_implementation_task(
         else:
             # Completing the entire task - mark all substeps as completed
             # Get the task details directly for the current task_id (not the next task)
-            session_data = {
-                "business_name": session.get("business_name", "Your Business"),
-                "industry": session.get("industry", "General Business"),
-                "location": session.get("location", "United States"),
-                "business_type": session.get("business_type", "Startup")
-            }
+            session_data = business_context_from_session(session)
             
             # Get substeps for this specific task
             substeps = await task_manager._generate_substeps(task_id, session_data)
@@ -889,12 +825,7 @@ async def complete_implementation_task(
         }
         
         # Get next task info (call once, use result for both checks)
-        session_data = {
-            "business_name": session.get("business_name", "Your Business"),
-            "industry": session.get("industry", "General Business"),
-            "location": session.get("location", "United States"),
-            "business_type": session.get("business_type", "Startup")
-        }
+        session_data = business_context_from_session(session)
         
         next_task_info = None
         all_substeps_completed = False
@@ -1185,27 +1116,7 @@ async def get_service_providers_for_step(request: Request):
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         
-        # Extract business context from session
-        invalid_values = ["", "unsure", "your business", "none", "n/a", "not specified"]
-        stored_context = session.get("business_context") or {}
-        if not isinstance(stored_context, dict):
-            stored_context = {}
-        
-        def get_valid_value(key: str, default: str) -> str:
-            value = stored_context.get(key) or session.get(key, "")
-            if isinstance(value, list):
-                value = ", ".join(str(v) for v in value) if value else ""
-            value = str(value).strip()
-            if not value or value.lower() in invalid_values:
-                return default
-            return value
-        
-        business_context = {
-            "business_name": get_valid_value("business_name", "Your Business"),
-            "industry": get_valid_value("industry", "General Business"),
-            "location": get_valid_value("location", "United States"),
-            "business_type": get_valid_value("business_type", "Startup")
-        }
+        business_context = await fetch_authoritative_business_context(session_id, user_id)
         
         # Get service providers for the task. We pass `category` (the phase
         # name from the frontend) as `phase_hint` so the provider service
@@ -1215,7 +1126,7 @@ async def get_service_providers_for_step(request: Request):
         provider_table = await generate_provider_table(
             task_context,
             business_context,
-            business_context.get('location', 'United States'),
+            business_context.get('location') or None,
             phase_hint=category if category and category != "general" else None,
         )
         

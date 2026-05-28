@@ -43,15 +43,17 @@ async def fetch_business_plan_context(session_id: str) -> Dict:
 # Context validation loop
 async def validate_response_context(response: str, task: Dict, business_context: Dict, business_plan: Dict) -> str:
     """Validate that AI response is contextually accurate and specific to the user's business"""
-    
+    from utils.business_context import prompt_labels
+
+    labels = prompt_labels(business_context)
     validation_prompt = f"""
     Review the following AI response and verify it is SPECIFIC and CONTEXTUALLY ACCURATE for this business:
 
     BUSINESS CONTEXT:
-    - Business Name: {business_context.get('business_name', 'N/A')}
-    - Industry: {business_context.get('industry', 'N/A')}
-    - Location: {business_context.get('location', 'N/A')}
-    - Business Type: {business_context.get('business_type', 'N/A')}
+    - Business Name: {labels['business_name']}
+    - Industry: {labels['industry']}
+    - Location: {labels['location']}
+    - Business Type: {labels['business_type']}
 
     CURRENT TASK:
     - Task: {task.get('title', 'N/A')}
@@ -252,12 +254,9 @@ async def get_implementation_task(task_id: str, session_data: Dict) -> Optional[
                 # Personalize task based on session data
                 personalized_task = task.copy()
                 personalized_task["phase_name"] = phase_data["phase"]
-                personalized_task["business_context"] = {
-                    "business_name": session_data.get("business_name", "Your Business"),
-                    "industry": session_data.get("industry", "general business"),
-                    "location": session_data.get("location", "United States"),
-                    "business_type": session_data.get("business_type", "startup")
-                }
+                from utils.business_context import coerce_business_context
+
+                personalized_task["business_context"] = coerce_business_context(session_data)
                 return personalized_task
     return None
 

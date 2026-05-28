@@ -64,10 +64,10 @@ async def generate_full_business_plan(history):
                     )
                     
                     industry_result = response.choices[0].message.content.strip()
-                    session_data['industry'] = industry_result if industry_result else 'general business'
+                    if industry_result:
+                        session_data['industry'] = industry_result
                 except Exception as e:
                     print(f"Industry extraction failed: {e}")
-                    session_data['industry'] = 'general business'
             
             # Extract location information
             if any(keyword in content for keyword in ['location', 'city', 'country', 'state', 'region']):
@@ -79,14 +79,6 @@ async def generate_full_business_plan(history):
                     session_data['location'] = 'United Kingdom'
                 elif 'australia' in content:
                     session_data['location'] = 'Australia'
-                else:
-                    session_data['location'] = 'United States'  # Default
-    
-    # Set defaults if not found
-    if 'industry' not in session_data:
-        session_data['industry'] = 'general business'
-    if 'location' not in session_data:
-        session_data['location'] = 'United States'
     
     # Use the deep research business plan generation
     business_plan_content = await generate_business_plan_artifact(session_data, conversation_history)
@@ -95,8 +87,8 @@ async def generate_full_business_plan(history):
         "plan": business_plan_content,
         "generated_at": datetime.now().isoformat(),
         "research_conducted": True,
-        "industry": session_data['industry'],
-        "location": session_data['location']
+        "industry": session_data.get('industry', ''),
+        "location": session_data.get('location', '')
     }
 
 async def generate_full_roadmap_plan(history):
@@ -138,10 +130,10 @@ async def generate_full_roadmap_plan(history):
                     )
                     
                     industry_result = response.choices[0].message.content.strip()
-                    session_data['industry'] = industry_result if industry_result else 'general business'
+                    if industry_result:
+                        session_data['industry'] = industry_result
                 except Exception as e:
                     print(f"Industry extraction failed: {e}")
-                    session_data['industry'] = 'general business'
             
             # Extract location information
             if any(keyword in content for keyword in ['location', 'city', 'country', 'state', 'region']):
@@ -153,18 +145,12 @@ async def generate_full_roadmap_plan(history):
                     session_data['location'] = 'United Kingdom'
                 elif 'australia' in content:
                     session_data['location'] = 'Australia'
-                else:
-                    session_data['location'] = 'United States'  # Default
     
-    # Set defaults if not found
-    if 'industry' not in session_data:
-        session_data['industry'] = 'general business'
-    if 'location' not in session_data:
-        session_data['location'] = 'United States'
-    
-    # Conduct comprehensive research for roadmap
-    industry = session_data.get('industry', 'general business')
-    location = session_data.get('location', 'United States')
+    from utils.business_context import prompt_labels
+
+    labels = prompt_labels(session_data)
+    industry = labels['industry']
+    location = labels['location']
     
     current_year = datetime.now().year
     previous_year = current_year - 1
@@ -535,8 +521,8 @@ Your roadmap is complete, researched, and ready for execution. The next phase wi
         "plan": roadmap_content,
         "generated_at": datetime.now().isoformat(),
         "research_conducted": True,
-        "industry": session_data['industry'],
-        "location": session_data['location'],
+        "industry": session_data.get('industry', ''),
+        "location": session_data.get('location', ''),
         "reference_document": "Roadmap Deep Research Questions V3"
     }
 
@@ -834,12 +820,6 @@ async def generate_comprehensive_business_plan_summary(history, session=None):
         except Exception as e:
             print(f"Business info extraction failed: {e}")
     
-    # Set defaults only if still missing
-    session_data.setdefault('business_name', 'Your Business')
-    session_data.setdefault('industry', 'General Business')
-    session_data.setdefault('location', 'United States')
-    session_data.setdefault('business_type', 'Startup')
-
     BUSINESS_PLAN_SUMMARY_TEMPLATE = """
 # COMPREHENSIVE BUSINESS PLAN SUMMARY
 ## {business_name}
@@ -992,6 +972,10 @@ This comprehensive business plan provides the foundation for creating a detailed
 *This summary was generated based on your detailed responses during the business planning phase and represents the comprehensive foundation for your entrepreneurial journey.*
 """
 
+    from utils.business_context import prompt_labels
+
+    labels = prompt_labels(session_data)
+
     messages = [
         {
             "role": "system",
@@ -1024,9 +1008,9 @@ This comprehensive business plan provides the foundation for creating a detailed
                 "**CRITICAL REQUIREMENTS:**\n"
                 "- Extract ACTUAL information from the conversation - DO NOT use placeholders like [Not Provided], [Extracted from...], or [COMPLETE]\n"
                 "- Replace ALL template placeholders with real data from the conversation\n"
-                "- Use the actual business name: " + str(session_data.get('business_name', 'Your Business')) + "\n"
-                "- Use the actual industry: " + str(session_data.get('industry', 'General Business')) + "\n"
-                "- Use the actual location: " + str(session_data.get('location', 'United States')) + "\n"
+                "- Use the actual business name: " + labels['business_name'] + "\n"
+                "- Use the actual industry: " + labels['industry'] + "\n"
+                "- Use the actual location: " + labels['location'] + "\n"
                 "- Extract mission statement, value proposition, target market, revenue model, and ALL other details from the conversation\n"
                 "- If information is not available, say 'Not yet specified' instead of using placeholders\n\n"
                 "Session Data: " + json.dumps(session_data, indent=2) + "\n\n"

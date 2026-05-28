@@ -14,6 +14,7 @@ from services.appendices_integration_service import (
 from services.credible_resources_service import credible_resources_manager, get_credible_resources_for_query
 from services.deep_research_training_service import deep_research_training_manager, conduct_agent_deep_research, AgentType
 from middlewares.auth import verify_auth_token
+from utils.business_context import fetch_authoritative_business_context
 from datetime import datetime
 import json
 
@@ -29,13 +30,7 @@ async def get_comprehensive_ux_data_endpoint(session_id: str, request: Request):
     user_id = request.state.user["id"]
     
     try:
-        # Get business context (you'll need to implement this based on your session service)
-        business_context = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
-        }
+        business_context = await fetch_authoritative_business_context(session_id, user_id)
         
         # Get current task (you'll need to implement this based on your session service)
         current_task = "business_structure_selection"
@@ -59,12 +54,7 @@ async def get_progress_indicators(session_id: str, request: Request):
     user_id = request.state.user["id"]
     
     try:
-        business_context = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
-        }
+        business_context = await fetch_authoritative_business_context(session_id, user_id)
         
         progress_indicators = await appendices_integration_service.get_comprehensive_progress_indicators(session_id, business_context)
         
@@ -96,12 +86,7 @@ async def get_dynamic_prompts(session_id: str, request: Request, current_task: O
     user_id = request.state.user["id"]
     
     try:
-        business_context = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
-        }
+        business_context = await fetch_authoritative_business_context(session_id, user_id)
         
         prompts = await generate_dynamic_prompts(session_id, business_context, current_task)
         
@@ -134,12 +119,7 @@ async def get_interactive_commands(session_id: str, request: Request, current_ta
     user_id = request.state.user["id"]
     
     try:
-        business_context = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
-        }
+        business_context = await fetch_authoritative_business_context(session_id, user_id)
         
         commands = await appendices_integration_service.get_interactive_commands(session_id, business_context, current_task)
         
@@ -168,12 +148,7 @@ async def get_flexible_navigation(session_id: str, request: Request):
     user_id = request.state.user["id"]
     
     try:
-        business_context = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
-        }
+        business_context = await fetch_authoritative_business_context(session_id, user_id)
         
         navigation_items = await appendices_integration_service.get_flexible_navigation(session_id, business_context)
         
@@ -204,12 +179,7 @@ async def process_completion_declaration_endpoint(session_id: str, request: Requ
     user_id = request.state.user["id"]
     
     try:
-        business_context = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
-        }
+        business_context = await fetch_authoritative_business_context(session_id, user_id)
         
         # Create completion declaration object
         declaration = CompletionDeclaration(
@@ -370,12 +340,7 @@ async def execute_interactive_command(session_id: str, request: Request, command
         if not command:
             raise HTTPException(status_code=400, detail="Command is required")
         
-        business_context = {
-            "business_name": "Your Business",
-            "industry": "Technology",
-            "location": "San Francisco, CA",
-            "business_type": "Startup"
-        }
+        business_context = await fetch_authoritative_business_context(session_id, user_id)
         
         # Execute command based on type
         if command == "help":

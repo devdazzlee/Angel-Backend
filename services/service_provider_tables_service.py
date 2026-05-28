@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 from services.rag_service import research_service_providers_rag
 from services.specialized_agents_service import agents_manager
+from utils.business_context import prompt_labels
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -100,13 +101,14 @@ class ServiceProviderTableGenerator:
         if cache_key in _local_providers_cache:
             return _local_providers_cache[cache_key][:count]
         
+        labels = prompt_labels(business_context)
         prompt = f"""
         Generate a list of {count} REALISTIC local {provider_type} businesses in {location} for the {category} category.
         
         Business Context:
-        - Location: {location}
-        - Industry: {business_context.get('industry', 'general business')}
-        - Business Type: {business_context.get('business_type', 'startup')}
+        - Location: {location or labels['location']}
+        - Industry: {labels['industry']}
+        - Business Type: {labels['business_type']}
         
         For each business, provide:
         1. Name: Realistic business name (use common naming patterns for {location})
@@ -501,16 +503,20 @@ class ServiceProviderTableGenerator:
         """Create structured provider data"""
         
         # Generate providers using AI with RAG research
+        from utils.business_context import prompt_labels
+
+        labels = prompt_labels(business_context)
+        target_location = location or labels['location']
         provider_prompt = f"""
         Generate a comprehensive list of service providers for {category_info['name']} based on the following context:
         
         Business Context:
-        - Industry: {business_context.get('industry', 'General Business')}
-        - Location: {business_context.get('location', 'United States')}
-        - Business Type: {business_context.get('business_type', 'Startup')}
-        - Business Name: {business_context.get('business_name', 'Your Business')}
+        - Industry: {labels['industry']}
+        - Location: {labels['location']}
+        - Business Type: {labels['business_type']}
+        - Business Name: {labels['business_name']}
         
-        Target Location: {location or business_context.get('location', 'United States')}
+        Target Location: {target_location}
         
         Subcategories: {', '.join(category_info['subcategories'])}
         
@@ -611,14 +617,16 @@ class ServiceProviderTableGenerator:
     
     def _generate_fallback_providers(self, category: str, category_info: Dict[str, Any], business_context: Dict[str, Any], location: str) -> List[Dict[str, Any]]:
         """Generate fallback providers when AI generation fails"""
-        
+        labels = prompt_labels(business_context)
+        industry_label = labels["industry"]
+
         fallback_providers = {
             "legal": [
                 {
                     "name": "Local Business Attorney",
                     "type": "Legal Professional",
                     "local": True,
-                    "description": f"Local attorney specializing in {business_context.get('industry', 'business')} law and business formation",
+                    "description": f"Local attorney specializing in {industry_label} law and business formation",
                     "key_considerations": "Industry experience, local knowledge, cost structure",
                     "estimated_cost": "$200-500/hour",
                     "contact_method": "Local bar association or referrals",
@@ -640,7 +648,7 @@ class ServiceProviderTableGenerator:
                     "name": "Local CPA Firm",
                     "type": "Accounting Professional",
                     "local": True,
-                    "description": f"Certified Public Accountant specializing in {business_context.get('industry', 'small business')} accounting",
+                    "description": f"Certified Public Accountant specializing in {industry_label} accounting",
                     "key_considerations": "Industry expertise, local tax knowledge, ongoing support",
                     "estimated_cost": "$150-300/hour",
                     "contact_method": "Local CPA directory or referrals",
@@ -662,7 +670,7 @@ class ServiceProviderTableGenerator:
                     "name": "Local Marketing Agency",
                     "type": "Marketing Professional",
                     "local": True,
-                    "description": f"Full-service marketing agency with {business_context.get('industry', 'local business')} experience",
+                    "description": f"Full-service marketing agency with {industry_label} experience",
                     "key_considerations": "Local market knowledge, full-service capabilities, ongoing support",
                     "estimated_cost": "$2,000-10,000/month",
                     "contact_method": "Local business directory or referrals",

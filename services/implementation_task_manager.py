@@ -6,6 +6,7 @@ from typing import Dict, List, Any, Optional
 from services.specialized_agents_service import agents_manager
 from services.rag_service import conduct_rag_research, validate_with_rag, generate_rag_insights
 from services.service_provider_tables_service import generate_provider_table, get_task_providers
+from utils.business_context import prompt_labels
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -118,9 +119,9 @@ class ImplementationTaskManager:
         
         Task Context:
         - Task ID: {task_id}
-        - Business: {session_data.get('business_name', 'Your Business')}
-        - Industry: {session_data.get('industry', 'General Business')}
-        - Location: {session_data.get('location', 'United States')}
+        - Business: {prompt_labels(session_data)['business_name']}
+        - Industry: {prompt_labels(session_data)['industry']}
+        - Location: {prompt_labels(session_data)['location']}
         
         Requirements:
         1. Generate exactly 3-5 substeps (prefer 4-5 for completeness)

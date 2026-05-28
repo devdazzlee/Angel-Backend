@@ -1,6 +1,7 @@
 from openai import AsyncOpenAI
 import os
 from datetime import datetime
+from utils.business_context import coerce_business_context, prompt_labels, clean_context_value
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -19,13 +20,18 @@ async def generate_founderport_style_roadmap(session_data, history):
     With specific task descriptions like "Form Your California C-Corporation (Founderport, Inc.)"
     """
     
-    # Extract key business information
-    business_name = session_data.get('business_name', 'Your Business')
-    founder_name = session_data.get('founder_name') or session_data.get('user_name') or 'Founder'
-    location = session_data.get('location', 'United States')
-    legal_structure = session_data.get('business_structure') or session_data.get('legal_structure') or 'LLC'
-    industry = session_data.get('industry', 'General Business')
-    business_type = session_data.get('business_type', 'Startup')
+    ctx = coerce_business_context(session_data)
+    labels = prompt_labels(ctx)
+    business_name = labels["business_name"]
+    founder_name = clean_context_value(
+        session_data.get("founder_name") or session_data.get("user_name")
+    ) or "the founder"
+    location = labels["location"]
+    industry = labels["industry"]
+    business_type = labels["business_type"]
+    legal_structure = clean_context_value(
+        session_data.get("business_structure") or session_data.get("legal_structure")
+    ) or "the chosen legal structure"
     
     # Extract state from location if possible
     state = extract_state_from_location(location)

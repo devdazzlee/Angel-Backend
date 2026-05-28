@@ -5,6 +5,7 @@ import random
 from datetime import datetime
 from typing import Dict, List, Optional
 from utils.constant import ANGEL_SYSTEM_PROMPT
+from utils.business_context import prompt_labels
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -224,9 +225,10 @@ async def get_service_provider_preview(business_context: Dict) -> List[Dict]:
     - At least 1 local provider
     """
     
-    industry = business_context.get('industry', '').lower()
-    business_type = business_context.get('business_type', '').lower()
-    location = business_context.get('location', 'United States')
+    labels = prompt_labels(business_context)
+    industry = labels['industry'].lower()
+    business_type = labels['business_type'].lower()
+    location = labels['location']
     
     providers = []
     
@@ -299,10 +301,11 @@ async def get_service_provider_preview(business_context: Dict) -> List[Dict]:
 async def generate_implementation_insights(business_context: Dict, roadmap_content: str) -> str:
     """Generate research-backed implementation insights using RAG"""
     
-    business_name = business_context.get('business_name', 'Your Business')
-    industry = business_context.get('industry', 'general business')
-    location = business_context.get('location', 'United States')
-    business_type = business_context.get('business_type', 'startup')
+    labels = prompt_labels(business_context)
+    business_name = labels['business_name']
+    industry = labels['industry']
+    location = labels['location']
+    business_type = labels['business_type']
     
     # Create comprehensive insights prompt
     insights_prompt = f"""
@@ -348,12 +351,9 @@ async def generate_implementation_insights(business_context: Dict, roadmap_conte
 async def prepare_implementation_transition(session_data: Dict, roadmap_content: str) -> Dict:
     """Prepare comprehensive implementation transition data"""
     
-    business_context = {
-        "business_name": session_data.get('business_name', 'Your Business'),
-        "industry": session_data.get('industry', 'general business'),
-        "location": session_data.get('location', 'United States'),
-        "business_type": session_data.get('business_type', 'startup')
-    }
+    from utils.business_context import coerce_business_context
+
+    business_context = coerce_business_context(session_data)
     
     try:
         # Get motivational quote
