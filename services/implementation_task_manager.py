@@ -6,9 +6,47 @@ from typing import Dict, List, Any, Optional
 from services.specialized_agents_service import agents_manager
 from services.rag_service import conduct_rag_research, validate_with_rag, generate_rag_insights
 from services.service_provider_tables_service import generate_provider_table, get_task_providers
-from utils.business_context import prompt_labels
+from utils.business_context import prompt_labels, is_meaningful_context_value, clean_context_value
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+STRUCTURE_TASK_ID = "business_structure_selection"
+
+# Substep titles that duplicate Business Plan Q24 / GKY — never show on later tasks.
+STRUCTURE_SUBSTEP_TITLE_PATTERNS = (
+    "choose business structure",
+    "select business structure",
+    "pick business structure",
+    "decide on business structure",
+    "business structure option",
+    "choose your structure",
+    "select your structure",
+    "choose legal structure",
+    "select legal structure",
+)
+
+TASK_DISPLAY_TITLES: Dict[str, str] = {
+    STRUCTURE_TASK_ID: "Confirm Business Structure",
+    "business_registration": "Register Your Business",
+    "tax_id_application": "Apply for Tax ID (EIN)",
+    "permits_licenses": "Obtain Permits & Licenses",
+    "insurance_requirements": "Set Up Business Insurance",
+    "business_bank_account": "Open Business Bank Account",
+    "accounting_system": "Set Up Accounting System",
+    "budget_planning": "Create Operating Budget",
+    "funding_strategy": "Define Funding Strategy",
+    "financial_tracking": "Set Up Financial Tracking",
+}
+
+
+def has_business_structure_decision(session_data: Dict[str, Any]) -> bool:
+    """True when the founder already chose a structure in Business Plan / session context."""
+    for key in ("legal_structure", "business_structure"):
+        value = clean_context_value(session_data.get(key))
+        if is_meaningful_context_value(value):
+            return True
+    return False
+
 
 class ImplementationTaskManager:
     """Manages implementation tasks with RAG-powered guidance and service providers"""
@@ -74,7 +112,7 @@ class ImplementationTaskManager:
         """
         
         # Determine current phase and next task
-        current_phase, next_task_id = self._determine_next_task(completed_tasks)
+        current_phase, next_task_id = self._determine_next_task(completed_tasks, session_data)
         
         if not next_task_id:
             return {"status": "completed", "message": "All implementation tasks completed"}
@@ -84,6 +122,7 @@ class ImplementationTaskManager:
         
         # CRITICAL: Decompose task into 3-5 synchronous substeps
         substeps = await self._generate_substeps(next_task_id, session_data)
+        substeps = self._filter_redundant_structure_substeps(next_task_id, substeps, session_data)
         task_details["substeps"] = substeps
         task_details["current_substep"] = self._get_current_substep(completed_tasks, next_task_id, substeps)
         
@@ -129,6 +168,7 @@ class ImplementationTaskManager:
         3. Each substep should be clear, actionable, and help complete the task
         4. Substeps should build upon each other logically
         5. Include what the user needs to do and what Angel can help with
+        6. Do NOT include a substep about choosing or selecting business/legal structure unless this task IS business structure selection — that was completed in the Business Plan questionnaire.
         
         Return as JSON array with format:
         [
@@ -168,12 +208,70 @@ class ImplementationTaskManager:
             elif len(substeps) > 5:
                 substeps = substeps[:5]  # Limit to 5
             
-            return substeps[:5]  # Ensure max 5 substeps
+            substeps = substeps[:5]
+            return self._filter_redundant_structure_substeps(task_id, substeps, session_data)
             
         except Exception as e:
             print(f"Error generating substeps: {e}")
             # Fallback to predefined substeps
-            return self._get_predefined_substeps(task_id)
+            return self._filter_redundant_structure_substeps(
+                task_id, self._get_predefined_substeps(task_id), session_data
+            )
+
+    def _filter_redundant_structure_substeps(
+        self,
+        task_id: str,
+        substeps: List[Dict[str, Any]],
+        session_data: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Remove structure-selection substeps when structure was already chosen in Business Plan."""
+        if not substeps:
+            return substeps
+
+        skip_structure_titles = task_id != STRUCTURE_TASK_ID and has_business_structure_decision(
+            session_data
+        )
+
+        filtered: List[Dict[str, Any]] = []
+        for substep in substeps:
+            title = (substep.get("title") or "").lower()
+            if skip_structure_titles and any(pattern in title for pattern in STRUCTURE_SUBSTEP_TITLE_PATTERNS):
+                continue
+            filtered.append(substep)
+
+        if not filtered:
+            filtered = substeps
+
+        for index, substep in enumerate(filtered, start=1):
+            substep["step_number"] = index
+
+        return filtered
+
+    def apply_structure_prerequisite_completion(
+        self, session_data: Dict[str, Any], completed_tasks: List[str]
+    ) -> tuple[List[str], bool]:
+        """
+        When Business Plan Q24 already captured legal structure, mark the
+        business_structure_selection implementation task (and its substeps) complete
+        so Implementation starts at registration — not a duplicate structure step.
+        """
+        if not has_business_structure_decision(session_data):
+            return completed_tasks, False
+
+        updated = list(dict.fromkeys(completed_tasks))
+        changed = False
+
+        if STRUCTURE_TASK_ID not in updated:
+            updated.append(STRUCTURE_TASK_ID)
+            changed = True
+
+        for substep in self._get_predefined_substeps(STRUCTURE_TASK_ID):
+            substep_id = f"{STRUCTURE_TASK_ID}_substep_{substep.get('step_number', 0)}"
+            if substep_id not in updated:
+                updated.append(substep_id)
+                changed = True
+
+        return updated, changed
     
     def _get_predefined_substeps(self, task_id: str) -> List[Dict[str, Any]]:
         """Get predefined substeps for common tasks"""
@@ -337,14 +435,23 @@ class ImplementationTaskManager:
             return substeps[-1].get('step_number', len(substeps))
         return 1  # Start with first substep
     
-    def _determine_next_task(self, completed_tasks: List[str]) -> tuple[str, str]:
+    def _determine_next_task(
+        self, completed_tasks: List[str], session_data: Optional[Dict[str, Any]] = None
+    ) -> tuple[Optional[str], Optional[str]]:
         """Determine the next task based on completed tasks"""
-        
+        session_data = session_data or {}
+
         for phase_key, phase_data in self.task_phases.items():
             for task_id in phase_data["tasks"]:
-                if task_id not in completed_tasks:
-                    return phase_key, task_id
-        
+                if task_id in completed_tasks:
+                    continue
+                if (
+                    task_id == STRUCTURE_TASK_ID
+                    and has_business_structure_decision(session_data)
+                ):
+                    continue
+                return phase_key, task_id
+
         return None, None
     
     async def _generate_task_details(self, task_id: str, session_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -398,7 +505,7 @@ class ImplementationTaskManager:
         """Generate task details without RAG research for faster response"""
         
         # Get task name and description
-        task_name = task_id.replace('_', ' ').title()
+        task_name = TASK_DISPLAY_TITLES.get(task_id, task_id.replace("_", " ").title())
         task_description = f"Complete the {task_name} process for your business"
         
         # Use predefined options for faster response

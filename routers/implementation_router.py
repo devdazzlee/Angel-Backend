@@ -10,6 +10,7 @@ from middlewares.auth import verify_auth_token
 from utils.business_context import (
     fetch_authoritative_business_context,
     business_context_from_session,
+    clean_context_value,
 )
 from openai import AsyncOpenAI
 import json
@@ -281,11 +282,22 @@ async def get_current_implementation_task(session_id: str, request: Request):
             extract_from_history=extract_business_context_from_history,
             patch_session=lambda sid, updates: patch_session(sid, user_id, updates),
         )
+        from services.business_identity_extractor import get_tagged_user_answer
+
+        chat_history = await fetch_chat_history(session_id)
+        legal_structure = (
+            clean_context_value(normalized_context.get("legal_structure"))
+            or clean_context_value(normalized_context.get("business_structure"))
+            or get_tagged_user_answer(chat_history, "legal_structure")
+        )
+
         session_data = {
             "business_name": normalized_context.get("business_name", ""),
             "industry": normalized_context.get("industry", ""),
             "location": normalized_context.get("location", ""),
             "business_type": normalized_context.get("business_type", ""),
+            "legal_structure": legal_structure,
+            "business_structure": legal_structure,
         }
         print(f"📊 Implementation task - business context ({ctx_source}): {session_data}")
         
@@ -335,6 +347,22 @@ async def get_current_implementation_task(session_id: str, request: Request):
         except Exception as e:
             print(f"Note: Could not fetch from implementation_tasks table: {e}")
             # Continue with business_context data
+
+        completed_tasks, structure_synced = task_manager.apply_structure_prerequisite_completion(
+            session_data, completed_tasks
+        )
+        if structure_synced:
+            business_context = dict(business_context) if isinstance(business_context, dict) else {}
+            business_context["completed_implementation_tasks"] = completed_tasks
+            if legal_structure:
+                business_context["legal_structure"] = legal_structure
+            await patch_session(session_id, user_id, {"business_context": business_context})
+            if cache_key in task_cache:
+                del task_cache[cache_key]
+            print(
+                "✅ Skipped duplicate business_structure_selection — "
+                f"structure already captured: {legal_structure}"
+            )
         
         # Get next task
         task_result = await task_manager.get_next_implementation_task(session_data, completed_tasks)
@@ -404,7 +432,8 @@ async def get_current_implementation_task(session_id: str, request: Request):
                     "phase_name": task_result["phase"],
                     "substeps": substeps,  # Include substeps
                     "current_substep": current_substep,  # Current substep number
-                    "business_context": session_data
+                    "business_context": session_data,
+                    "service_providers": task_result.get("service_providers") or [],
                 },
                 "progress": {
                     "completed": len([t for t in completed_tasks if '_substep_' not in t]),  # Main tasks only
@@ -671,8 +700,11 @@ async def complete_implementation_task(
             # If so, automatically mark the main task as completed
             session_data = business_context_from_session(session)
             
-            # Get all substeps for this task
+            # Get all substeps for this task (same filtering as GET /tasks)
             substeps = await task_manager._generate_substeps(task_id, session_data)
+            substeps = task_manager._filter_redundant_structure_substeps(
+                task_id, substeps, session_data
+            )
             
             # Check if all substeps are completed
             all_substeps_done = True
@@ -693,6 +725,9 @@ async def complete_implementation_task(
             
             # Get substeps for this specific task
             substeps = await task_manager._generate_substeps(task_id, session_data)
+            substeps = task_manager._filter_redundant_structure_substeps(
+                task_id, substeps, session_data
+            )
             
             # Mark all substeps as completed
             for substep in substeps:
