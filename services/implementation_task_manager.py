@@ -142,6 +142,155 @@ class ImplementationTaskManager:
             "estimated_time": self._get_estimated_time(next_task_id),
             "priority": self._get_priority(next_task_id)
         }
+
+    def count_substep_progress(
+        self, task_id: str, completed_tasks: List[str], substeps: List[Dict[str, Any]]
+    ) -> tuple[int, int]:
+        """Return (completed_substeps, total_substeps) for a task."""
+        total = len(substeps)
+        if total == 0:
+            return 0, 0
+        done = 0
+        for substep in substeps:
+            substep_id = f"{task_id}_substep_{substep.get('step_number', 0)}"
+            if substep_id in completed_tasks:
+                done += 1
+        return done, total
+
+    def resolve_task_status(
+        self,
+        task_id: str,
+        completed_tasks: List[str],
+        next_task_id: Optional[str],
+        substeps: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """
+        Status for roadmap navigation:
+        - completed: main task marked done
+        - in_progress: at least one substep done, main task not done
+        - current: queued as next sequential task
+        - not_started: otherwise (still selectable for preview)
+        """
+        if task_id in completed_tasks:
+            return "completed"
+
+        if substeps:
+            done, _total = self.count_substep_progress(task_id, completed_tasks, substeps)
+            if done > 0:
+                return "in_progress"
+
+        if next_task_id and task_id == next_task_id:
+            return "current"
+
+        return "not_started"
+
+    async def build_task_catalog(
+        self, session_data: Dict[str, Any], completed_tasks: List[str]
+    ) -> Dict[str, Any]:
+        """Full implementation queue with per-task status for roadmap navigation."""
+        _next_phase, next_task_id = self._determine_next_task(completed_tasks, session_data)
+        phases: List[Dict[str, Any]] = []
+
+        for phase_key, phase_data in self.task_phases.items():
+            phase_tasks: List[Dict[str, Any]] = []
+            for task_id in phase_data["tasks"]:
+                if (
+                    task_id == STRUCTURE_TASK_ID
+                    and has_business_structure_decision(session_data)
+                    and task_id not in completed_tasks
+                ):
+                    # Will be synced by apply_structure_prerequisite_completion on GET
+                    pass
+
+                substeps = self._filter_redundant_structure_substeps(
+                    task_id, self._get_predefined_substeps(task_id), session_data
+                )
+                substeps_done, substeps_total = self.count_substep_progress(
+                    task_id, completed_tasks, substeps
+                )
+                status = self.resolve_task_status(
+                    task_id, completed_tasks, next_task_id, substeps
+                )
+                phase_tasks.append(
+                    {
+                        "id": task_id,
+                        "title": TASK_DISPLAY_TITLES.get(
+                            task_id, task_id.replace("_", " ").title()
+                        ),
+                        "status": status,
+                        "substeps_completed": substeps_done,
+                        "substeps_total": substeps_total,
+                        "estimated_time": self._get_estimated_time(task_id),
+                        "priority": self._get_priority(task_id),
+                    }
+                )
+
+            phases.append(
+                {
+                    "id": phase_key,
+                    "name": phase_data["name"],
+                    "tasks": phase_tasks,
+                }
+            )
+
+        return {
+            "next_task_id": next_task_id,
+            "phases": phases,
+        }
+
+    async def get_implementation_task_by_id(
+        self,
+        task_id: str,
+        session_data: Dict[str, Any],
+        completed_tasks: List[str],
+        substep_notes_map: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Load any implementation task with substep completion state (for roadmap selection)."""
+        substep_notes_map = substep_notes_map or {}
+
+        phase_key = None
+        for key, phase_data in self.task_phases.items():
+            if task_id in phase_data["tasks"]:
+                phase_key = key
+                break
+        if not phase_key:
+            raise ValueError(f"Unknown implementation task: {task_id}")
+
+        task_details = await self._generate_task_details_fast(task_id, session_data)
+        substeps = await self._generate_substeps(task_id, session_data)
+        substeps = self._filter_redundant_structure_substeps(
+            task_id, substeps, session_data
+        )
+
+        active_substep_found = False
+        current_substep = 1
+        for substep in substeps:
+            substep_id = f"{task_id}_substep_{substep.get('step_number', 0)}"
+            is_completed = substep_id in completed_tasks
+            substep["completed"] = is_completed
+            substep["note"] = substep_notes_map.get(substep_id, "")
+
+            if not active_substep_found and not is_completed:
+                current_substep = substep.get("step_number", 1)
+                active_substep_found = True
+
+        if not active_substep_found and substeps:
+            current_substep = substeps[-1].get("step_number", len(substeps))
+
+        task_details["substeps"] = substeps
+        task_details["current_substep"] = current_substep
+
+        service_providers = self._get_predefined_service_providers(task_id, session_data)
+
+        return {
+            "task_id": task_id,
+            "phase": phase_key,
+            "task_details": task_details,
+            "service_providers": service_providers,
+            "angel_actions": self._get_angel_actions(task_id),
+            "estimated_time": self._get_estimated_time(task_id),
+            "priority": self._get_priority(task_id),
+        }
     
     async def _generate_substeps(self, task_id: str, session_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Generate 3-5 synchronous substeps for a roadmap task

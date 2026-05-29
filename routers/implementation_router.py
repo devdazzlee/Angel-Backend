@@ -252,6 +252,130 @@ def _get_phase_from_task_id(task_id: str) -> str:
     # Default fallback
     return "legal_formation"
 
+
+def _format_implementation_task_wire(
+    task_result: Dict[str, Any],
+    session_data: Dict[str, Any],
+    substeps: List[Dict[str, Any]],
+    current_substep: int,
+) -> Dict[str, Any]:
+    """API shape for TaskCard / roadmap expansion."""
+    return {
+        "id": task_result["task_id"],
+        "title": task_result["task_details"].get("title", "Implementation Task"),
+        "description": task_result["task_details"].get("description", ""),
+        "purpose": task_result["task_details"].get("purpose", ""),
+        "options": task_result["task_details"].get("options", []),
+        "angel_actions": task_result.get("angel_actions", []),
+        "estimated_time": task_result.get("estimated_time", ""),
+        "priority": task_result.get("priority", ""),
+        "phase_name": task_result.get("phase", ""),
+        "substeps": substeps,
+        "current_substep": current_substep,
+        "business_context": session_data,
+        "service_providers": task_result.get("service_providers") or [],
+    }
+
+
+async def _load_implementation_session_context(
+    session_id: str, user_id: str
+) -> Dict[str, Any]:
+    """Shared session + completion state for implementation task endpoints."""
+    session = await get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from services.angel_service import extract_business_context_from_history
+    from utils.business_context import ensure_session_business_context
+    from services.business_identity_extractor import get_tagged_user_answer
+
+    normalized_context, _ctx_source, _ctx_updated = await ensure_session_business_context(
+        session_id,
+        session,
+        fetch_history=fetch_chat_history,
+        extract_from_history=extract_business_context_from_history,
+        patch_session=lambda sid, updates: patch_session(sid, user_id, updates),
+    )
+
+    chat_history = await fetch_chat_history(session_id)
+    legal_structure = (
+        clean_context_value(normalized_context.get("legal_structure"))
+        or clean_context_value(normalized_context.get("business_structure"))
+        or get_tagged_user_answer(chat_history, "legal_structure")
+    )
+
+    session_data = {
+        "business_name": normalized_context.get("business_name", ""),
+        "industry": normalized_context.get("industry", ""),
+        "location": normalized_context.get("location", ""),
+        "business_type": normalized_context.get("business_type", ""),
+        "legal_structure": legal_structure,
+        "business_structure": legal_structure,
+    }
+
+    business_context = session.get("business_context", {}) or {}
+    if not isinstance(business_context, dict):
+        business_context = {}
+
+    completed_tasks: List[str] = list(
+        business_context.get("completed_implementation_tasks", []) or []
+    )
+
+    try:
+        from db.supabase import supabase
+
+        task_records = (
+            supabase.from_("implementation_tasks")
+            .select("task_name, metadata")
+            .eq("session_id", session_id)
+            .not_.is_("completed_at", "null")
+            .execute()
+        )
+        if task_records.data:
+            for record in task_records.data:
+                task_name = record.get("task_name")
+                metadata = record.get("metadata", {})
+                task_id = metadata.get("task_id") if isinstance(metadata, dict) else task_name
+                substep_number = (
+                    metadata.get("substep_number") if isinstance(metadata, dict) else None
+                )
+                if not task_id:
+                    task_id = task_name
+                if not task_id:
+                    continue
+                if substep_number:
+                    substep_id = f"{task_id}_substep_{substep_number}"
+                    if substep_id not in completed_tasks:
+                        completed_tasks.append(substep_id)
+                elif task_id not in completed_tasks:
+                    completed_tasks.append(task_id)
+            completed_tasks = list(set(completed_tasks))
+    except Exception as e:
+        print(f"Note: Could not fetch from implementation_tasks table: {e}")
+
+    completed_tasks, structure_synced = task_manager.apply_structure_prerequisite_completion(
+        session_data, completed_tasks
+    )
+    if structure_synced:
+        business_context = dict(business_context)
+        business_context["completed_implementation_tasks"] = completed_tasks
+        if legal_structure:
+            business_context["legal_structure"] = legal_structure
+        await patch_session(session_id, user_id, {"business_context": business_context})
+
+    substep_notes_map = business_context.get("substep_notes") or {}
+    if not isinstance(substep_notes_map, dict):
+        substep_notes_map = {}
+
+    return {
+        "session": session,
+        "session_data": session_data,
+        "business_context": business_context,
+        "completed_tasks": completed_tasks,
+        "substep_notes_map": substep_notes_map,
+    }
+
+
 @router.get("/sessions/{session_id}/tasks")
 async def get_current_implementation_task(session_id: str, request: Request):
     """Get the current implementation task for a session"""
@@ -367,11 +491,16 @@ async def get_current_implementation_task(session_id: str, request: Request):
         # Get next task
         task_result = await task_manager.get_next_implementation_task(session_data, completed_tasks)
         
+        catalog = await task_manager.build_task_catalog(session_data, completed_tasks)
+
         if task_result.get("status") == "completed":
             response_data = {
                 "success": True,
                 "message": "All implementation tasks completed",
                 "current_task": None,
+                "completed_tasks": completed_tasks,
+                "next_task_id": None,
+                "task_catalog": catalog.get("phases", []),
                 "progress": {
                     "completed": 25,
                     "total": 25,
@@ -420,21 +549,12 @@ async def get_current_implementation_task(session_id: str, request: Request):
             response_data = {
                 "success": True,
                 "message": "Current implementation task retrieved",
-                "current_task": {
-                    "id": task_result["task_id"],
-                    "title": task_result["task_details"].get("title", "Implementation Task"),
-                    "description": task_result["task_details"].get("description", ""),
-                    "purpose": task_result["task_details"].get("purpose", ""),
-                    "options": task_result["task_details"].get("options", []),
-                    "angel_actions": task_result["angel_actions"],
-                    "estimated_time": task_result["estimated_time"],
-                    "priority": task_result["priority"],
-                    "phase_name": task_result["phase"],
-                    "substeps": substeps,  # Include substeps
-                    "current_substep": current_substep,  # Current substep number
-                    "business_context": session_data,
-                    "service_providers": task_result.get("service_providers") or [],
-                },
+                "current_task": _format_implementation_task_wire(
+                    task_result, session_data, substeps, current_substep
+                ),
+                "completed_tasks": completed_tasks,
+                "next_task_id": catalog.get("next_task_id"),
+                "task_catalog": catalog.get("phases", []),
                 "progress": {
                     "completed": len([t for t in completed_tasks if '_substep_' not in t]),  # Main tasks only
                     "total": 25,
@@ -458,7 +578,40 @@ async def get_current_implementation_task(session_id: str, request: Request):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get implementation task: {str(e)}")
-    
+
+
+@router.get("/sessions/{session_id}/tasks/{task_id}")
+async def get_implementation_task_by_id(
+    session_id: str, task_id: str, request: Request
+):
+    """Load any implementation task by id for roadmap navigation (not only the sequential next task)."""
+    user_id = request.state.user["id"]
+
+    try:
+        ctx = await _load_implementation_session_context(session_id, user_id)
+        session_data = ctx["session_data"]
+        completed_tasks = ctx["completed_tasks"]
+        substep_notes_map = ctx["substep_notes_map"]
+
+        task_result = await task_manager.get_implementation_task_by_id(
+            task_id, session_data, completed_tasks, substep_notes_map
+        )
+        substeps = task_result["task_details"].get("substeps", [])
+        current_substep = task_result["task_details"].get("current_substep", 1)
+
+        return {
+            "success": True,
+            "task": _format_implementation_task_wire(
+                task_result, session_data, substeps, current_substep
+            ),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to load implementation task: {str(e)}"
+        )
+
 
 # REMOVED: Duplicate endpoint - using the one below at line 614 instead
 # This old endpoint was slow because it called RAG validation
