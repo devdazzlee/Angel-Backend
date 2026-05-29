@@ -1040,19 +1040,48 @@ async def patch_session_context_from_response(session_id, response_content, tag,
         print(f"🔧 Skipping session context extraction for command word: {response_content}")
         return
     
-    # Skip if response is too long (likely from Support/Draft commands)
-    if len(response_content) > 500:
+    identity_tags = (
+        "BUSINESS_PLAN.05",
+        "BP.05",
+        "BUSINESS_PLAN.06",
+        "BP.06",
+        "BUSINESS_PLAN.14",
+        "BP.14",
+    )
+    # Skip long Support/Draft blobs — except BP identity answers (we normalize to short labels).
+    if len(response_content) > 500 and tag not in identity_tags:
         print(f"🔧 Skipping session context extraction for long response ({len(response_content)} chars)")
         return
-    
-    # Only extract from GKY questions
-    if not tag or not tag.startswith("GKY."):
+
+    # GKY + BP identity questions (authoritative questionnaire answers)
+    if not tag:
         return
 
-    # Extract key information based on GKY question (GKY.01-GKY.05)
     new_fields = {}
-    
-    if tag == "GKY.01":  # Name and preferred name
+
+    if tag in ("BUSINESS_PLAN.05", "BP.05"):
+        from services.business_identity_extractor import (
+            bp05_answer_hash,
+            extract_business_name_from_user_answer,
+        )
+
+        name = await extract_business_name_from_user_answer(response_content)
+        if name:
+            new_fields["business_name"] = name
+            new_fields["bp05_raw_answer_hash"] = bp05_answer_hash(response_content)
+    elif tag in ("BUSINESS_PLAN.06", "BP.06"):
+        from services.business_identity_extractor import extract_industry_from_user_answer
+
+        industry = await extract_industry_from_user_answer(response_content)
+        if industry:
+            new_fields["industry"] = industry
+    elif tag in ("BUSINESS_PLAN.14", "BP.14"):
+        location = response_content.strip()
+        if location and len(location) < 120:
+            new_fields["location"] = location.split("\n")[0].strip()
+    elif not tag.startswith("GKY."):
+        return
+    elif tag == "GKY.01":  # Name and preferred name
         new_fields["user_name"] = response_content.strip()
     elif tag == "GKY.02":  # Have you started a business before?
         new_fields["has_business_experience"] = "yes" in response_content.lower()
@@ -1073,7 +1102,7 @@ async def patch_session_context_from_response(session_id, response_content, tag,
     
     merged_ctx = {**existing_ctx, **new_fields}
     
-    print(f"📝 Extracting GKY context into business_context: {list(new_fields.keys())}")
+    print(f"📝 Extracting questionnaire context into business_context: {list(new_fields.keys())}")
     await patch_session(session_id, {"business_context": merged_ctx})
     
     # Keep in-memory session consistent
@@ -1833,34 +1862,63 @@ async def generate_enhanced_roadmap(session_id: str, request: Request):
 
 @router.post("/sessions/{session_id}/modify-roadmap")
 async def modify_roadmap(session_id: str, request: Request):
-    """Modify the roadmap content with user edits"""
+    """Persist user-edited roadmap markdown into session.roadmap_data (JSONB)."""
     user_id = request.state.user["id"]
     session = await get_session(session_id, user_id)
-    
+
     try:
         payload = await request.json()
-        modified_content = payload.get("modified_content", "")
-        
+        modified_content = (payload.get("modified_content") or "").strip()
+
         if not modified_content:
             return {
                 "success": False,
-                "message": "No modified content provided"
+                "message": "No modified content provided",
             }
-        
-        # Store the modified roadmap in the session
-        session["modified_roadmap"] = modified_content
-        session["roadmap_modified_at"] = datetime.now().isoformat()
-        await patch_session(session_id, session)
-        
+
+        roadmap_data = session.get("roadmap_data") or {}
+        modified_at = datetime.now().isoformat()
+
+        if isinstance(roadmap_data, dict):
+            roadmap_payload = dict(roadmap_data)
+            roadmap_payload["content"] = modified_content
+            metadata = roadmap_payload.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["modified_at"] = modified_at
+            roadmap_payload["metadata"] = metadata
+        elif isinstance(roadmap_data, str):
+            roadmap_payload = {
+                "content": modified_content,
+                "structured_steps": [],
+                "tasks": [],
+                "metadata": {"modified_at": modified_at, "generated_at": modified_at},
+            }
+        else:
+            roadmap_payload = {
+                "content": modified_content,
+                "structured_steps": [],
+                "tasks": [],
+                "metadata": {"modified_at": modified_at},
+            }
+
+        updated = await patch_session(session_id, user_id, {"roadmap_data": roadmap_payload})
+        if not updated:
+            return {
+                "success": False,
+                "message": "Failed to save roadmap to session",
+            }
+
         return {
             "success": True,
             "message": "Roadmap modified successfully",
-            "modified_at": session["roadmap_modified_at"]
+            "modified_at": modified_at,
         }
     except Exception as e:
+        print(f"❌ modify-roadmap failed for session {session_id}: {e}")
         return {
             "success": False,
-            "message": f"Error modifying roadmap: {str(e)}"
+            "message": f"Error modifying roadmap: {str(e)}",
         }
 
 @router.get("/sessions/{session_id}/implementation-insights")

@@ -124,15 +124,17 @@ async def extract_business_context_from_history_api(
         
         print(f"🔍 Current stored context: business_name='{current_business_name}', industry='{current_industry}', location='{current_location}', type='{current_business_type}'")
         
-        # Check if any values are invalid/need extraction
+        from services.business_identity_extractor import is_valid_business_name, is_valid_industry_label
+
         invalid_values = ["", "unsure", "your business", "none", "n/a", "not specified"]
         needs_extraction = (
-            str(current_business_name).lower().strip() in invalid_values or
-            str(current_industry).lower().strip() in invalid_values or
-            str(current_location).lower().strip() in invalid_values or
-            str(current_business_type).lower().strip() in invalid_values
+            not is_valid_business_name(str(current_business_name))
+            or str(current_industry).lower().strip() in invalid_values
+            or (current_industry and not is_valid_industry_label(str(current_industry)))
+            or str(current_location).lower().strip() in invalid_values
+            or str(current_business_type).lower().strip() in invalid_values
         )
-        
+
         if not needs_extraction:
             print(f"✅ Business context is valid, no extraction needed")
             return {
@@ -150,90 +152,21 @@ async def extract_business_context_from_history_api(
                 }
             }
         
-        # Fetch complete chat history from database
-        print(f"📊 Extracting business context from chat history for session {session_id}")
-        history = await fetch_chat_history(session_id)
-        print(f"📊 Found {len(history)} messages in chat history")
-        
-        # Get current industry and location for context
-        current_industry = stored_context.get("industry") or session.get("industry", "")
-        current_location = stored_context.get("location") or session.get("location", "")
-        
-        # Use AI to intelligently extract OR generate business name
-        ai_extraction = await ai_extract_or_generate_business_name(
-            history, 
-            industry=current_industry,
-            location=current_location
+        from utils.business_context import ensure_session_business_context
+
+        print(f"📊 Reconciling business context from tagged BP answers for session {session_id}")
+        final_context, source, updated = await ensure_session_business_context(
+            session_id,
+            session,
+            fetch_history=fetch_chat_history,
+            extract_from_history=extract_business_context_from_history,
+            patch_session=lambda sid, updates: patch_session(sid, user_id, updates),
         )
-        print(f"🤖 AI extraction result: {ai_extraction}")
-        
-        # Also use the weighted extraction function for other fields
-        extracted_context = extract_business_context_from_history(history)
-        print(f"📊 Pattern-based extraction: {extracted_context}")
-        
-        # Build final business context
-        final_context = {}
-        
-        # Business Name - Use AI extraction/generation
-        ai_business_name = ai_extraction.get("business_name", "")
-        ai_confidence = ai_extraction.get("confidence", "")
-        
-        if ai_business_name and ai_business_name != "NOT_FOUND" and ai_business_name.lower() not in invalid_values:
-            final_context["business_name"] = ai_business_name
-            if ai_confidence == "generated":
-                print(f"🎯 Using AI-GENERATED business name: '{ai_business_name}' (based on: {ai_extraction.get('reasoning')})")
-            else:
-                print(f"✅ Using AI-EXTRACTED business name: '{ai_business_name}' (confidence: {ai_confidence})")
-        else:
-            # Fall back to pattern-based extraction
-            extracted_name = extracted_context.get("business_name", "").strip()
-            if extracted_name and extracted_name.lower() not in invalid_values:
-                final_context["business_name"] = extracted_name
-                print(f"✅ Using pattern-extracted business name: '{extracted_name}'")
-            elif current_business_name and str(current_business_name).lower().strip() not in invalid_values:
-                final_context["business_name"] = current_business_name
-            else:
-                final_context["business_name"] = ""
-                print(f"⚠️ No valid business name found in chat history")
-        
-        # Industry
-        extracted_industry = extracted_context.get("industry", "").strip()
-        if extracted_industry and extracted_industry.lower() not in invalid_values:
-            final_context["industry"] = extracted_industry
-            print(f"✅ Using extracted industry: '{extracted_industry}'")
-        elif current_industry and str(current_industry).lower().strip() not in invalid_values:
-            final_context["industry"] = current_industry
-        else:
-            final_context["industry"] = ""
-        
-        # Location
-        extracted_location = extracted_context.get("location", "").strip()
-        if extracted_location and extracted_location.lower() not in invalid_values:
-            final_context["location"] = extracted_location
-            print(f"✅ Using extracted location: '{extracted_location}'")
-        elif current_location and str(current_location).lower().strip() not in invalid_values:
-            final_context["location"] = current_location
-        else:
-            final_context["location"] = ""
-        
-        # Business Type
-        extracted_type = extracted_context.get("business_type", "").strip()
-        if extracted_type and extracted_type.lower() not in invalid_values:
-            final_context["business_type"] = extracted_type
-            print(f"✅ Using extracted business type: '{extracted_type}'")
-        elif current_business_type and str(current_business_type).lower().strip() not in invalid_values:
-            final_context["business_type"] = current_business_type
-        else:
-            final_context["business_type"] = ""
-        
-        # Update session with extracted context
+        print(f"✅ Business context source={source} updated={updated} name={final_context.get('business_name')!r}")
+
         try:
-            await patch_session(
-                session_id,
-                user_id,
-                {"business_context": final_context}
-            )
-            print(f"✅ Updated session business_context in database")
+            if updated:
+                print(f"✅ Updated session business_context in database")
             
             # CRITICAL: Clear the task cache so next API call fetches fresh data
             from routers.implementation_router import task_cache
@@ -289,98 +222,38 @@ async def get_business_context_with_auto_extract(
         if not isinstance(stored_context, dict):
             stored_context = {}
         
-        business_name = stored_context.get("business_name") or session.get("business_name", "")
-        industry = stored_context.get("industry") or session.get("industry", "")
-        location = stored_context.get("location") or session.get("location", "")
-        business_type = stored_context.get("business_type") or session.get("business_type", "")
-        
-        # Check if extraction is needed
-        invalid_values = ["", "unsure", "your business", "none", "n/a", "not specified"]
-        needs_extraction = str(business_name).lower().strip() in invalid_values
-        
-        if needs_extraction:
-            print(f"🔍 Business name is invalid ('{business_name}'), extracting/generating from chat history...")
-            
-            # Fetch and extract from history using AI
-            history = await fetch_chat_history(session_id)
-            
-            # Use AI for intelligent extraction or generation
-            ai_extraction = await ai_extract_or_generate_business_name(
-                history,
-                industry=industry,
-                location=location
-            )
-            ai_business_name = ai_extraction.get("business_name", "")
-            ai_confidence = ai_extraction.get("confidence", "")
-            
-            if ai_business_name and ai_business_name != "NOT_FOUND" and ai_business_name.lower() not in invalid_values:
-                business_name = ai_business_name
-                if ai_confidence == "generated":
-                    print(f"🎯 AI-GENERATED business name: '{business_name}' (reasoning: {ai_extraction.get('reasoning')})")
-                else:
-                    print(f"✅ AI-EXTRACTED business name: '{business_name}' (confidence: {ai_confidence})")
-            else:
-                # Fallback to pattern-based extraction
-                extracted_context = extract_business_context_from_history(history)
-                if extracted_context.get("business_name") and extracted_context["business_name"].lower() not in invalid_values:
-                    business_name = extracted_context["business_name"]
-                    print(f"✅ Pattern-extracted business name: '{business_name}'")
-            
-            if extracted_context.get("industry") and extracted_context["industry"].lower() not in invalid_values:
-                industry = extracted_context["industry"]
-            
-            if extracted_context.get("location") and extracted_context["location"].lower() not in invalid_values:
-                location = extracted_context["location"]
-            
-            if extracted_context.get("business_type") and extracted_context["business_type"].lower() not in invalid_values:
-                business_type = extracted_context["business_type"]
-            
-            # Update session with extracted values
-            final_context = {
-                "business_name": business_name,
-                "industry": industry,
-                "location": location,
-                "business_type": business_type
-            }
-            
-            try:
-                await patch_session(session_id, user_id, {"business_context": final_context})
-                print(f"✅ Updated session with extracted context")
-                
-                # CRITICAL: Clear the task cache so next API call fetches fresh data
-                from routers.implementation_router import task_cache
-                cache_key = f"{session_id}_{user_id}"
-                if cache_key in task_cache:
-                    del task_cache[cache_key]
-                    print(f"🗑️ Cleared task cache for session {session_id}")
-                    
-            except Exception as e:
-                print(f"⚠️ Failed to update session: {e}")
-            
-            return {
-                "success": True,
-                "message": "Business context fetched and extracted from history",
-                "result": {
-                    "business_context": final_context,
-                    "source": "extracted_from_history",
-                    "updated": True
-                }
-            }
-        
-        # Return stored context (valid)
+        from utils.business_context import ensure_session_business_context
+
+        final_context, source, updated = await ensure_session_business_context(
+            session_id,
+            session,
+            fetch_history=fetch_chat_history,
+            extract_from_history=extract_business_context_from_history,
+            patch_session=lambda sid, updates: patch_session(sid, user_id, updates),
+        )
+
+        if updated:
+            from routers.implementation_router import task_cache
+
+            cache_key = f"{session_id}_{user_id}"
+            if cache_key in task_cache:
+                del task_cache[cache_key]
+
         return {
             "success": True,
-            "message": "Business context fetched",
+            "message": "Business context fetched"
+            if not updated
+            else "Business context reconciled from BP.05/BP.06 answers",
             "result": {
                 "business_context": {
-                    "business_name": business_name,
-                    "industry": industry,
-                    "location": location,
-                    "business_type": business_type
+                    "business_name": final_context.get("business_name", ""),
+                    "industry": final_context.get("industry", ""),
+                    "location": final_context.get("location", ""),
+                    "business_type": final_context.get("business_type", ""),
                 },
-                "source": "stored",
-                "updated": False
-            }
+                "source": source,
+                "updated": updated,
+            },
         }
         
     except Exception as e:

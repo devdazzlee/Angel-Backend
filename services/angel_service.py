@@ -502,7 +502,7 @@ async def _reply_modify_revision(
         {"role": "system", "content": modify_formatting},
     ]
 
-    grounding = build_business_grounding(session_data, history)
+    grounding = await build_business_grounding(session_data, history)
     if grounding:
         msgs.append({"role": "system", "content": grounding})
 
@@ -1794,22 +1794,19 @@ def _strip_business_plan_tags(reply: str) -> str:
 
 
 def _sanitize_business_identity_text(value: str | None, fallback: str) -> str:
-    """Clean noisy free-text labels before using them in prompts."""
-    raw = (value or "").strip()
+    """Reject invalid stored identity fields before using them in prompts."""
+    from services.business_identity_extractor import is_valid_business_name, is_valid_industry_label
+    from utils.business_context import clean_context_value
+
+    raw = clean_context_value(value)
     if not raw:
         return fallback
-    cleaned = re.sub(r"\s+", " ", raw).strip(" .,:;|-")
-    lower = cleaned.lower()
-    noisy_phrases = (
-        "not decided yet",
-        "not sure",
-        "maybe something like",
-        "i'm not fully sure",
-        "i am not fully sure",
-    )
-    if any(p in lower for p in noisy_phrases):
-        return fallback
-    return cleaned[:80]
+    if fallback == "your business":
+        return raw if is_valid_business_name(raw) else fallback
+    if fallback == "your industry":
+        return raw if is_valid_industry_label(raw) else fallback
+    cleaned = re.sub(r"\s+", " ", raw).strip(" .,:;|-")[:80]
+    return cleaned or fallback
 
 
 def format_static_business_plan_question(question_tag: str) -> str:
@@ -3811,23 +3808,42 @@ Do NOT include question numbers, progress percentages, or step counts in your re
 """
 
 
-def build_business_grounding(session_data: Optional[dict], history: list) -> str:
+async def build_business_grounding(session_data: Optional[dict], history: list) -> str:
     """Return a system-prompt snippet that grounds the LLM in the user's
     declared business type so it never hallucinates a different industry.
 
     Pulls business_type from session context (GKY.03 answer) and
-    business_name from BP.01 answer when available."""
+    business_name from BP.05 answer when available."""
 
     bc = (session_data or {}).get("business_context", {}) or {}
     business_type = bc.get("business_type", "")
     business_name = bc.get("business_name", "")
     user_name = bc.get("user_name", "the user")
 
-    if not business_type:
-        ctx = extract_business_context_from_history(history)
-        business_type = ctx.get("business_type", "")
-        if not business_name:
-            business_name = ctx.get("business_name", "")
+    if not business_type or not business_name:
+        from services.business_identity_extractor import (
+            extract_authoritative_identity_from_history,
+            get_tagged_user_answer,
+            resolve_business_name_for_session,
+        )
+
+        bc = (session_data or {}).get("business_context") or {}
+        bp05_raw = get_tagged_user_answer(history, "business_name")
+        if not business_name and bp05_raw:
+            business_name, _ = await resolve_business_name_for_session(
+                stored_name=bc.get("business_name", ""),
+                bp05_raw_answer=bp05_raw,
+                bp05_hash=bc.get("bp05_raw_answer_hash"),
+            )
+        if not business_name or not business_type:
+            tagged = await extract_authoritative_identity_from_history(history)
+            if not business_name and tagged.get("business_name"):
+                business_name = tagged["business_name"]
+            if not business_type and tagged.get("business_type"):
+                business_type = tagged["business_type"]
+        if not business_type:
+            ctx = extract_business_context_from_history(history)
+            business_type = ctx.get("business_type", "")
 
     if not business_type:
         return ""
@@ -3835,7 +3851,7 @@ def build_business_grounding(session_data: Optional[dict], history: list) -> str
     bp01_line = ""
     if business_name and business_name not in ("Your Business", ""):
         bp01_line = (
-            f'Their business name (from BP.01) is: "{business_name}".\n'
+            f'Their business name (from BP.05) is: "{business_name}".\n'
             f"Use this name when referencing their business in responses."
         )
 
@@ -4560,7 +4576,7 @@ CRITICAL:
     ]
 
     # ── Business-type grounding (hallucination prevention) ──
-    grounding = build_business_grounding(session_data, history)
+    grounding = await build_business_grounding(session_data, history)
     if grounding:
         msgs.append({"role": "system", "content": grounding})
 
@@ -5532,15 +5548,25 @@ async def handle_draft_command(reply, history, session_data=None):
         else:
             print(f"⏱️ Draft command - Skipping research due to throttling (reducing latency)")
     
+    asked_q = (session_data or {}).get("asked_q", "")
+    is_business_name_question = asked_q in ("BUSINESS_PLAN.05", "BP.05")
+
     # Generate draft content based on conversation history, question, and research
     draft_content = await generate_draft_content(
         history,
         business_context_for_draft,
         current_question,
         research_results,
+        asked_q=asked_q,
     )
     draft_content = _strip_followup_prompts(draft_content)
     draft_content = _strip_draft_transition_bleed(draft_content)
+    if is_business_name_question:
+        from services.business_identity_extractor import extract_business_name_from_user_answer
+
+        short_name = await extract_business_name_from_user_answer(draft_content)
+        if short_name:
+            draft_content = short_name
     
     # Create a comprehensive draft response with clear heading
     # NOTE: Do NOT append thought starters to draft responses - they introduce irrelevant context
@@ -5698,7 +5724,13 @@ def get_question_topic(current_question):
     print("🔍 DEBUG - No specific topic detected, using default business planning")
     return "business planning"
 
-async def generate_draft_content(history, business_context, current_question="", research_results=None):
+async def generate_draft_content(
+    history,
+    business_context,
+    current_question="",
+    research_results=None,
+    asked_q: str = "",
+):
     """Generate draft content based on conversation history and the current question topic"""
     # Extract recent messages (both user and assistant) to understand context
     recent_messages = []
@@ -5790,7 +5822,24 @@ async def generate_draft_content(history, business_context, current_question="",
     - Keep recommendations practical and scenario-based using only user-provided context.
     """
     
-    draft_prompt = f"""
+    is_name_question = asked_q in ("BUSINESS_PLAN.05", "BP.05") or (
+        question_topic == "business naming"
+    )
+    if is_name_question:
+        idea = business_context.get("business_idea", "") or ""
+        draft_prompt = f"""
+    The user is answering Business Plan question 5: business name (if decided).
+
+    Business idea context: {idea[:400] if idea else "Not provided yet"}
+    Industry (if known): {industry}
+
+    Output ONLY the proposed business name: 1–4 words, no prefix, no explanation, no tagline.
+    Examples of valid output: TowelNest | Blue Harbor Tea | Summit Legal Co
+    Do NOT output "Business Name:" or sentences like "it represents…".
+    If undecided, output exactly: Not decided yet
+    """
+    else:
+        draft_prompt = f"""
     ⚠️ CRITICAL CONTEXT - READ FIRST:
         This business is in the {industry} industry operating as a {business_type}.
     ALL draft content must be specific to this business context.
@@ -5861,14 +5910,20 @@ async def generate_draft_content(history, business_context, current_question="",
             model="gpt-4o",
             messages=[{"role": "user", "content": draft_prompt}],
             temperature=0.3,
-            max_tokens=800  # Ceiling before truncation; COMMAND_ASSIST_MAX_WORDS is enforced below
+            max_tokens=32 if is_name_question else 800,
         )
         
         ai_draft = response.choices[0].message.content
         # Strip any follow-up prompts/questions the AI may have added
         ai_draft = _strip_followup_prompts(ai_draft)
         ai_draft = _strip_draft_transition_bleed(ai_draft)
-        ai_draft = truncate_to_word_limit(ai_draft, COMMAND_ASSIST_MAX_WORDS)
+        if is_name_question:
+            from services.business_identity_extractor import extract_business_name_from_user_answer
+
+            short_name = await extract_business_name_from_user_answer(ai_draft)
+            ai_draft = short_name or ai_draft.strip()
+        else:
+            ai_draft = truncate_to_word_limit(ai_draft, COMMAND_ASSIST_MAX_WORDS)
         word_count = len(ai_draft.split())
         print(f"✅ Draft content generated with {len(ai_draft)} characters ({word_count} words){' (with research)' if research_results else ''}")
         return ai_draft
@@ -6958,10 +7013,14 @@ def extract_business_context_from_history(history):
             if "[[Q:GKY.03]]" in content:  # "What kind of business are you trying to build?"
                 gky_question_indices["business_type"] = i
                 print(f"🔍 DEBUG - Found GKY.03 (business type question) at index {i}")
-            # Business Plan Question 1 - Business Name (HIGHEST PRIORITY)
+            # BP.01 — business idea (not the business name question)
             elif "[[Q:BUSINESS_PLAN.01]]" in content or "[[Q:BP.01]]" in content:
+                gky_question_indices["business_idea"] = i
+                print(f"🔍 DEBUG - Found BP.01 (business idea question) at index {i}")
+            # BP.05 — business name
+            elif "[[Q:BUSINESS_PLAN.05]]" in content or "[[Q:BP.05]]" in content:
                 gky_question_indices["business_name"] = i
-                print(f"🔍 DEBUG - Found BP.01 (business name question) at index {i}")
+                print(f"🔍 DEBUG - Found BP.05 (business name question) at index {i}")
     
     # Extract from all messages (not just recent ones)
     for i, msg in enumerate(history):
@@ -6973,20 +7032,25 @@ def extract_business_context_from_history(history):
             
             # Check if this is a response to a GKY or BP question (HIGHEST PRIORITY - weight 100)
             is_bp_name_answer = "business_name" in gky_question_indices and i == gky_question_indices["business_name"] + 1
+            is_bp_idea_answer = "business_idea" in gky_question_indices and i == gky_question_indices["business_idea"] + 1
             is_gky_business_type_answer = "business_type" in gky_question_indices and i == gky_question_indices["business_type"] + 1
             is_bp_sales_location_answer = "sales_location" in gky_question_indices and i == gky_question_indices.get("sales_location", -999) + 1
             
-            # Extract business name from BP.01 answer (HIGHEST PRIORITY - weight 100)
-            if is_bp_name_answer and len(content.strip()) > 2:
-                # Use the user's exact answer as business name
-                business_name_answer = content.strip()
-                # Remove common command words if present
+            # Extract business idea from BP.01 answer (HIGHEST PRIORITY - weight 100)
+            if is_bp_idea_answer and len(content.strip()) > 2:
+                business_idea_answer = content.strip()
                 command_words = ["support", "draft", "scrapping", "accept", "modify"]
-                is_command = any(cmd in business_name_answer.lower() for cmd in command_words)
+                is_command = any(cmd in business_idea_answer.lower() for cmd in command_words)
                 if not is_command:
-                    business_context["business_name"] = business_name_answer
-                    context_weights["business_name"] = 100
-                    print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: BP.01 business name answer (EXACT): '{business_name_answer}' (weight 100)")
+                    business_context["business_idea"] = business_idea_answer
+                    context_weights["business_idea"] = 100
+                    print(f"🔍 DEBUG - ⭐ HIGHEST PRIORITY: BP.01 business idea answer (weight 100)")
+
+            # Extract business name from BP.05 answer (HIGHEST PRIORITY - weight 100)
+            # BP.05 business_name: handled only by business_identity_extractor + ensure_session_business_context.
+            # Do not set business_name here (avoids conflicting heuristic paths).
+            if is_bp_name_answer:
+                pass
             
             # Extract business type from GKY.03 answer ("What kind of business are you trying to build?")
             if is_gky_business_type_answer and len(content.strip()) > 2:
@@ -7035,46 +7099,8 @@ def extract_business_context_from_history(history):
                 if found_match:
                     break  # Only process first keyword match per message
             
-            # Extract business name - prioritize domain names and longer names over short responses
-            # First check for domain-like names (highest priority - weight 80)
-            if "." in content and any(ext in content_lower for ext in [".com", ".net", ".org", ".co"]):
-                potential_name = content.strip()
-                command_words = ["support", "draft", "scrapping", "scraping", "accept", "modify", "ok", "okay", "yes", "no", "small business", "corporation", "llc", "inc", "sole proprietorship"]
-                # Limit business name to reasonable length to prevent long content
-                if len(potential_name) > 5 and len(potential_name) < 50 and potential_name.lower() not in command_words:
-                    if context_weights["business_name"] < 80:
-                        business_context["business_name"] = potential_name
-                        context_weights["business_name"] = 80
-                        print(f"🔍 DEBUG - Found domain business name: {potential_name} (weight 80)")
-            
-            # Then look for patterns like "my business is", "company name", etc. (weight 70)
-            elif context_weights["business_name"] < 70 and any(phrase in content_lower for phrase in ["my business is", "company name", "startup name", "business name", "what is your business name"]):
-                # Extract the name after these phrases
-                for phrase in ["my business is", "company name", "startup name", "business name", "what is your business name"]:
-                    if phrase in content_lower:
-                        parts = content.split(phrase)
-                        if len(parts) > 1:
-                            potential_name = parts[1].strip().split()[0]
-                            if len(potential_name) > 2:
-                                business_context["business_name"] = potential_name
-                                context_weights["business_name"] = 70
-                                print(f"🔍 DEBUG - Found business name: {potential_name} (weight 70)")
-                                break
-            
-            # Finally look for direct business name responses (weight 50)
-            elif context_weights["business_name"] < 50 and len(content.strip()) < 100 and not any(word in content_lower for word in ["yes", "no", "maybe", "i", "my", "the", "a", "an"]) and not any(char.isdigit() for char in content.strip()):
-                # If it's a short response that looks like a business name (and doesn't contain numbers)
-                potential_name = content.strip()
-                # Exclude command words and common responses
-                command_words = ["support", "draft", "scrapping", "scraping", "accept", "modify", "ok", "okay", "yes", "no", "small business", "corporation", "llc", "inc", "sole proprietorship", "sure", "financial", "personal savings"]
-                # Allow domain names and business names with dots, hyphens, etc.
-                if len(potential_name) > 2 and potential_name.lower() not in command_words:
-                    # Check if it looks like a business name (contains letters and possibly dots, hyphens)
-                    if any(c.isalpha() for c in potential_name) and not potential_name.lower() in ["small business", "corporation", "llc", "inc"]:
-                            business_context["business_name"] = potential_name
-                            context_weights["business_name"] = 50
-                            print(f"🔍 DEBUG - Found direct business name: {potential_name} (weight 50)")
-            
+            # business_name: never inferred from random chat lines — BP.05 pipeline only.
+
             # Extract industry from natural conversation - use exact user words, no keyword lists
             # Only as fallback if GKY answer not available (weight < 100)
             if context_weights["industry"] < 50:
@@ -7147,6 +7173,15 @@ def extract_business_context_from_history(history):
                     business_context["business_idea"] = content.strip()
                     print(f"🔍 DEBUG - Found business idea (long response): {content[:50]}...")
     
+    from services.business_identity_extractor import is_valid_business_name, is_valid_industry_label
+
+    if business_context.get("business_name") and not is_valid_business_name(
+        business_context["business_name"]
+    ):
+        business_context["business_name"] = ""
+    if business_context.get("industry") and not is_valid_industry_label(business_context["industry"]):
+        business_context["industry"] = ""
+
     print(f"🔍 DEBUG - Final business context: {business_context}")
     print(f"🔍 DEBUG - Context weights: {context_weights}")
     print(f"⭐ PRIORITY SUMMARY - Industry: '{business_context.get('industry', 'N/A')}' (weight: {context_weights['industry']}), Business Type: '{business_context.get('business_type', 'N/A')}' (weight: {context_weights['business_type']})")
@@ -8162,10 +8197,21 @@ async def handle_roadmap_to_implementation_transition(session_data, history):
     if not isinstance(business_context, dict):
         business_context = {}
     
-    from utils.business_context import prompt_labels, is_meaningful_context_value, clean_context_value
+    from utils.business_context import (
+        prompt_labels,
+        is_meaningful_context_value,
+        clean_context_value,
+    )
+    from services.business_identity_extractor import extract_authoritative_identity_from_history
 
     merged_ctx = dict(business_context)
+    tagged = await extract_authoritative_identity_from_history(history) if history else {}
+    for key, value in tagged.items():
+        if key in ("business_name", "industry", "business_type") and is_meaningful_context_value(value):
+            merged_ctx[key] = clean_context_value(value)
     for key, value in (extracted_context or {}).items():
+        if key in tagged and key in ("business_name", "industry", "business_type"):
+            continue
         if is_meaningful_context_value(value):
             merged_ctx[key] = clean_context_value(value)
     labels = prompt_labels({**session_data, **merged_ctx})
@@ -8223,7 +8269,7 @@ Here's what you can expect in this phase:
 | **Advice & Tips** | I'll share focused, practical insights to guide every action |
 | **Kickstart** | I can complete parts of tasks for you — like drafting outreach emails or setting up a checklist |
 | **Help** | Ask for deep, detailed guidance whenever you hit a roadblock |
-| **Who do I contact?** | I'll connect you with trusted, relevant professionals or providers near you in {location} |
+| **Who do I contact?** | I'll recommend relevant professional or service providers that may help you complete steps of your implementation journey. |
 | **Dynamic Feedback** | I'll notice when tasks look incomplete or off-track and help correct them quickly |
 
 ---
