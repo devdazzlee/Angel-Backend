@@ -2326,34 +2326,51 @@ async def revisit_plan_with_areas(session_id: str, request: Request, payload: di
             "message": "No modification areas specified"
         }
     
-    # Store modification areas in session for guidance
-    session["modification_areas"] = modification_areas
     session["current_phase"] = "BUSINESS_PLAN"
-    
+
     # Map modification areas to specific business plan sections
     area_to_section_mapping = {
         "business-overview": "BUSINESS_PLAN.01-05",
-        "market-research": "BUSINESS_PLAN.06-12", 
+        "market-research": "BUSINESS_PLAN.06-12",
         "financial-projections": "BUSINESS_PLAN.13-20",
         "operations": "BUSINESS_PLAN.21-28",
         "marketing-strategy": "BUSINESS_PLAN.29-35",
-        "legal-compliance": "BUSINESS_PLAN.36-42"
+        "legal-compliance": "BUSINESS_PLAN.36-42",
     }
-    
-    # Determine starting point based on modification areas
-    starting_sections = [area_to_section_mapping.get(area) for area in modification_areas if area in area_to_section_mapping]
-    
-    # Start from the earliest section that needs modification
+
+    starting_sections = [
+        area_to_section_mapping[area]
+        for area in modification_areas
+        if area in area_to_section_mapping
+    ]
+
     if starting_sections:
-        earliest_section = min(starting_sections, key=lambda x: int(x.split('.')[1].split('-')[0]))
-        session["asked_q"] = f"BUSINESS_PLAN.{earliest_section.split('.')[1].split('-')[0].zfill(2)}"
+        earliest_section = min(
+            starting_sections,
+            key=lambda x: int(x.split(".")[1].split("-")[0]),
+        )
+        first_q_num = int(earliest_section.split(".")[1].split("-")[0])
+        asked_q = f"BUSINESS_PLAN.{str(first_q_num).zfill(2)}"
     else:
-        session["asked_q"] = "BUSINESS_PLAN.01"
-    
+        asked_q = "BUSINESS_PLAN.01"
+        first_q_num = 1
+
+    session["asked_q"] = asked_q
+    answered_count = max(0, first_q_num - 1)
+    session["answered_count"] = answered_count
+
+    # Persist inside business_context JSONB — chat_sessions has no modification_areas column
+    existing_context = session.get("business_context") or {}
+    if not isinstance(existing_context, dict):
+        existing_context = {}
+    updated_context = {**existing_context, "modification_areas": modification_areas}
+    session["business_context"] = updated_context
+
     await patch_session(session_id, {
         "current_phase": session["current_phase"],
-        "asked_q": session["asked_q"],
-        "modification_areas": modification_areas
+        "asked_q": asked_q,
+        "answered_count": answered_count,
+        "business_context": updated_context,
     })
     
     # Generate guidance message for modifications
@@ -2375,9 +2392,10 @@ Let's start with the first area that needs attention. I'll provide specific guid
             "guidance": modification_guidance,
             "progress": {
                 "phase": "BUSINESS_PLAN",
-                "answered": session.get("answered_count", 0),
+                "answered": answered_count,
                 "total": 45,
-                "percent": 0
+                "percent": round((answered_count / 45) * 100) if answered_count else 0,
+                "asked_q": asked_q,
             }
         }
         }
