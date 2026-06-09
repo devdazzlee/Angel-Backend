@@ -424,6 +424,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         session_update = angel_response.get("patch_session", None)
         show_accept_modify = angel_response.get("show_accept_modify", False)
         business_plan_artifact = angel_response.get("business_plan_artifact", None)
+        awaiting_gky_proceed = angel_response.get("awaiting_gky_proceed", False)
     else:
         # Backward compatibility
         assistant_reply = angel_response
@@ -434,6 +435,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         session_update = None
         show_accept_modify = False
         business_plan_artifact = None
+        awaiting_gky_proceed = False
 
     # CRITICAL: Don't save assistant reply to chat history if it's a transition
     # Transitions should show modals, not appear in chat
@@ -536,7 +538,8 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
                 },
                 "web_search_status": web_search_status,
                 "immediate_response": immediate_response,
-                "transition_phase": transition_phase
+                "transition_phase": transition_phase,
+                "awaiting_gky_proceed": True,
             }
         }
     
@@ -999,6 +1002,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
             "show_accept_modify": show_accept_modify,
             "question_number": question_number,
             "is_section_summary": is_section_summary,
+            "awaiting_gky_proceed": awaiting_gky_proceed,
         }
     }
 

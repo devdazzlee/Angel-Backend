@@ -2903,42 +2903,25 @@ async def handle_gky_completion(session_data, history):
 
 {gky_recap}
 
-Now we're moving into the Business Planning phase.
+**What's next**
 
-This is where we begin shaping your idea into something tangible. Together, we'll explore what your business actually is, who it serves, what it will require to operate, and what it will realistically take to bring it to life. This isn't about promising outcomes; it's about helping you think clearly, make informed decisions, and build a strong understanding of your own business to help you decide next steps.
+Now we're moving into the **Business Planning** phase — where we shape your idea into a tangible plan. Together we'll explore what your business is, who it serves, what it will take to operate, and what it will realistically take to bring it to life.
 
-As we move through each section, you'll be building a living business plan draft; one that you can refine over time. Below are some functions of Angel that will help:
+As you move through each section, you'll build a living business plan draft you can refine over time. Angel also pulls in relevant industry context in the background to strengthen your plan.
 
-Drafting: As Angel learns more about your business, it can infer answers to questions. It can either completely or partially answer questions and complete steps on your behalf, helping you move faster with greater accuracy.
-
-Scrapping: When you have rough ideas, like bullet points, that need polishing.
-
-Support & Coaching: When you need Angel to gather info for you or you want deeper guidance.
-
-In the background, Angel also pulls in relevant industry context (market patterns, competitors, pricing cues, and practical benchmarks) to strengthen your plan.
-
-When you finish this phase, your business plan becomes the foundation that unlocks your Launch Roadmap; a step-by-step path Founderport generates to help you actually build and launch your business.
-
-Are you ready to begin?
+When you finish this phase, your business plan becomes the foundation for your **Launch Roadmap** — a step-by-step path Founderport generates to help you build and launch your business.
     """
-    
-    # Check if we should show Accept/Modify buttons
-    button_detection = await should_show_accept_modify_buttons(
-        user_last_input="GKY completion",
-        ai_response=transition_message,
-        session_data=session_data
-    )
     
     return {
         "reply": transition_message,
         "transition_phase": "GKY_TO_BUSINESS_PLAN",
         "patch_session": {
-            "current_phase": "BUSINESS_PLAN_INTRO",  # Intermediate phase before actual questions
-            "asked_q": "GKY.05_ACK",  # Keep on GKY until user confirms ready
+            "current_phase": "BUSINESS_PLAN_INTRO",
+            "asked_q": "GKY.05_ACK",
             "answered_count": session_data.get("answered_count", 0)
         },
-        "show_accept_modify": button_detection.get("show_buttons", False),
-        "awaiting_confirmation": True  # Signal that we need user to confirm before starting questions
+        "show_accept_modify": False,
+        "awaiting_gky_proceed": True,
     }
 
 async def generate_gky_summary(session_data, history):
