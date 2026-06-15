@@ -417,13 +417,35 @@ async def save_found_info_to_history(
         # Merge legacy summary into business_context so existing prompts read the
         # right values immediately (business_name, industry, mission, etc.).
         if isinstance(business_info, dict):
+            from services.business_identity_extractor import (
+                extract_business_name_from_user_answer,
+                extract_industry_from_user_answer,
+                extract_location_from_user_answer,
+                is_valid_business_name,
+                is_valid_industry_label,
+                is_valid_location_label,
+            )
+
             for key, value in business_info.items():
                 if value in (None, "", "N/A"):
                     continue
                 normalized_key = key.lower().replace(" ", "_").replace("-", "_")
-                business_context[normalized_key] = value
+                stored_value = value
+                if normalized_key == "business_name" and isinstance(value, str):
+                    stored_value = await extract_business_name_from_user_answer(value)
+                    if not stored_value or not is_valid_business_name(stored_value):
+                        continue
+                elif normalized_key == "industry" and isinstance(value, str):
+                    stored_value = await extract_industry_from_user_answer(value)
+                    if not stored_value or not is_valid_industry_label(stored_value):
+                        continue
+                elif normalized_key == "location" and isinstance(value, str):
+                    stored_value = await extract_location_from_user_answer(value)
+                    if not stored_value or not is_valid_location_label(stored_value):
+                        continue
+                business_context[normalized_key] = stored_value
                 if normalized_key != key:
-                    business_context[key] = value
+                    business_context[key] = stored_value
 
         missing_questions = sorted(
             q for q in questions_that_failed_extraction if q not in actual_found_question_numbers

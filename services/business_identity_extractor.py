@@ -1,8 +1,8 @@
 """
-Structured extraction for BP.05 (business name) and BP.06 (industry).
+Structured extraction for BP.05 (business name), BP.06 (industry), and BP.14 (location).
 
-Single pipeline: tagged questionnaire answer → LLM JSON schema → deterministic validator.
-Never invents a name when the user has not decided. Never stores raw chat paragraphs as business_name.
+Single pipeline: tagged questionnaire answer → LLM JSON schema → deterministic structural validator.
+Never persists raw chat paragraphs as identity fields.
 """
 
 from __future__ import annotations
@@ -55,6 +55,23 @@ class IndustryResult(BaseModel):
     )
 
 
+class LocationResult(BaseModel):
+    is_operating_location: bool = Field(
+        description=(
+            "True only when the user describes where the business operates "
+            "(geography, region, or channel such as online/mobile/physical)."
+        ),
+    )
+    location: str | None = Field(
+        default=None,
+        description="Short label (max ~12 words) when is_operating_location is true; otherwise null.",
+    )
+
+
+def tagged_answer_hash(raw_answer: str) -> str:
+    return hashlib.sha256(clean_context_value(raw_answer).encode("utf-8")).hexdigest()[:16]
+
+
 def is_valid_business_name(value: str) -> bool:
     """Deterministic gate — only names that pass are persisted or shown."""
     name = clean_context_value(value)
@@ -88,8 +105,57 @@ def is_valid_industry_label(value: str) -> bool:
     return True
 
 
+def is_valid_location_label(value: str) -> bool:
+    """Structural gate for a short location label — same role as is_valid_industry_label."""
+    label = clean_context_value(value)
+    if not label or not is_meaningful_context_value(label):
+        return False
+    if len(label) > 80 or len(label.split()) > 12:
+        return False
+    return True
+
+
 def bp05_answer_hash(raw_answer: str) -> str:
-    return hashlib.sha256(clean_context_value(raw_answer).encode("utf-8")).hexdigest()[:16]
+    return tagged_answer_hash(raw_answer)
+
+
+def try_parse_business_name_literal(text: str) -> str:
+    """
+    When BP.05 answer is already a short literal name, use it directly.
+    Structural parsing only — no content keyword blocklists.
+    """
+    line = clean_context_value(text).split("\n")[0].strip()
+    if not line:
+        return ""
+
+    line = re.sub(
+        r"^(?:business\s+name|brand\s+name|company\s+name|name)\s*:\s*",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    ).strip()
+    line = re.sub(
+        r"^(?:it'?s|we(?:'re| are)|i(?:'m| am)|called|named)\s+",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    quoted = re.match(r'^["\'“”‘’]([^"\']+)["\'“”‘’]', line)
+    if quoted:
+        candidate = quoted.group(1).strip()
+        if is_valid_business_name(candidate):
+            return candidate
+
+    if ". " in line:
+        first_sentence = line.split(". ", 1)[0].strip()
+        if is_valid_business_name(first_sentence):
+            return first_sentence
+
+    if is_valid_business_name(line):
+        return line
+
+    return ""
 
 
 async def extract_business_name_from_user_answer(user_answer: str) -> str:
@@ -101,14 +167,18 @@ async def extract_business_name_from_user_answer(user_answer: str) -> str:
     if not text or _is_command_like_answer(text):
         return ""
 
+    literal = try_parse_business_name_literal(text)
+
     system = (
         "You extract the business/brand name from the user's answer to Business Plan question 5 "
         '("Business Name if decided"). Respond with JSON only.\n'
         "Rules:\n"
-        "- decided=false when the user has not chosen a name (unsure, TBD, thinking, no name, skip).\n"
-        "- When decided=true, business_name must be ONLY the name: 1–4 words (e.g. TowelNest, Blue Harbor Tea).\n"
+        "- decided=true when the user gives ANY specific brand or business name, including inside a sentence "
+        "(e.g. 'IdeaLink', 'We chose the name AutoFix Pro', 'Business name: Harbor Tea Co.').\n"
+        "- decided=false ONLY when they clearly have not chosen a name (unsure, TBD, no name yet, skip).\n"
+        "- When decided=true, business_name must be ONLY the name: 1–6 words.\n"
         "- Strip labels like 'Business Name:' from the value.\n"
-        "- Do NOT include taglines, explanations, or sentences ('it represents…').\n"
+        "- Do NOT include taglines, explanations, or full sentences.\n"
         "- Do NOT invent a name that the user did not provide."
     )
     user = f"User answer to Business Name (if decided):\n\n{text}"
@@ -128,17 +198,14 @@ async def extract_business_name_from_user_answer(user_answer: str) -> str:
         parsed = BusinessNameResult.model_validate(json.loads(raw_json))
     except Exception as exc:
         print(f"❌ business_name extraction failed: {exc}")
-        return ""
+        return literal
 
-    if not parsed.decided or not parsed.business_name:
-        return ""
+    if parsed.decided and parsed.business_name:
+        name = clean_context_value(parsed.business_name)
+        if is_valid_business_name(name):
+            return name
 
-    name = clean_context_value(parsed.business_name)
-    if not is_valid_business_name(name):
-        print(f"⚠️ business_name rejected by validator: {name!r}")
-        return ""
-
-    return name
+    return literal
 
 
 async def extract_industry_from_user_answer(user_answer: str) -> str:
@@ -181,6 +248,52 @@ async def extract_industry_from_user_answer(user_answer: str) -> str:
     return label
 
 
+async def extract_location_from_user_answer(user_answer: str) -> str:
+    """Extract a short location label from a BP.14 user message."""
+    text = clean_context_value(user_answer)
+    if not text or _is_command_like_answer(text):
+        return ""
+
+    system = (
+        "You extract WHERE the business operates from the user's answer to Business Plan question 14 "
+        '("Where will your business be located?"). Respond with JSON only.\n'
+        "Set is_operating_location=true only when the answer describes geography or operating channel "
+        "(city/region, online, mobile route, physical address, etc.).\n"
+        "Set is_operating_location=false when the answer is about future vision, scaling plans, "
+        "goals, mission, or other non-location content.\n"
+        "When is_operating_location=true, location must be a SHORT label (max ~12 words), "
+        "e.g. 'San Diego County, CA', 'Online only', 'Mobile — Los Angeles metro'.\n"
+        "Distill long answers into that label; never return the full paragraph."
+    )
+    user = f"User answer:\n\n{text}"
+
+    try:
+        response = await _client.chat.completions.create(
+            model=_MODEL,
+            temperature=0,
+            max_tokens=80,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        raw_json = response.choices[0].message.content or "{}"
+        parsed = LocationResult.model_validate(json.loads(raw_json))
+    except Exception as exc:
+        print(f"❌ location extraction failed: {exc}")
+        return ""
+
+    if not parsed.is_operating_location or not parsed.location:
+        return ""
+
+    label = clean_context_value(parsed.location)
+    if not is_valid_location_label(label):
+        print(f"⚠️ location rejected by validator: {label!r}")
+        return ""
+    return label
+
+
 async def resolve_business_name_for_session(
     *,
     stored_name: str,
@@ -197,7 +310,11 @@ async def resolve_business_name_for_session(
         if bp05_hash == answer_hash and is_valid_business_name(stored_name):
             return stored_name, answer_hash
         extracted = await extract_business_name_from_user_answer(raw)
-        return extracted, answer_hash
+        if extracted:
+            return extracted, answer_hash
+        if is_valid_business_name(stored_name):
+            return stored_name, answer_hash
+        return "", answer_hash
 
     if is_valid_business_name(stored_name):
         return stored_name, bp05_hash
@@ -205,8 +322,32 @@ async def resolve_business_name_for_session(
     return "", bp05_hash
 
 
+async def resolve_location_for_session(
+    *,
+    stored_location: str,
+    bp14_raw_answer: str | None,
+    bp14_hash: str | None,
+) -> tuple[str, str | None]:
+    """
+    Resolve location for persistence from BP.14 tagged answer.
+    Reuses stored value only when hash matches and label validates.
+    """
+    raw = clean_context_value(bp14_raw_answer or "")
+    if raw and not _is_command_like_answer(raw):
+        answer_hash = tagged_answer_hash(raw)
+        if bp14_hash == answer_hash and is_valid_location_label(stored_location):
+            return stored_location, answer_hash
+        extracted = await extract_location_from_user_answer(raw)
+        return extracted, answer_hash
+
+    if is_valid_location_label(stored_location):
+        return stored_location, bp14_hash
+
+    return "", bp14_hash
+
+
 def get_tagged_user_answer(history: list | None, field: str) -> str:
-    """Return raw user answer for a tagged questionnaire field (sync)."""
+    """Return raw user answer for the most recent tagged questionnaire prompt."""
     from utils.business_context import TAGGED_QUESTION_FIELD_MAP
 
     if not history:
@@ -222,7 +363,6 @@ def get_tagged_user_answer(history: list | None, field: str) -> str:
         content = message.get("content") or ""
         if any(tag in content for tag in tags):
             question_index = index
-            break
 
     if question_index is None:
         return ""
@@ -252,8 +392,6 @@ async def extract_authoritative_identity_from_history(history: list | None) -> d
             continue
         content = message.get("content") or ""
         for field, tags in TAGGED_QUESTION_FIELD_MAP.items():
-            if field in question_index_by_field:
-                continue
             if any(tag in content for tag in tags):
                 question_index_by_field[field] = index
 
@@ -279,6 +417,11 @@ async def extract_authoritative_identity_from_history(history: list | None) -> d
             industry = await extract_industry_from_user_answer(raw)
             if industry:
                 extracted["industry"] = industry
+        elif field == "location":
+            location = await extract_location_from_user_answer(raw)
+            if location:
+                extracted["location"] = location
+                extracted["bp14_raw_answer_hash"] = tagged_answer_hash(raw)
         elif field == "business_idea":
             if is_meaningful_context_value(raw):
                 extracted["business_idea"] = raw

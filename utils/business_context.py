@@ -11,6 +11,7 @@ TAGGED_QUESTION_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "business_idea": ("[[Q:BUSINESS_PLAN.01]]", "[[Q:BP.01]]"),
     "business_name": ("[[Q:BUSINESS_PLAN.05]]", "[[Q:BP.05]]"),
     "industry": ("[[Q:BUSINESS_PLAN.06]]", "[[Q:BP.06]]"),
+    "location": ("[[Q:BUSINESS_PLAN.14]]", "[[Q:BP.14]]"),
     "business_type": ("[[Q:GKY.03]]",),
     "legal_structure": ("[[Q:BUSINESS_PLAN.24]]", "[[Q:BP.24]]"),
 }
@@ -73,6 +74,13 @@ def resolve_session_business_context(session: dict | None) -> dict[str, Any]:
             value = ""
         resolved[key] = value
 
+    if not resolved.get("location"):
+        from services.business_identity_extractor import is_valid_location_label
+
+        sales_location = clean_context_value(stored_dict.get("sales_location"))
+        if is_meaningful_context_value(sales_location) and is_valid_location_label(sales_location):
+            resolved["location"] = sales_location
+
     for key, value in stored_dict.items():
         if key not in resolved:
             resolved[key] = value
@@ -82,7 +90,11 @@ def resolve_session_business_context(session: dict | None) -> dict[str, Any]:
 
 def normalize_business_context_for_api(context: dict | None) -> dict[str, Any]:
     """API response shape: core fields as strings, extra keys preserved."""
-    from services.business_identity_extractor import is_valid_business_name, is_valid_industry_label
+    from services.business_identity_extractor import (
+        is_valid_business_name,
+        is_valid_industry_label,
+        is_valid_location_label,
+    )
 
     if not context or not isinstance(context, dict):
         return {key: "" for key in BUSINESS_CONTEXT_KEYS}
@@ -93,6 +105,8 @@ def normalize_business_context_for_api(context: dict | None) -> dict[str, Any]:
         if key == "business_name" and value and not is_valid_business_name(value):
             value = ""
         elif key == "industry" and value and not is_valid_industry_label(value):
+            value = ""
+        elif key == "location" and value and not is_valid_location_label(value):
             value = ""
         if is_meaningful_context_value(value):
             normalized[key] = value
@@ -151,7 +165,11 @@ def merge_request_context_overrides(
     overrides: dict | None,
 ) -> dict[str, Any]:
     """Apply request-body overrides only when values are real (not placeholders)."""
-    from services.business_identity_extractor import is_valid_business_name, is_valid_industry_label
+    from services.business_identity_extractor import (
+        is_valid_business_name,
+        is_valid_industry_label,
+        is_valid_location_label,
+    )
 
     merged = dict(base)
     if not overrides:
@@ -164,6 +182,8 @@ def merge_request_context_overrides(
         if key == "business_name" and not is_valid_business_name(value):
             continue
         if key == "industry" and not is_valid_industry_label(value):
+            continue
+        if key == "location" and not is_valid_location_label(value):
             continue
         merged[key] = value
     return merged
@@ -208,6 +228,7 @@ async def ensure_session_business_context(
         extract_authoritative_identity_from_history,
         get_tagged_user_answer,
         resolve_business_name_for_session,
+        resolve_location_for_session,
     )
 
     stored = session.get("business_context") if isinstance(session.get("business_context"), dict) else {}
@@ -226,7 +247,7 @@ async def ensure_session_business_context(
 
     if tagged:
         for key, value in tagged.items():
-            if key == "bp05_raw_answer_hash":
+            if key in ("bp05_raw_answer_hash", "bp14_raw_answer_hash"):
                 continue
             if merged.get(key) != value:
                 merged[key] = value
@@ -253,6 +274,33 @@ async def ensure_session_business_context(
         merged["business_name"] = ""
         updated = True
 
+    bp14_raw = get_tagged_user_answer(history, "location")
+    location, bp14_hash = await resolve_location_for_session(
+        stored_location=clean_context_value(merged.get("location")),
+        bp14_raw_answer=bp14_raw or None,
+        bp14_hash=merged.get("bp14_raw_answer_hash"),
+    )
+    if location != clean_context_value(merged.get("location")):
+        merged["location"] = location
+        updated = True
+    if bp14_hash:
+        if merged.get("bp14_raw_answer_hash") != bp14_hash:
+            merged["bp14_raw_answer_hash"] = bp14_hash
+            updated = True
+    elif merged.get("location") and not is_meaningful_context_value(merged.get("location")):
+        merged["location"] = ""
+        updated = True
+
+    if not clean_context_value(merged.get("location")):
+        from services.business_identity_extractor import extract_location_from_user_answer
+
+        sales_raw = clean_context_value(merged.get("sales_location"))
+        if sales_raw:
+            sales_location = await extract_location_from_user_answer(sales_raw)
+            if sales_location:
+                merged["location"] = sales_location
+                updated = True
+
     if updated:
         await patch_session(session_id, {"business_context": merged})
         session = {**session, "business_context": merged}
@@ -262,12 +310,12 @@ async def ensure_session_business_context(
     if needs_refresh and not tagged.get("business_name"):
         extracted = extract_from_history(history) or {}
         if extracted:
-            from services.business_identity_extractor import is_valid_business_name, is_valid_industry_label
+            from services.business_identity_extractor import is_valid_industry_label
 
             for key, value in extracted.items():
                 if isinstance(value, str):
                     value = value.strip()
-                if key in ("business_name", "bp05_raw_answer_hash"):
+                if key in ("business_name", "bp05_raw_answer_hash", "bp14_raw_answer_hash", "location"):
                     continue
                 if key == "industry":
                     if not is_valid_industry_label(value):
@@ -288,10 +336,10 @@ async def ensure_session_business_context(
     merged_for_api = business_context_from_session(session)
     if tagged:
         for k, v in tagged.items():
-            if k == "bp05_raw_answer_hash":
-                merged_for_api["bp05_raw_answer_hash"] = v
+            if k in ("bp05_raw_answer_hash", "bp14_raw_answer_hash"):
+                merged_for_api[k] = v
             elif k in BUSINESS_CONTEXT_KEYS and is_meaningful_context_value(v):
                 merged_for_api[k] = v
     normalized = normalize_business_context_for_api(merged_for_api)
     return normalized, source, updated
-
+

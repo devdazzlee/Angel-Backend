@@ -1080,9 +1080,11 @@ async def patch_session_context_from_response(session_id, response_content, tag,
         if industry:
             new_fields["industry"] = industry
     elif tag in ("BUSINESS_PLAN.14", "BP.14"):
-        location = response_content.strip()
-        if location and len(location) < 120:
-            new_fields["location"] = location.split("\n")[0].strip()
+        from services.business_identity_extractor import extract_location_from_user_answer
+
+        location = await extract_location_from_user_answer(response_content)
+        if location:
+            new_fields["location"] = location
     elif not tag.startswith("GKY."):
         return
     elif tag == "GKY.01":  # Name and preferred name
@@ -1127,9 +1129,13 @@ async def handle_command(session_id: str, request: Request, payload: dict):
     if command == "accept":
         # Save the draft as the user's answer
         await save_chat_message(session_id, user_id, "user", draft_content)
-        
-        # Move to next question
+
         current_tag = session.get("asked_q")
+        if current_tag and draft_content:
+            await patch_session_context_from_response(
+                session_id, draft_content, current_tag, session
+            )
+
         if current_tag:
             # Increment question number
             phase, num = current_tag.split(".")
