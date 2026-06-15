@@ -18,6 +18,7 @@ import os
 import uuid
 from datetime import datetime
 import random
+from utils.implementation_uploads import resolve_implementation_upload_dir
 
 # Initialize OpenAI client for Chat With Angel
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -826,6 +827,8 @@ async def complete_implementation_task(
         documents = payload.get("documents", "")
         notes = (payload.get("notes") or payload.get("completion_notes") or "").strip()
         substep_number = payload.get("substep_number")  # Optional: if completing a substep
+        uploaded_file = payload.get("uploaded_file") or payload.get("filename")
+        uploaded_file_id = payload.get("file_id")
         
         # Get session
         session = await get_session(session_id, user_id)
@@ -906,7 +909,9 @@ async def complete_implementation_task(
             "substep_number": substep_number,
             "completed_at": datetime.now().isoformat(),
             "decision": decision,
-            "notes": notes
+            "notes": notes,
+            "uploaded_file": uploaded_file,
+            "file_id": uploaded_file_id,
         }
 
         # Persist the user's note keyed by the same id we use to track
@@ -1076,43 +1081,79 @@ async def upload_implementation_document(
     request: Request,
     file: UploadFile = File(...)
 ):
-    """Upload document for implementation task"""
-    
+    """Upload document for implementation task completion."""
+
     user_id = request.state.user["id"]
-    
-    # Validate file type
-    allowed_types = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'image/jpeg', 'image/png']
+
+    allowed_types = {
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "image/jpeg",
+        "image/png",
+    }
     if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="Please upload a PDF, DOC, DOCX, JPEG, or PNG file.")
-    
-    # Validate file size (max 10MB)
-    if file.size > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File size must be less than 10MB.")
-    
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a PDF, DOC, DOCX, JPEG, or PNG file.",
+        )
+
     try:
-        # Create uploads directory if it doesn't exist
-        upload_dir = "uploads"
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        # Generate unique filename
-        file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'pdf'
-        unique_filename = f"{uuid.uuid4()}.{file_extension}"
+        content = await file.read()
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File size must be less than 10MB.")
+
+        upload_dir = resolve_implementation_upload_dir()
+        file_extension = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else "bin"
+        unique_filename = f"{session_id}_{task_id}_{uuid.uuid4().hex}.{file_extension}"
         file_path = os.path.join(upload_dir, unique_filename)
-        
-        # Save file
+
         with open(file_path, "wb") as buffer:
-            content = await file.read()
             buffer.write(content)
-        
+
+        session = await get_session(session_id, user_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        business_context = session.get("business_context", {}) or {}
+        if not isinstance(business_context, dict):
+            business_context = {}
+
+        uploads_by_task = business_context.get("implementation_uploads") or {}
+        if not isinstance(uploads_by_task, dict):
+            uploads_by_task = {}
+
+        record = {
+            "file_id": unique_filename,
+            "original_filename": file.filename or unique_filename,
+            "content_type": file.content_type,
+            "size_bytes": len(content),
+            "uploaded_at": datetime.now().isoformat(),
+            "storage_path": file_path,
+        }
+        task_uploads = list(uploads_by_task.get(task_id) or [])
+        task_uploads.append(record)
+        uploads_by_task[task_id] = task_uploads[-5:]
+        business_context["implementation_uploads"] = uploads_by_task
+
+        await patch_session(session_id, user_id, {"business_context": business_context})
+
         return {
             "success": True,
             "message": "Document uploaded successfully",
             "filename": file.filename,
             "file_id": unique_filename,
             "task_id": task_id,
-            "uploaded_at": datetime.now().isoformat()
+            "uploaded_at": record["uploaded_at"],
         }
-        
+
+    except HTTPException:
+        raise
+    except OSError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Server could not store the uploaded file: {e}",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upload document: {str(e)}")
 
@@ -1331,13 +1372,34 @@ async def get_service_providers_for_step(request: Request):
                         "specialties": provider.get('specialties', ''),
                         "estimated_cost": provider.get('estimated_cost', 'Contact for pricing'),
                         "contact_method": provider.get('contact_method', 'Email or phone'),
+                        "key_considerations": provider.get('key_considerations', ''),
                         "website": provider.get('website') or provider.get('contact_url', ''),
                         "address": provider.get('address', ''),
                         "rating": provider.get('rating', 'N/A')
                     })
-        
-        # Sort by local preference (local first)
-        providers_list.sort(key=lambda x: (not x['local'], x['name']))
+
+        def _provider_relevance(provider: Dict[str, Any]) -> int:
+            blob = " ".join(
+                str(provider.get(k, "") or "")
+                for k in ("name", "description", "specialties", "type")
+            ).lower()
+            score = 0
+            if any(k in blob for k in (
+                "wholesale", "supplier", "vendor", "distributor", "b2b",
+                "restaurant supply", "food service", "equipment",
+            )):
+                score += 3
+            if any(k in (task_context or "").lower() for k in (
+                "supplier", "vendor", "supply chain", "ingredient",
+            )) and score > 0:
+                score += 2
+            if not provider.get("local"):
+                score += 1
+            return score
+
+        providers_list.sort(
+            key=lambda x: (-_provider_relevance(x), not x.get("local"), x.get("name", ""))
+        )
         
         return {
             "success": True,

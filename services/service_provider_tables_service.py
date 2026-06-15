@@ -1,8 +1,9 @@
 from openai import AsyncOpenAI
 import os
 import json
+import re
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, TypedDict
 from services.rag_service import research_service_providers_rag
 from services.specialized_agents_service import agents_manager
 from utils.business_context import prompt_labels
@@ -11,6 +12,15 @@ client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Cache for generated local providers to avoid regenerating
 _local_providers_cache = {}
+
+
+class ProviderIntent(TypedDict):
+    search_role: str
+    local_provider_types: List[str]
+    static_keywords: List[str]
+    exclude_consumer_industry: bool
+    guidance: str
+
 
 class ServiceProviderTableGenerator:
     """Generate comprehensive service provider tables with local providers"""
@@ -73,7 +83,9 @@ class ServiceProviderTableGenerator:
         
         for category in relevant_categories:
             try:
-                providers = await self._generate_category_providers(category, business_context, location)
+                providers = await self._generate_category_providers(
+                    category, business_context, location, task_context=task_context
+                )
                 provider_tables[category] = providers
             except Exception as e:
                 provider_tables[category] = {
@@ -94,38 +106,60 @@ class ServiceProviderTableGenerator:
             "timestamp": datetime.now().isoformat()
         }
     
-    async def generate_actual_local_providers(self, provider_type: str, category: str, business_context: Dict[str, Any], location: str, count: int = 5) -> List[Dict[str, Any]]:
-        """Generate actual local business names using AI based on location and category"""
-        
-        cache_key = f"{location}_{category}_{provider_type}"
+    async def generate_actual_local_providers(
+        self,
+        provider_type: str,
+        category: str,
+        business_context: Dict[str, Any],
+        location: str,
+        count: int = 5,
+        task_context: str = "",
+        provider_intent: Optional[ProviderIntent] = None,
+    ) -> List[Dict[str, Any]]:
+        """Generate local provider listings aligned to the active implementation step."""
+
+        intent = provider_intent or self._resolve_provider_intent(task_context, category, business_context)
+        fields = self._extract_task_context_fields(task_context)
+        labels = prompt_labels(business_context)
+        step_title = fields.get("active_step_title") or fields.get("task_title") or "current step"
+        step_description = (
+            fields.get("active_step_description")
+            or fields.get("task_description")
+            or task_context
+            or step_title
+        )
+
+        cache_key = f"{location}_{category}_{provider_type}_{hash(task_context)}"
         if cache_key in _local_providers_cache:
             return _local_providers_cache[cache_key][:count]
-        
-        labels = prompt_labels(business_context)
+
         prompt = f"""
-        Generate a list of {count} REALISTIC local {provider_type} businesses in {location} for the {category} category.
-        
-        Business Context:
-        - Location: {location or labels['location']}
+        Generate a list of {count} REALISTIC local businesses in {location} that can help a founder complete this implementation step.
+
+        IMPLEMENTATION STEP (what the user is trying to accomplish):
+        - Step: {step_title}
+        - Details: {step_description}
+
+        Provider type to generate: {provider_type}
+        Role: {intent['search_role']}
+
+        Business context (for tailoring only — do NOT recommend consumer-facing competitors):
         - Industry: {labels['industry']}
-        - Business Type: {labels['business_type']}
-        
-        For each business, provide:
-        1. Name: Realistic business name (use common naming patterns for {location})
-        2. Type: "Local {provider_type}"
-        3. Description: Specific services they offer
-        4. Specialties: Their areas of expertise
-        5. Estimated Cost: Realistic pricing for {location}
-        6. Contact Method: How to find them (e.g., "Search Google Maps", "Local chamber of commerce", actual website if nationally known)
-        7. Key Considerations: What to look for when choosing them
-        8. Address: Realistic address format for {location} (street name only, no actual numbers)
-        
-        Make names sound like actual businesses in {location}. Include mix of:
-        - Individual practitioners (e.g., "John Smith, CPA")
-        - Small firms (e.g., "{location.split(',')[0] if ',' in location else location} Tax & Accounting")
-        - Established local businesses
-        
-        Return as JSON array with these exact fields: name, type, local (always true), description, specialties, estimated_cost, contact_method, key_considerations, address, rating (4.0-5.0)
+        - Business type: {labels['business_type']}
+        - Venture: {labels['business_name']}
+
+        {intent['guidance']}
+
+        CRITICAL RULES:
+        - Recommend VENDORS, SUPPLIERS, WHOLESALERS, PROFESSIONALS, or B2B SERVICES that help the founder complete the step.
+        - DO NOT recommend other {labels['industry']} businesses that sell the same product/service directly to consumers (competitors).
+        - DO NOT recommend mobile trucks, shops, or brands that operate the same kind of business as the user.
+        - Each listing must clearly be a supplier/vendor/partner — not a rival business.
+
+        For each business provide JSON fields: name, type, local (always true), description, specialties,
+        estimated_cost, contact_method, key_considerations, address, rating (4.0-5.0)
+
+        Return JSON: {{"providers": [ ... ]}}
         """
         
         try:
@@ -142,6 +176,13 @@ class ServiceProviderTableGenerator:
             
             result = json.loads(response.choices[0].message.content)
             providers = result.get("providers", result.get("businesses", []))
+
+            industry = (labels.get("industry") or "").lower()
+            filtered = [
+                p for p in providers
+                if not self._looks_like_competitor(p, industry, intent)
+            ]
+            providers = filtered or providers
             
             # Ensure all providers have required fields
             for provider in providers:
@@ -156,18 +197,7 @@ class ServiceProviderTableGenerator:
             
         except Exception as e:
             print(f"Error generating local providers: {e}")
-            # Fallback to generic provider
-            return [{
-                "name": f"Local {provider_type} in {location}",
-                "type": f"Local {provider_type}",
-                "local": True,
-                "description": f"Local {provider_type} serving {location}",
-                "specialties": category,
-                "estimated_cost": "Contact for pricing",
-                "contact_method": f"Search '{provider_type} near {location}' on Google",
-                "key_considerations": "Verify credentials, check reviews, compare pricing",
-                "rating": 4.5
-            }]
+            return []
     
     # Map known Implementation phase names (and their normalized internal
     # ids) deterministically to provider categories. The frontend sends the
@@ -219,7 +249,8 @@ class ServiceProviderTableGenerator:
             if mapped:
                 return list(mapped)
 
-        task_lower = (task_context or "").lower()
+        fields = self._extract_task_context_fields(task_context)
+        task_lower = self._combined_task_text(task_context, fields)
         relevant_categories: List[str] = []
 
         # Legal — covers business formation, structure choice, IP, licensing, compliance.
@@ -278,8 +309,238 @@ class ServiceProviderTableGenerator:
             relevant_categories = ["consulting"]
 
         return relevant_categories
+
+    def _extract_task_context_fields(self, task_context: str) -> Dict[str, str]:
+        """Parse structured task context from the frontend implementation UI."""
+        fields = {
+            "task_title": "",
+            "task_description": "",
+            "task_purpose": "",
+            "active_step_title": "",
+            "active_step_description": "",
+            "raw": task_context or "",
+        }
+        if not task_context:
+            return fields
+
+        patterns = {
+            "task_title": r"Current Task:\s*(.+?)(?:\n\n|\Z)",
+            "task_description": r"Task Description:\s*(.+?)(?:\n\n|\Z)",
+            "task_purpose": r"Task Purpose:\s*(.+?)(?:\n\n|\Z)",
+            "active_step_title": r"Active Step \d+:\s*(.+?)(?:\n\n|\Z)",
+            "active_step_description": r"Active Step Description:\s*(.+?)(?:\n\n|\Z)",
+        }
+        for key, pattern in patterns.items():
+            match = re.search(pattern, task_context, re.DOTALL | re.IGNORECASE)
+            if match:
+                fields[key] = match.group(1).strip()
+        return fields
+
+    def _combined_task_text(self, task_context: str, fields: Optional[Dict[str, str]] = None) -> str:
+        """Single lowercase blob for keyword/intent resolution."""
+        parsed = fields or self._extract_task_context_fields(task_context)
+        parts = [
+            parsed.get("task_title", ""),
+            parsed.get("task_description", ""),
+            parsed.get("task_purpose", ""),
+            parsed.get("active_step_title", ""),
+            parsed.get("active_step_description", ""),
+            task_context or "",
+        ]
+        return " ".join(p for p in parts if p).lower()
+
+    def _resolve_provider_intent(
+        self,
+        task_context: str,
+        category: str,
+        business_context: Dict[str, Any],
+    ) -> ProviderIntent:
+        """Map the active implementation step to the kind of providers to surface."""
+        fields = self._extract_task_context_fields(task_context)
+        combined = self._combined_task_text(task_context, fields)
+        labels = prompt_labels(business_context)
+        industry = (labels.get("industry") or "business").strip()
+
+        default: ProviderIntent = {
+            "search_role": "Business service provider",
+            "local_provider_types": ["Business Consultant"],
+            "static_keywords": [],
+            "exclude_consumer_industry": False,
+            "guidance": "Recommend professionals or services that help complete the step.",
+        }
+
+        category_defaults: Dict[str, ProviderIntent] = {
+            "legal": {
+                "search_role": "Attorney or legal compliance professional",
+                "local_provider_types": ["Business Attorney", "Business Formation Lawyer"],
+                "static_keywords": ["legal", "attorney", "law", "formation", "compliance"],
+                "exclude_consumer_industry": False,
+                "guidance": "Recommend law firms or legal services — not unrelated businesses.",
+            },
+            "financial": {
+                "search_role": "CPA, accountant, or financial services firm",
+                "local_provider_types": ["CPA/Accountant", "Small Business Banker"],
+                "static_keywords": ["accounting", "cpa", "tax", "bookkeeping", "bank"],
+                "exclude_consumer_industry": False,
+                "guidance": "Recommend accounting, tax, or banking partners.",
+            },
+            "marketing": {
+                "search_role": "Marketing agency or branding professional",
+                "local_provider_types": ["Marketing Agency", "Brand Designer"],
+                "static_keywords": ["marketing", "advertising", "brand", "seo", "social"],
+                "exclude_consumer_industry": True,
+                "guidance": "Recommend agencies or freelancers who provide marketing services — not other consumer brands in the same industry.",
+            },
+            "operations": {
+                "search_role": "Supplier, wholesaler, or operations vendor",
+                "local_provider_types": [
+                    "Restaurant Supply Wholesaler",
+                    "Commercial Kitchen Equipment Supplier",
+                    "Food Ingredient Distributor",
+                ],
+                "static_keywords": [
+                    "supplier", "wholesale", "distributor", "b2b", "equipment",
+                    "inventory", "logistics", "restaurant supply",
+                ],
+                "exclude_consumer_industry": True,
+                "guidance": (
+                    f"Recommend wholesalers, distributors, equipment vendors, and B2B supply "
+                    f"partners. Never recommend other {industry} businesses that sell to consumers."
+                ),
+            },
+            "technology": {
+                "search_role": "IT consultant or software vendor",
+                "local_provider_types": ["IT Consultant", "Web Development Agency"],
+                "static_keywords": ["software", "it", "technology", "hosting", "cloud"],
+                "exclude_consumer_industry": False,
+                "guidance": "Recommend technology vendors and IT service providers.",
+            },
+            "consulting": {
+                "search_role": "Business consultant or industry advisor",
+                "local_provider_types": ["Business Consultant", "Industry Advisor"],
+                "static_keywords": ["consulting", "advisor", "mentor", "sbdc"],
+                "exclude_consumer_industry": False,
+                "guidance": "Recommend advisors who help execute the step.",
+            },
+        }
+
+        intent = dict(category_defaults.get(category, default))
+
+        # Step-level overrides beat coarse category defaults.
+        if any(k in combined for k in [
+            "supplier", "suppliers", "vendor", "vendors", "supply chain",
+            "wholesale", "wholesaler", "distributor", "ingredient", "raw material",
+            "inventory", "procurement", "sourcing", "restaurant supply",
+        ]):
+            intent.update({
+                "search_role": "Wholesale supplier, vendor, or B2B distributor",
+                "local_provider_types": [
+                    "Restaurant Food Supply Wholesaler",
+                    "Commercial Kitchen Equipment Supplier",
+                    "Packaging Supplies Vendor",
+                ],
+                "static_keywords": [
+                    "supplier", "wholesale", "distributor", "b2b", "amazon business",
+                    "restaurant depot", "sysco", "webstaurant", "equipment",
+                ],
+                "exclude_consumer_industry": True,
+                "guidance": (
+                    f"The user is identifying suppliers/vendors for inputs and equipment. "
+                    f"Recommend B2B wholesalers and supply companies — NOT other {industry} "
+                    f"operators that compete for the same customers."
+                ),
+            })
+
+        if any(k in combined for k in [
+            "attorney", "lawyer", "legal", "llc", "incorporation", "trademark",
+            "compliance", "permit", "license",
+        ]):
+            intent.update(category_defaults["legal"])
+
+        if any(k in combined for k in [
+            "accounting", "bookkeeping", "cpa", "tax", "payroll", "bank account",
+        ]):
+            intent.update(category_defaults["financial"])
+
+        if any(k in combined for k in [
+            "marketing", "branding", "social media", "advertising", "seo", "campaign",
+        ]):
+            intent.update(category_defaults["marketing"])
+
+        return intent  # type: ignore[return-value]
+
+    def _looks_like_competitor(
+        self,
+        provider: Dict[str, Any],
+        industry: str,
+        intent: ProviderIntent,
+    ) -> bool:
+        """Heuristic filter for consumer-facing businesses in the user's industry."""
+        if not intent.get("exclude_consumer_industry") or not industry:
+            return False
+
+        blob = " ".join(
+            str(provider.get(k, "") or "")
+            for k in ("name", "description", "specialties", "type")
+        ).lower()
+        industry_tokens = [
+            t.strip()
+            for t in re.split(r"[\s,/]+", industry.lower())
+            if len(t.strip()) >= 4
+        ]
+
+        vendor_signals = (
+            "wholesale", "supplier", "vendor", "distributor", "b2b",
+            "restaurant supply", "food service", "equipment", "commercial kitchen",
+            "packaging", "logistics", "office depot", "amazon business",
+        )
+        competitor_signals = (
+            "mobile", "food truck", "smoothie", "cafe", "coffee shop",
+            "restaurant", "eatery", "bar ", "bistro", "our menu", "order online",
+            "walk-in", "dine-in", "franchise location",
+        )
+
+        has_vendor_signal = any(s in blob for s in vendor_signals)
+        has_competitor_signal = any(s in blob for s in competitor_signals)
+        mentions_industry = any(t in blob for t in industry_tokens)
+
+        if has_vendor_signal and not has_competitor_signal:
+            return False
+        if has_competitor_signal and mentions_industry:
+            return True
+        if mentions_industry and not has_vendor_signal:
+            return True
+        return False
+
+    def _filter_static_providers(
+        self,
+        providers: List[Dict[str, Any]],
+        intent: ProviderIntent,
+    ) -> List[Dict[str, Any]]:
+        keywords = [k.lower() for k in intent.get("static_keywords", []) if k]
+        if not keywords:
+            return providers
+
+        scored: List[tuple[int, Dict[str, Any]]] = []
+        for provider in providers:
+            blob = " ".join(
+                str(provider.get(k, "") or "")
+                for k in ("name", "description", "specialties", "type")
+            ).lower()
+            score = sum(1 for kw in keywords if kw in blob)
+            scored.append((score, provider))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        matched = [p for score, p in scored if score > 0]
+        return matched if matched else providers
     
-    async def _generate_category_providers(self, category: str, business_context: Dict[str, Any], location: str = None) -> Dict[str, Any]:
+    async def _generate_category_providers(
+        self,
+        category: str,
+        business_context: Dict[str, Any],
+        location: str = None,
+        task_context: str = "",
+    ) -> Dict[str, Any]:
         """Generate providers for a specific category"""
         
         category_info = self.provider_categories[category]
@@ -293,7 +554,9 @@ class ServiceProviderTableGenerator:
         }
         
         # Generate structured provider data including actual local businesses
-        providers = await self._get_predefined_providers_with_local(category, category_info, business_context, location)
+        providers = await self._get_predefined_providers_with_local(
+            category, category_info, business_context, location, task_context=task_context
+        )
         
         return {
             "category": category,
@@ -304,38 +567,46 @@ class ServiceProviderTableGenerator:
             "location": location
         }
     
-    async def _get_predefined_providers_with_local(self, category: str, category_info: Dict[str, Any], business_context: Dict[str, Any], location: str = None) -> List[Dict[str, Any]]:
-        """Get providers including AI-generated actual local businesses"""
-        
-        # Get the static nationwide providers
-        static_providers = self._get_static_providers(category, location)
-        
-        # Generate actual local businesses using AI
-        local_providers = []
+    async def _get_predefined_providers_with_local(
+        self,
+        category: str,
+        category_info: Dict[str, Any],
+        business_context: Dict[str, Any],
+        location: str = None,
+        task_context: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Get providers including AI-generated local businesses for the active step."""
+
+        intent = self._resolve_provider_intent(task_context, category, business_context)
+        static_providers = self._filter_static_providers(
+            self._get_static_providers(category, location),
+            intent,
+        )
+
+        local_providers: List[Dict[str, Any]] = []
         if location:
-            provider_type_map = {
-                "legal": "Attorney",
-                "financial": "CPA/Accountant",
-                "marketing": "Marketing Agency",
-                "operations": "Business Services",
-                "technology": "IT/Tech Services",
-                "consulting": "Business Consultant"
-            }
-            
-            provider_type = provider_type_map.get(category, "Business Service Provider")
-            try:
-                local_providers = await self.generate_actual_local_providers(
-                    provider_type=provider_type,
-                    category=category,
-                    business_context=business_context,
-                    location=location,
-                    count=3  # Generate 3 actual local businesses
-                )
-            except Exception as e:
-                print(f"Error generating local providers: {e}")
-        
-        # Combine local (actual businesses) + nationwide services
-        return local_providers + static_providers
+            for provider_type in intent["local_provider_types"][:3]:
+                try:
+                    generated = await self.generate_actual_local_providers(
+                        provider_type=provider_type,
+                        category=category,
+                        business_context=business_context,
+                        location=location,
+                        count=1,
+                        task_context=task_context,
+                        provider_intent=intent,
+                    )
+                    local_providers.extend(generated)
+                except Exception as e:
+                    print(f"Error generating local providers for {provider_type}: {e}")
+
+        combined = local_providers + static_providers
+        industry = (prompt_labels(business_context).get("industry") or "").lower()
+        filtered = [
+            p for p in combined
+            if not self._looks_like_competitor(p, industry, intent)
+        ]
+        return filtered if filtered else combined
     
     def _get_static_providers(self, category: str, location: str = None) -> List[Dict[str, Any]]:
         """Get static nationwide service providers"""
@@ -413,11 +684,41 @@ class ServiceProviderTableGenerator:
                     "name": "Amazon Business",
                     "type": "Nationwide Service",
                     "local": False,
-                    "description": "B2B marketplace for business supplies and equipment.",
+                    "description": "B2B marketplace for business supplies, ingredients, packaging, and equipment.",
                     "key_considerations": "Wide selection, bulk pricing, fast delivery",
                     "estimated_cost": "Varies by product",
                     "contact_method": "Website: business.amazon.com",
-                    "specialties": "Business supplies, equipment, bulk purchasing"
+                    "specialties": "Business supplies, wholesale ingredients, equipment, bulk purchasing"
+                },
+                {
+                    "name": "WebstaurantStore",
+                    "type": "Nationwide Service",
+                    "local": False,
+                    "description": "Online restaurant supply store for food service equipment and disposables.",
+                    "key_considerations": "Large catalog, competitive pricing, ships nationwide",
+                    "estimated_cost": "Varies by product",
+                    "contact_method": "Website: webstaurantstore.com",
+                    "specialties": "Restaurant supplies, kitchen equipment, packaging"
+                },
+                {
+                    "name": "Sysco",
+                    "type": "Nationwide Service",
+                    "local": False,
+                    "description": "Food products and supplies wholesaler for restaurants and food businesses.",
+                    "key_considerations": "Requires account setup, strong for recurring ingredient orders",
+                    "estimated_cost": "Wholesale pricing",
+                    "contact_method": "Website: sysco.com",
+                    "specialties": "Food wholesale, restaurant supply distribution"
+                },
+                {
+                    "name": "Restaurant Depot",
+                    "type": "Mixed",
+                    "local": True,
+                    "description": "Wholesale cash-and-carry supplier for restaurants and food businesses.",
+                    "key_considerations": "Membership may be required, strong for bulk ingredients",
+                    "estimated_cost": "Wholesale pricing",
+                    "contact_method": "Local warehouse or restaurantdepot.com",
+                    "specialties": "Wholesale food, beverages, supplies, equipment"
                 },
                 {
                     "name": "Office Depot",
