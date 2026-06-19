@@ -1,4 +1,4 @@
-from db.supabase import supabase
+from db.supabase import supabase, supabase_auth
 import logging
 import os
 import httpx
@@ -151,7 +151,7 @@ async def create_user(
         except Exception as admin_error:
             # Fallback to regular sign_up if admin API fails
             logger.warning(f"Admin API user creation failed, using sign_up: {admin_error}")
-            response = supabase.auth.sign_up({
+            response = supabase_auth.auth.sign_up({
                 "email": email,
                 "password": password,
                 "options": {
@@ -271,7 +271,7 @@ async def authenticate_user(email: str, password: str):
     Raises descriptive error for email confirmation issues.
     """
     try:
-        response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        response = supabase_auth.auth.sign_in_with_password({"email": email, "password": password})
         if response.session is None:
             # Check if user exists but email is not confirmed
             # Supabase returns None session for unconfirmed emails but doesn't always throw error
@@ -376,7 +376,7 @@ async def send_reset_password_email(email: str):
         # This creates a proper recovery link that Supabase's verify endpoint can process
         # The redirect_to URL must be in Supabase's allowed redirect URLs list
         try:
-            supabase.auth.reset_password_for_email(email, {"redirect_to": redirect_url})
+            supabase_auth.auth.reset_password_for_email(email, {"redirect_to": redirect_url})
             logger.info(f"Password reset email triggered via Supabase for {email} (redirect_to: {redirect_url})")
         except ValueError:
             raise
@@ -592,7 +592,7 @@ async def update_password(token: str, new_password: str):
 def refresh_session(refresh_token: str):
     try:
         logger.info("Attempting to refresh session with token")
-        response = supabase.auth.refresh_session(refresh_token)
+        response = supabase_auth.auth.refresh_session(refresh_token)
         if response.session is None:
             logger.error("Token refresh failed - no session returned")
             raise Exception("Token refresh failed")

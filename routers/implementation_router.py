@@ -6,6 +6,13 @@ from services.rag_service import conduct_rag_research, validate_with_rag
 from services.service_provider_tables_service import generate_provider_table, get_task_providers
 from services.session_service import get_session, patch_session
 from services.chat_service import fetch_chat_history
+from services.implementation_chat_service import (
+    clear_implementation_chat,
+    fetch_implementation_chat_messages,
+    fetch_recent_implementation_chat_messages,
+    import_implementation_chat_messages,
+    save_implementation_chat_message,
+)
 from middlewares.auth import verify_auth_token
 from utils.business_context import (
     fetch_authoritative_business_context,
@@ -18,7 +25,17 @@ import os
 import uuid
 from datetime import datetime
 import random
-from utils.implementation_uploads import resolve_implementation_upload_dir
+from utils.implementation_uploads import (
+    build_implementation_storage_path,
+    document_record_with_view_url,
+    upload_implementation_document_bytes,
+)
+from services.implementation_document_service import (
+    get_implementation_document,
+    insert_implementation_document,
+    list_implementation_documents,
+    _format_supabase_error,
+)
 
 # Initialize OpenAI client for Chat With Angel
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -1074,6 +1091,50 @@ async def complete_implementation_task(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to complete task: {str(e)}")
 
+@router.get("/sessions/{session_id}/tasks/{task_id}/documents")
+async def list_implementation_task_documents(
+    session_id: str,
+    task_id: str,
+    request: Request,
+):
+    """List proof-of-completion documents for a task with fresh signed view URLs."""
+    user_id = request.state.user["id"]
+    session = await get_session(session_id, user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        rows = await list_implementation_documents(session_id, task_id)
+        documents = [document_record_with_view_url(row) for row in rows]
+        return {"success": True, "result": {"documents": documents}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+
+@router.get("/sessions/{session_id}/tasks/{task_id}/documents/{file_id}/view-url")
+async def get_implementation_document_view_url(
+    session_id: str,
+    task_id: str,
+    file_id: str,
+    request: Request,
+):
+    """Return a fresh signed URL to open/download one stored document."""
+    user_id = request.state.user["id"]
+    row = await get_implementation_document(session_id, user_id, file_id)
+    if not row or row.get("task_id") != task_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    try:
+        document = document_record_with_view_url(row)
+        if not document.get("view_url"):
+            raise HTTPException(status_code=500, detail="Could not generate view link")
+        return {"success": True, "result": {"document": document}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create view link: {str(e)}")
+
+
 @router.post("/sessions/{session_id}/tasks/{task_id}/upload-document")
 async def upload_implementation_document(
     session_id: str,
@@ -1081,7 +1142,7 @@ async def upload_implementation_document(
     request: Request,
     file: UploadFile = File(...)
 ):
-    """Upload document for implementation task completion."""
+    """Upload proof-of-completion document to Supabase Storage and persist metadata."""
 
     user_id = request.state.user["id"]
 
@@ -1103,17 +1164,37 @@ async def upload_implementation_document(
         if len(content) > 10 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File size must be less than 10MB.")
 
-        upload_dir = resolve_implementation_upload_dir()
         file_extension = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else "bin"
-        unique_filename = f"{session_id}_{task_id}_{uuid.uuid4().hex}.{file_extension}"
-        file_path = os.path.join(upload_dir, unique_filename)
-
-        with open(file_path, "wb") as buffer:
-            buffer.write(content)
+        file_id, storage_path = build_implementation_storage_path(
+            user_id,
+            session_id,
+            task_id,
+            file_extension,
+        )
 
         session = await get_session(session_id, user_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+
+        storage_bucket = upload_implementation_document_bytes(
+            storage_path=storage_path,
+            content=content,
+            content_type=file.content_type or "application/octet-stream",
+        )
+
+        db_row = await insert_implementation_document(
+            session_id=session_id,
+            user_id=user_id,
+            task_id=task_id,
+            file_id=file_id,
+            original_filename=file.filename or f"{file_id}.{file_extension}",
+            content_type=file.content_type or "application/octet-stream",
+            size_bytes=len(content),
+            storage_bucket=storage_bucket,
+            storage_path=storage_path,
+        )
+
+        document = document_record_with_view_url(db_row)
 
         business_context = session.get("business_context", {}) or {}
         if not isinstance(business_context, dict):
@@ -1124,16 +1205,19 @@ async def upload_implementation_document(
             uploads_by_task = {}
 
         record = {
-            "file_id": unique_filename,
-            "original_filename": file.filename or unique_filename,
-            "content_type": file.content_type,
-            "size_bytes": len(content),
-            "uploaded_at": datetime.now().isoformat(),
-            "storage_path": file_path,
+            "file_id": file_id,
+            "document_id": str(db_row.get("id") or ""),
+            "original_filename": document["original_filename"],
+            "content_type": document["content_type"],
+            "size_bytes": document["size_bytes"],
+            "uploaded_at": document["uploaded_at"],
+            "storage_bucket": storage_bucket,
+            "storage_path": storage_path,
+            "view_url": document.get("view_url"),
         }
         task_uploads = list(uploads_by_task.get(task_id) or [])
-        task_uploads.append(record)
-        uploads_by_task[task_id] = task_uploads[-5:]
+        task_uploads.insert(0, record)
+        uploads_by_task[task_id] = task_uploads[:20]
         business_context["implementation_uploads"] = uploads_by_task
 
         await patch_session(session_id, user_id, {"business_context": business_context})
@@ -1142,20 +1226,20 @@ async def upload_implementation_document(
             "success": True,
             "message": "Document uploaded successfully",
             "filename": file.filename,
-            "file_id": unique_filename,
+            "file_id": file_id,
             "task_id": task_id,
-            "uploaded_at": record["uploaded_at"],
+            "uploaded_at": document.get("uploaded_at"),
+            "view_url": document.get("view_url"),
+            "document": document,
         }
 
     except HTTPException:
         raise
-    except OSError as e:
+    except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Server could not store the uploaded file: {e}",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to upload document: {str(e)}")
+            detail=f"Failed to upload document: {_format_supabase_error(e)}",
+        ) from e
 
 @router.get("/sessions/{session_id}/progress")
 async def get_implementation_progress(session_id: str, request: Request):
@@ -1185,6 +1269,66 @@ async def get_implementation_progress(session_id: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Failed to get implementation progress: {str(e)}")
 
 
+@router.get("/sessions/{session_id}/chat")
+async def get_implementation_chat(session_id: str, request: Request):
+    """Load persisted Angel chat for an Implementation venture."""
+    try:
+        user_id = request.state.user.get("id")
+        session = await get_session(session_id, user_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        messages = await fetch_implementation_chat_messages(session_id)
+        return {"success": True, "result": {"messages": messages}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load implementation chat: {str(e)}")
+
+
+@router.delete("/sessions/{session_id}/chat")
+async def delete_implementation_chat(session_id: str, request: Request):
+    """Clear persisted Angel chat for an Implementation venture."""
+    try:
+        user_id = request.state.user.get("id")
+        session = await get_session(session_id, user_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        await clear_implementation_chat(session_id, user_id)
+        return {"success": True, "message": "Implementation chat cleared"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear implementation chat: {str(e)}")
+
+
+@router.post("/sessions/{session_id}/chat/import")
+async def import_implementation_chat(session_id: str, request: Request):
+    """One-time import from legacy browser storage (skipped if DB already has messages)."""
+    try:
+        user_id = request.state.user.get("id")
+        session = await get_session(session_id, user_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        payload = await request.json()
+        messages = payload.get("messages") or []
+        if not isinstance(messages, list):
+            raise HTTPException(status_code=400, detail="messages must be an array")
+
+        imported_count = await import_implementation_chat_messages(session_id, user_id, messages)
+        return {
+            "success": True,
+            "result": {"imported_count": imported_count},
+            "message": "Import complete" if imported_count else "No import needed",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to import implementation chat: {str(e)}")
+
+
 @router.post("/chat-with-angel")
 async def chat_with_angel(request: Request):
     """
@@ -1198,7 +1342,7 @@ async def chat_with_angel(request: Request):
         mode = payload.get("mode", "help")  # help, draft, brainstorm
         business_context = payload.get("business_context", {})
         task_context = payload.get("task_context", "")
-        conversation_history = payload.get("conversation_history", [])
+        task_id = payload.get("task_id")
         
         if not session_id or not message:
             raise HTTPException(status_code=400, detail="session_id and message are required")
@@ -1214,14 +1358,23 @@ async def chat_with_angel(request: Request):
         # Extract business context if needed
         if not business_context.get("business_name") or business_context.get("business_name") == "Unsure":
             business_context = await extract_valid_business_context(session, session_id)
-        
-        # Build conversation context
-        context_messages = []
-        for msg in conversation_history[-10:]:  # Last 10 messages
-            context_messages.append({
-                "role": msg.get("role", "user"),
-                "content": msg.get("content", "")
-            })
+
+        # Prior turns from DB (before persisting this user message).
+        db_history = await fetch_recent_implementation_chat_messages(session_id, limit=10)
+        context_messages = [
+            {"role": row.get("role", "user"), "content": row.get("content", "")}
+            for row in db_history
+            if row.get("content")
+        ]
+
+        user_row = await save_implementation_chat_message(
+            session_id,
+            user_id,
+            "user",
+            message,
+            mode=mode if mode in ("help", "draft", "brainstorm") else None,
+            task_id=str(task_id) if task_id else None,
+        )
         
         # Create mode-specific system prompts
         mode_prompts = {
@@ -1302,13 +1455,24 @@ GUARDRAILS:
         )
         
         assistant_response = response.choices[0].message.content
+
+        assistant_row = await save_implementation_chat_message(
+            session_id,
+            user_id,
+            "assistant",
+            assistant_response,
+            mode=mode if mode in ("help", "draft", "brainstorm") else None,
+            task_id=str(task_id) if task_id else None,
+        )
         
         return {
             "success": True,
             "result": {
                 "response": assistant_response,
                 "mode": mode,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "user_message": user_row,
+                "assistant_message": assistant_row,
             }
         }
         

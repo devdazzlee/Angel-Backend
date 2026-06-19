@@ -1,6 +1,6 @@
 from fastapi import Request, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from db.supabase import supabase
+from db.supabase import supabase_auth
 import logging
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,7 @@ async def verify_auth_token(
     
     try:
         # Use Supabase's built-in token verification
-        user_response = supabase.auth.get_user(token)
+        user_response = supabase_auth.auth.get_user(token)
         
         if not user_response or not user_response.user:
             print("❌ Invalid user from token")

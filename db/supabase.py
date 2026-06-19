@@ -1,6 +1,5 @@
 import os
 from dotenv import load_dotenv
-import httpx
 from supabase import Client, create_client
 from supabase.lib.client_options import ClientOptions
 
@@ -23,9 +22,20 @@ def create_supabase_client() -> Client:
             "(SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY from the Supabase dashboard → "
             "Project Settings → API → service_role secret)."
         )
-    http_client = httpx.Client(timeout=SUPABASE_HTTP_TIMEOUT)
-    options = ClientOptions(httpx_client=http_client)
+    # Do NOT pass a shared httpx.Client — supabase-py reuses it for PostgREST and
+    # Storage, and Storage mutates client.base_url to /storage/v1/, breaking DB calls.
+    options = ClientOptions(
+        postgrest_client_timeout=SUPABASE_HTTP_TIMEOUT,
+        storage_client_timeout=SUPABASE_HTTP_TIMEOUT,
+        function_client_timeout=SUPABASE_HTTP_TIMEOUT,
+    )
     return create_client(SUPABASE_URL, SUPABASE_KEY, options)
 
 
+# Service-role client for PostgREST / Storage / admin RPC.
+# Never call sign_in, sign_up, or refresh_session on this instance — those swap
+# Authorization to the user's JWT and break server-side uploads (Storage RLS).
 supabase: Client = create_supabase_client()
+
+# Isolated client for end-user auth flows (login, refresh, signup).
+supabase_auth: Client = create_supabase_client()
