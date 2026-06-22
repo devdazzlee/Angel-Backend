@@ -36,6 +36,7 @@ from services.implementation_document_service import (
     list_implementation_documents,
     _format_supabase_error,
 )
+from services import implementation_progress_service as progress_svc
 
 # Initialize OpenAI client for Chat With Angel
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -335,55 +336,39 @@ async def _load_implementation_session_context(
     if not isinstance(business_context, dict):
         business_context = {}
 
-    completed_tasks: List[str] = list(
-        business_context.get("completed_implementation_tasks", []) or []
+    completed_tasks, substep_notes_map, completion_source = (
+        await progress_svc.load_legacy_completion_state(session_id, business_context)
     )
 
-    try:
-        from db.supabase import supabase
-
-        task_records = (
-            supabase.from_("implementation_tasks")
-            .select("task_name, metadata")
-            .eq("session_id", session_id)
-            .not_.is_("completed_at", "null")
-            .execute()
+    if completion_source == "legacy" and completed_tasks:
+        migrated = await progress_svc.migrate_legacy_to_database(
+            session_id=session_id,
+            user_id=user_id,
+            completed_tasks=completed_tasks,
+            substep_notes=substep_notes_map,
+            phase_resolver=_get_phase_from_task_id,
         )
-        if task_records.data:
-            for record in task_records.data:
-                task_name = record.get("task_name")
-                metadata = record.get("metadata", {})
-                task_id = metadata.get("task_id") if isinstance(metadata, dict) else task_name
-                substep_number = (
-                    metadata.get("substep_number") if isinstance(metadata, dict) else None
-                )
-                if not task_id:
-                    task_id = task_name
-                if not task_id:
-                    continue
-                if substep_number:
-                    substep_id = f"{task_id}_substep_{substep_number}"
-                    if substep_id not in completed_tasks:
-                        completed_tasks.append(substep_id)
-                elif task_id not in completed_tasks:
-                    completed_tasks.append(task_id)
-            completed_tasks = list(set(completed_tasks))
-    except Exception as e:
-        print(f"Note: Could not fetch from implementation_tasks table: {e}")
+        if migrated:
+            print(
+                f"✅ Migrated {migrated} implementation completion(s) to "
+                f"implementation_completions for session {session_id}"
+            )
+            completed_tasks, substep_notes_map, _ = (
+                await progress_svc.load_legacy_completion_state(session_id, business_context)
+            )
 
     completed_tasks, structure_synced = task_manager.apply_structure_prerequisite_completion(
         session_data, completed_tasks
     )
     if structure_synced:
-        business_context = dict(business_context)
-        business_context["completed_implementation_tasks"] = completed_tasks
+        business_context = progress_svc.build_business_context_cache(
+            business_context,
+            completed_tasks,
+            substep_notes_map,
+        )
         if legal_structure:
             business_context["legal_structure"] = legal_structure
         await patch_session(session_id, user_id, {"business_context": business_context})
-
-    substep_notes_map = business_context.get("substep_notes") or {}
-    if not isinstance(substep_notes_map, dict):
-        substep_notes_map = {}
 
     return {
         "session": session,
@@ -401,110 +386,38 @@ async def get_current_implementation_task(session_id: str, request: Request):
     user_id = request.state.user["id"]
     
     try:
-        # Check cache first to prevent repeated processing
         cache_key = f"{session_id}_{user_id}"
+
+        # Backfill implementation_completions before cache (cache skipped migration)
+        session = await get_session(session_id, user_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        business_context_raw = session.get("business_context", {}) or {}
+        if not isinstance(business_context_raw, dict):
+            business_context_raw = {}
+        migrated = await progress_svc.ensure_legacy_migrated_if_needed(
+            session_id,
+            user_id,
+            business_context_raw,
+            phase_resolver=_get_phase_from_task_id,
+        )
+        if migrated and cache_key in task_cache:
+            del task_cache[cache_key]
+
         if cache_key in task_cache:
             cached_result = task_cache[cache_key]
             if (datetime.now() - cached_result['timestamp']).seconds < CACHE_TTL:
                 print(f"📋 Using cached implementation task for session: {session_id}")
                 return cached_result['data']
-        
-        # Fetch real session data from database
-        session = await get_session(session_id, user_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        from services.angel_service import extract_business_context_from_history
-        from utils.business_context import ensure_session_business_context
 
-        normalized_context, ctx_source, _ctx_updated = await ensure_session_business_context(
-            session_id,
-            session,
-            fetch_history=fetch_chat_history,
-            extract_from_history=extract_business_context_from_history,
-            patch_session=lambda sid, updates: patch_session(sid, user_id, updates),
-        )
-        from services.business_identity_extractor import get_tagged_user_answer
-
-        chat_history = await fetch_chat_history(session_id)
-        legal_structure = (
-            clean_context_value(normalized_context.get("legal_structure"))
-            or clean_context_value(normalized_context.get("business_structure"))
-            or get_tagged_user_answer(chat_history, "legal_structure")
-        )
-
-        session_data = {
-            "business_name": normalized_context.get("business_name", ""),
-            "industry": normalized_context.get("industry", ""),
-            "location": normalized_context.get("location", ""),
-            "business_type": normalized_context.get("business_type", ""),
-            "legal_structure": legal_structure,
-            "business_structure": legal_structure,
-        }
-        print(f"📊 Implementation task - business context ({ctx_source}): {session_data}")
-        
-        # Get completed tasks from session business_context or database
-        completed_tasks = []
-        business_context = session.get("business_context", {}) or {}
-        if isinstance(business_context, dict):
-            completed_tasks = business_context.get("completed_implementation_tasks", []) or []
-        
-        # Also check implementation_tasks table if it exists
-        try:
-            from db.supabase import supabase
-            # Query using completed_at IS NOT NULL
-            # Schema uses task_name (not task_id) and stores substep_number in metadata JSONB
-            task_records = supabase.from_("implementation_tasks").select("task_name, metadata").eq("session_id", session_id).not_.is_("completed_at", "null").execute()
-            
-            if task_records.data:
-                for record in task_records.data:
-                    task_name = record.get("task_name")
-                    metadata = record.get("metadata", {})
-                    
-                    # Extract task_id and substep_number from metadata
-                    task_id = metadata.get("task_id") if isinstance(metadata, dict) else task_name
-                    substep_number = metadata.get("substep_number") if isinstance(metadata, dict) else None
-                    
-                    # Use task_name as fallback if task_id not in metadata
-                    if not task_id:
-                        task_id = task_name
-                    
-                    if task_id:
-                        if substep_number:
-                            # Add substep ID
-                            substep_id = f"{task_id}_substep_{substep_number}"
-                            if substep_id not in completed_tasks:
-                                completed_tasks.append(substep_id)
-                        else:
-                            # Add main task ID (no substep_number means main task completed)
-                            if task_id not in completed_tasks:
-                                completed_tasks.append(task_id)
-                            
-                            # Also ensure all substeps for this task are marked as completed
-                            # (since main task completion implies all substeps are done)
-                            # We'll add placeholder substep IDs to maintain consistency
-                            # But this is optional - the main task ID is what matters
-                # Remove duplicates
-                completed_tasks = list(set(completed_tasks))
-        except Exception as e:
-            print(f"Note: Could not fetch from implementation_tasks table: {e}")
-            # Continue with business_context data
-
-        completed_tasks, structure_synced = task_manager.apply_structure_prerequisite_completion(
-            session_data, completed_tasks
-        )
-        if structure_synced:
-            business_context = dict(business_context) if isinstance(business_context, dict) else {}
-            business_context["completed_implementation_tasks"] = completed_tasks
-            if legal_structure:
-                business_context["legal_structure"] = legal_structure
-            await patch_session(session_id, user_id, {"business_context": business_context})
-            if cache_key in task_cache:
-                del task_cache[cache_key]
-            print(
-                "✅ Skipped duplicate business_structure_selection — "
-                f"structure already captured: {legal_structure}"
-            )
+        # Fetch session + completion state (DB source of truth with legacy fallback)
+        ctx = await _load_implementation_session_context(session_id, user_id)
+        session = ctx["session"]
+        session_data = ctx["session_data"]
+        completed_tasks = ctx["completed_tasks"]
+        substep_notes_map = ctx["substep_notes_map"]
+        business_context = ctx["business_context"]
+        print(f"📊 Implementation task - business context: {session_data}")
         
         # Get next task
         task_result = await task_manager.get_next_implementation_task(session_data, completed_tasks)
@@ -824,6 +737,89 @@ async def get_implementation_service_providers(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get service providers: {str(e)}")
 
+
+async def _already_completed_response(
+    session: Dict[str, Any],
+    task_id: str,
+    substep_number: Optional[int],
+    completed_tasks: List[str],
+    *,
+    is_substep: bool,
+) -> Dict[str, Any]:
+    """Idempotent response when completion is submitted again with no new work."""
+    phases_completed = _calculate_phases_completed(completed_tasks)
+    phase_progress_details = {
+        "Legal Foundation": _calculate_phase_progress(completed_tasks, "Legal Foundation"),
+        "Financial Systems": _calculate_phase_progress(completed_tasks, "Financial Systems"),
+        "Operations Setup": _calculate_phase_progress(completed_tasks, "Operations Setup"),
+        "Marketing & Sales": _calculate_phase_progress(completed_tasks, "Marketing & Sales"),
+        "Launch & Growth": _calculate_phase_progress(completed_tasks, "Launch & Growth"),
+    }
+    main_tasks_completed = len([t for t in completed_tasks if "_substep_" not in t])
+    substeps_completed = len([t for t in completed_tasks if "_substep_" in t])
+    total_main_tasks = 25
+    main_tasks_percent = (
+        min(100, int((main_tasks_completed / total_main_tasks) * 100))
+        if total_main_tasks > 0
+        else 0
+    )
+    updated_progress = {
+        "completed": main_tasks_completed,
+        "total": total_main_tasks,
+        "percent": main_tasks_percent,
+        "main_tasks_completed": main_tasks_completed,
+        "substeps_completed": substeps_completed,
+        "phases_completed": phases_completed,
+        "current_phase": session.get("current_phase", "implementation"),
+        "milestone": _get_milestone_name(session.get("current_phase", "implementation")),
+        "phase_progress": phase_progress_details,
+    }
+
+    session_data = business_context_from_session(session)
+    next_task_info = None
+    all_substeps_completed = not is_substep
+    next_substep = None
+
+    try:
+        next_task_result = await task_manager.get_next_implementation_task(
+            session_data, completed_tasks
+        )
+        if is_substep:
+            all_substeps_completed = next_task_result.get("task_id") != task_id
+            if (
+                not all_substeps_completed
+                and next_task_result.get("task_id") == task_id
+            ):
+                next_substep = next_task_result.get("task_details", {}).get(
+                    "current_substep", 1
+                )
+        if next_task_result.get("task_id"):
+            next_task_info = {
+                "task_id": next_task_result.get("task_id"),
+                "title": next_task_result.get("task_details", {}).get("title", ""),
+                "phase": next_task_result.get("phase", ""),
+            }
+    except Exception as exc:
+        print(f"Note: Could not get next task for idempotent completion: {exc}")
+
+    label = "Substep" if is_substep else "Task"
+    return {
+        "success": True,
+        "already_completed": True,
+        "message": f"{label} was already completed",
+        "progress": updated_progress,
+        "all_substeps_completed": all_substeps_completed,
+        "next_substep": next_substep,
+        "next_task": next_task_info,
+        "result": {
+            "task_id": task_id,
+            "substep_number": substep_number,
+            "completed_at": datetime.now().isoformat(),
+            "notes": "",
+        },
+    }
+
+
 @router.post("/sessions/{session_id}/tasks/{task_id}/complete")
 async def complete_implementation_task(
     session_id: str,
@@ -857,8 +853,34 @@ async def complete_implementation_task(
         if not isinstance(business_context, dict):
             business_context = {}
         
-        # Get completed tasks
+        # Get completed tasks (snapshot before this completion)
         completed_tasks = business_context.get("completed_implementation_tasks", []) or []
+        completed_before = set(completed_tasks)
+
+        has_new_metadata = bool(
+            (payload.get("notes") or payload.get("completion_notes") or "").strip()
+            or payload.get("decision")
+            or payload.get("file_id")
+        )
+
+        if substep_number:
+            substep_id = f"{task_id}_substep_{substep_number}"
+            if substep_id in completed_before and not has_new_metadata:
+                return await _already_completed_response(
+                    session,
+                    task_id,
+                    substep_number,
+                    completed_tasks,
+                    is_substep=True,
+                )
+        elif task_id in completed_before:
+            return await _already_completed_response(
+                session,
+                task_id,
+                None,
+                completed_tasks,
+                is_substep=False,
+            )
         
         # Get task phase - we need this for database save
         task_phase = None
@@ -918,31 +940,11 @@ async def complete_implementation_task(
         # If we don't have phase yet (substep completion), determine it from task_id
         if not task_phase:
             task_phase = _get_phase_from_task_id(task_id)
-        
-        # Update business_context with completed tasks
-        business_context["completed_implementation_tasks"] = completed_tasks
-        business_context["last_completed_task"] = {
-            "task_id": task_id,
-            "substep_number": substep_number,
-            "completed_at": datetime.now().isoformat(),
-            "decision": decision,
-            "notes": notes,
-            "uploaded_file": uploaded_file,
-            "file_id": uploaded_file_id,
-        }
 
-        # Persist the user's note keyed by the same id we use to track
-        # completion (`{task_id}_substep_{step_number}` for substeps,
-        # bare `task_id` for full-task completion). This lets the GET
-        # endpoint hand each substep its own note back, so the Implementation
-        # dashboard can render the note inline and the "Click to Edit"
-        # modal can pre-fill what the user previously wrote. We always
-        # update on (re-)submit so editing a note actually saves the new
-        # value; if the user submits an empty note we drop the entry so
-        # stale notes can be cleared.
         substep_notes_map = business_context.get("substep_notes") or {}
         if not isinstance(substep_notes_map, dict):
             substep_notes_map = {}
+
         note_key = f"{task_id}_substep_{substep_number}" if substep_number else task_id
         if notes:
             substep_notes_map[note_key] = notes
@@ -958,40 +960,46 @@ async def complete_implementation_task(
         if task_id in completed_tasks:
             _record_completed_roadmap_step(business_context, task_id)
 
-        # Save to database
-        await patch_session(session_id, {
-            "business_context": business_context
-        })
-        
-        # Also save to implementation_tasks table if it exists
-        try:
-            from db.supabase import supabase
-            # Schema uses task_name (not task_id) and stores substep_number in metadata JSONB
-            # Phase is required (NOT NULL constraint)
-            upsert_data = {
-                "session_id": session_id,
-                "task_name": task_id,  # Use task_name column (exists in schema)
-                "phase": task_phase or "legal_formation",  # Required field - use determined phase or default
-                "completed_at": datetime.now().isoformat(),
-                "user_id": user_id,
-                "status": "completed",  # Set status to completed
-                "metadata": {
-                    "task_id": task_id,
-                    "substep_number": substep_number,
-                    "decision": decision,
-                    "notes": notes,
-                    "completed_at": datetime.now().isoformat()
-                }
-            }
-            
-            # Use upsert with conflict resolution on session_id + task_name
-            # Note: If unique constraint doesn't exist, this will just insert
-            supabase.from_("implementation_tasks").upsert(upsert_data).execute()
-            print(f"✅ Saved task completion to implementation_tasks: {task_id} (phase: {task_phase})" + (f" (substep {substep_number})" if substep_number else ""))
-        except Exception as e:
-            print(f"Note: Could not save to implementation_tasks table: {e}")
-            # This is not critical - business_context is the primary storage
-        
+        last_completed = {
+            "task_id": task_id,
+            "substep_number": substep_number,
+            "completed_at": datetime.now().isoformat(),
+            "decision": decision,
+            "notes": notes,
+            "uploaded_file": uploaded_file,
+            "file_id": uploaded_file_id,
+        }
+
+        business_context = progress_svc.build_business_context_cache(
+            business_context,
+            completed_tasks,
+            substep_notes_map,
+            last_completed=last_completed,
+        )
+
+        # Denormalized cache on chat_sessions (roadmap + legacy readers)
+        await patch_session(session_id, user_id, {"business_context": business_context})
+
+        # Source of truth: implementation_completions table
+        new_keys = [k for k in completed_tasks if k not in completed_before]
+        keys_to_upsert = list(new_keys)
+        if notes and note_key not in keys_to_upsert:
+            keys_to_upsert.append(note_key)
+
+        notes_by_key = {note_key: notes} if notes else {}
+        await progress_svc.persist_completion_keys(
+            session_id=session_id,
+            user_id=user_id,
+            task_id=task_id,
+            phase=task_phase or "legal_formation",
+            completion_keys=keys_to_upsert,
+            notes_by_key=notes_by_key,
+            decision=decision,
+            actions=actions,
+            documents=documents,
+            file_id=uploaded_file_id,
+            phase_resolver=_get_phase_from_task_id,
+        )
         # CRITICAL: Clear task cache so next task loads correctly
         cache_key = f"{session_id}_{user_id}"
         if cache_key in task_cache:
@@ -1243,28 +1251,51 @@ async def upload_implementation_document(
 
 @router.get("/sessions/{session_id}/progress")
 async def get_implementation_progress(session_id: str, request: Request):
-    """Get implementation progress for a session"""
-    
+    """Get implementation progress for a session (from implementation_completions)."""
     user_id = request.state.user["id"]
-    
+
     try:
-        # Get progress data (you'll need to implement this based on your session service)
-        progress_data = {
-            "completed_tasks": 5,
-            "total_tasks": 25,
-            "percent_complete": 20,
-            "phases_completed": 1,
-            "current_phase": "legal_formation",
-            "next_task": "business_registration",
-            "estimated_completion": "8-12 weeks"
+        ctx = await _load_implementation_session_context(session_id, user_id)
+        completed_tasks = ctx["completed_tasks"]
+        session = ctx["session"]
+
+        main_tasks_completed = len([t for t in completed_tasks if "_substep_" not in t])
+        substeps_completed = len([t for t in completed_tasks if "_substep_" in t])
+        total_main_tasks = progress_svc.TOTAL_MAIN_TASKS
+        phases_completed = _calculate_phases_completed(completed_tasks)
+        phase_progress_details = {
+            "Legal Foundation": _calculate_phase_progress(completed_tasks, "Legal Foundation"),
+            "Financial Systems": _calculate_phase_progress(completed_tasks, "Financial Systems"),
+            "Operations Setup": _calculate_phase_progress(completed_tasks, "Operations Setup"),
+            "Marketing & Sales": _calculate_phase_progress(completed_tasks, "Marketing & Sales"),
+            "Launch & Growth": _calculate_phase_progress(completed_tasks, "Launch & Growth"),
         }
-        
+        current_phase = _get_phase_from_task_id(
+            next((t for t in completed_tasks if "_substep_" not in t), "business_structure_selection")
+        ) if completed_tasks else "legal_formation"
+
+        progress_data = {
+            "completed_tasks": main_tasks_completed,
+            "total_tasks": total_main_tasks,
+            "percent_complete": min(
+                100,
+                int((main_tasks_completed / total_main_tasks) * 100) if total_main_tasks else 0,
+            ),
+            "main_tasks_completed": main_tasks_completed,
+            "substeps_completed": substeps_completed,
+            "phases_completed": phases_completed,
+            "current_phase": session.get("current_phase", current_phase),
+            "milestone": _get_milestone_name(current_phase),
+            "phase_progress": phase_progress_details,
+            "completed_keys": completed_tasks,
+        }
+
         return {
             "success": True,
             "message": "Implementation progress retrieved",
-            "progress": progress_data
+            "progress": progress_data,
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get implementation progress: {str(e)}")
 
