@@ -33,6 +33,9 @@ INVALID_CONTEXT_VALUES = frozenset(
     {
         "",
         "your business",
+        "your industry",
+        "your business type",
+        "your location",
         "general business",
         "united states",
         "startup",

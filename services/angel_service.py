@@ -460,12 +460,9 @@ Requirements:
 
 
 def format_modify_revision_user_turn(assistant_snapshot: str, user_guidance: str) -> str:
-    return (
-        "——— Assistant message to revise ———\n"
-        f"{assistant_snapshot.strip()}\n\n"
-        "——— User's revision request ———\n"
-        f"{user_guidance.strip()}"
-    )
+    from services.modify_revision_service import format_modify_revision_user_turn as _fmt
+
+    return _fmt(assistant_snapshot, user_guidance)
 
 
 async def _reply_modify_revision(
@@ -477,6 +474,14 @@ async def _reply_modify_revision(
     user_prefs: dict,
 ) -> dict:
     """Single LLM turn: rework assistant_snapshot per user_guidance without advancing the questionnaire."""
+    from services.modify_revision_service import (
+        build_modify_revision_message_list,
+        choose_modify_max_tokens,
+        is_command_assist_snapshot,
+        normalize_command_assist_modify_reply,
+        resolve_modify_question_tag,
+    )
+
     assistant_snapshot = modify_intent["assistant_snapshot"].strip()
     user_guidance = modify_intent["user_guidance"].strip()
 
@@ -488,48 +493,69 @@ async def _reply_modify_revision(
         tone_assessment_text=user_guidance,
     )
     intensity_guidance = _get_feedback_intensity_guidance(eff_cfb)
-    # Slim formatting only: full `_build_angel_formatting_instruction` tells the model to
-    # advance BP questions, which conflicts with revision-only Modify turns.
-    modify_formatting = f"""FORMATTING FOR THIS TURN (revise-in-place):
-• Address {user_name} naturally; use clear Markdown (headings, bullets) when it helps readability.
-• Do not add questionnaire flow instructions, option lists, or “ask the next question” unless the user explicitly asked to move on.
-• Constructive tone calibration for this turn (intensity {eff_cfb}/10):
-{intensity_guidance.strip()}"""
-
-    msgs: List[Dict[str, str]] = [
-        {"role": "system", "content": MODIFY_REVISION_SYSTEM},
-        {"role": "system", "content": TAG_PROMPT},
-        {"role": "system", "content": modify_formatting},
-    ]
 
     grounding = await build_business_grounding(session_data, history)
-    if grounding:
-        msgs.append({"role": "system", "content": grounding})
+
+    venture_context_block = None
+    asked_q = resolve_modify_question_tag(
+        assistant_snapshot,
+        (session_data or {}).get("asked_q"),
+    )
+    if asked_q and session_data is not None:
+        from services.business_identity_extractor import get_tagged_answer_for_question_tag
+        from services.questionnaire_grounding import (
+            build_questionnaire_venture_context,
+            format_authoritative_context_block,
+        )
+
+        venture = await build_questionnaire_venture_context(
+            session_data,
+            history,
+            asked_q=asked_q,
+            get_answer_for_tag=get_tagged_answer_for_question_tag,
+        )
+        venture_context_block = format_authoritative_context_block(
+            venture, asked_q=asked_q
+        )
 
     tone = build_tone_directive(
         session_data,
         affirmation_intensity=eff_aff,
         constructive_feedback_intensity=eff_cfb,
     )
-    msgs.append({"role": "system", "content": tone})
-
     trimmed_history = trim_conversation_history(history, max_messages=6)
-    msgs.extend(trimmed_history)
 
-    user_turn = format_modify_revision_user_turn(assistant_snapshot, user_guidance)
-    msgs.append({"role": "user", "content": user_turn})
+    msgs = build_modify_revision_message_list(
+        assistant_snapshot=assistant_snapshot,
+        user_guidance=user_guidance,
+        grounding=grounding,
+        venture_context_block=venture_context_block,
+        user_name=user_name,
+        intensity_guidance=intensity_guidance,
+        trimmed_history=trimmed_history,
+        tag_prompt=TAG_PROMPT,
+        tone_directive=tone,
+    )
+
+    max_tokens = choose_modify_max_tokens(assistant_snapshot)
+    print(
+        f"🔧 Modify revision: snapshot_len={len(assistant_snapshot)}, max_tokens={max_tokens}"
+    )
 
     response = await client.chat.completions.create(
         model="gpt-4o",
         messages=msgs,
-        temperature=0.7,
-        max_tokens=4096,
+        temperature=0.5,
+        max_tokens=max_tokens,
         stream=False,
     )
     reply_content = response.choices[0].message.content or ""
     reply_content = re.sub(r"\n{3,}", "\n\n", reply_content)
     reply_content = format_response_structure(reply_content)
-    reply_content = ensure_question_separation(reply_content, session_data)
+    command_assist = is_command_assist_snapshot(assistant_snapshot)
+    reply_content = normalize_command_assist_modify_reply(assistant_snapshot, reply_content)
+    if not command_assist:
+        reply_content = ensure_question_separation(reply_content, session_data)
 
     return {
         "reply": reply_content,
@@ -787,33 +813,7 @@ THOUGHT_STARTERS_BY_TAG = {
     ],
 }
 
-BUSINESS_PLAN_TAG_PATTERN = re.compile(
-    r"\[\[Q:(BUSINESS_PLAN\.\d{2})\]\](.*?)(?=\n\s*\[\[Q:BUSINESS_PLAN|\n\s*---|\Z)",
-    re.DOTALL,
-)
-
-
-@lru_cache(maxsize=1)
-def load_business_plan_question_objectives() -> dict[str, str]:
-    """Parse ANGEL_SYSTEM_PROMPT to extract canonical business plan prompts."""
-    objectives: dict[str, str] = {}
-    for match in BUSINESS_PLAN_TAG_PATTERN.finditer(ANGEL_SYSTEM_PROMPT):
-        tag = match.group(1).strip()
-        block = match.group(2)
-        if not tag or not block:
-            continue
-        lines = [line.strip() for line in block.strip().splitlines() if line.strip()]
-        if not lines:
-            continue
-        normalized = transform_question_objective(" ".join(lines))
-        objectives[tag] = normalized
-    return objectives
-
-
-def get_question_objective(tag: str) -> Optional[str]:
-    if not tag:
-        return None
-    return load_business_plan_question_objectives().get(tag)
+from services.business_plan_registry import get_question_objective
 
 def get_thought_starter_for_tag(question_tag: str) -> Optional[str]:
     if not question_tag:
@@ -822,6 +822,15 @@ def get_thought_starter_for_tag(question_tag: str) -> Optional[str]:
     if not starters:
         return None
     return starters[0]
+
+
+def get_thought_starters_for_tag(question_tag: str) -> list[str]:
+    if not question_tag:
+        return []
+    from services.business_plan_registry import normalize_business_plan_tag
+
+    normalized = normalize_business_plan_tag(question_tag)
+    return list(THOUGHT_STARTERS_BY_TAG.get(normalized, ()))
 
 def is_draft_or_support_response(response_text: str) -> bool:
     """Check if response is a draft or support command response. Case-insensitive for robustness."""
@@ -1010,52 +1019,49 @@ async def _generate_auto_research_fallback(
     session_data: dict,
     history: list,
 ) -> str:
-    """When web-research fails for an auto-research question, use the LLM's
-    own knowledge plus the user's conversation history to produce useful content
-    so the user is never left at a dead end."""
-    tag_to_prompt = {
-        "BUSINESS_PLAN.11": f"List 3-5 real competitors for a {business_type} business in the {industry} industry in {location}. For each, state their strengths and weaknesses.",
-        "BUSINESS_PLAN.12": f"List 3-5 current industry trends affecting {industry} businesses like {business_name} in {location}.",
-        "BUSINESS_PLAN.17": f"List the short-term operational needs (first 3-6 months) for a {business_type} {industry} business in {location}, including staffing, space, equipment, and technology.",
-        "BUSINESS_PLAN.23": f"List the short-term marketing needs and estimated budget for a {business_type} {industry} business launching in {location}.",
-        "BUSINESS_PLAN.26": f"List the specific permits and licenses required to legally operate a {business_type} {industry} business in {location}, including the issuing authority and estimated cost.",
-        "BUSINESS_PLAN.27": f"List the recommended insurance policies for a {business_type} {industry} business in {location}, including coverage type, what it protects, and estimated annual cost.",
-        "BUSINESS_PLAN.34": f"List the main startup and operating costs for a {business_type} {industry} business in {location} with realistic dollar ranges.",
-        "BUSINESS_PLAN.35": f"Create a realistic 1-5 year scaling plan for {business_name}, a {business_type} {industry} business in {location}, with specific milestones for years 1-2 and years 3-5.",
-        "BUSINESS_PLAN.42": (
-            f"For {business_name}, a {business_type} {industry} business in {location}, list 4-6 potential challenges or risks "
-            f"(financial, operational, competitive, regulatory, or market-related) and for each provide: (1) a brief description, "
-            f"(2) a concrete mitigation strategy, and (3) specific action steps. Format with clear bullet points under each risk."
-        ),
-    }
-    prompt = tag_to_prompt.get(
-        detected_tag,
-        f"Provide detailed, actionable content for a {business_type} {industry} business in {location}."
+    """When web-research fails, synthesize from venture questionnaire context — not generic templates."""
+    from services.business_identity_extractor import get_tagged_answer_for_question_tag
+    from services.auto_research_service import (
+        build_auto_research_context,
+        build_auto_research_fallback_instruction,
+        format_research_footer,
+        format_research_header,
+        validate_research_output,
     )
+
+    ctx = await build_auto_research_context(
+        detected_tag,
+        session_data,
+        history,
+        get_answer_for_tag=get_tagged_answer_for_question_tag,
+    )
+    if not ctx:
+        return "\n\nPlease share what you know about this topic, and I'll incorporate it into your business plan."
+
+    prompt = build_auto_research_fallback_instruction(ctx)
+    display_name = ctx.business_name or ctx.venture_label()
+
     try:
         response = await client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "user", "content": f"You are a senior business analyst. {prompt}\n\nBe specific — use real scenarios and actionable steps. Format with clear sections and bullet points."}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=1000,
             timeout=30.0,
         )
         content = response.choices[0].message.content or ""
         if not content.strip():
-            if detected_tag == "BUSINESS_PLAN.42":
-                content = (
-                    "• **Financial risks**: Funding gaps, cash flow—build 6-month runway, diversify revenue. "
-                    "• **Operational risks**: Supply chain, staffing—identify backup suppliers, cross-train staff. "
-                    "• **Market risks**: Competition, demand—differentiate clearly, monitor customer feedback. "
-                    "• **Regulatory risks**: Compliance, permits—consult a local expert, maintain records. "
-                    "For each, outline concrete action steps and early warning signs to monitor."
-                )
-            else:
-                content = "Consider common risks: funding gaps, market competition, regulatory changes, operational bottlenecks, key person dependency, and customer acquisition. For each, outline a contingency plan with concrete action steps."
-        # Use same format as auto-research so Accept/Modify flow works
-        if detected_tag == "BUSINESS_PLAN.42":
-            return f"\n\n🔍 **Suggested Contingency Plans for {business_name}:**\n\n{content}\n\n*Based on {industry} risk analysis*\n\nPlease review these suggestions. Is there anything you'd like me to adjust or explore further?"
-        return f"\n\n🔍 **{business_name} — Suggested Plan:**\n\n{content}\n\nPlease review and let me know if you'd like to adjust anything."
+            return (
+                f"\n\n{format_research_header(ctx)}"
+                "Please share what you know about this topic, and I'll incorporate it into your business plan."
+                f"{format_research_footer(ctx)}"
+            )
+
+        body = format_research_header(ctx) + content + format_research_footer(ctx)
+        ok, _ = validate_research_output(ctx, content)
+        if ok:
+            return body
+        return body
     except Exception as exc:
         print(f"⚠️ Fallback generation also failed for {detected_tag}: {exc}")
         if detected_tag == "BUSINESS_PLAN.42":
@@ -1068,7 +1074,7 @@ async def _generate_auto_research_fallback(
                 "For each relevant to your business, outline concrete action steps.\n\n"
                 "Please share your thoughts or let me know what you'd like to explore further."
             )
-        return "\n\nPlease share what you know about this topic, and I'll incorporate it into your business plan."
+        return f"\n\n🔍 **{display_name} — Suggested Plan:**\n\nPlease share what you know about this topic, and I'll incorporate it into your business plan."
 
 
 # Business Plan questions where the backend must inject research after the
@@ -1122,185 +1128,23 @@ async def apply_business_plan_auto_research(
     research_type = AUTO_RESEARCH_BUSINESS_PLAN_TAGS[detected_tag]
     print(f"🔍 AUTO-RESEARCH TRIGGERED for {detected_tag} ({research_type})")
 
-    business_context = extract_business_context_from_history(history)
-    if session_data:
-        saved_ctx = session_data.get("business_context") or {}
-        for key in ("industry", "location", "business_name", "business_type"):
-            val = saved_ctx.get(key, "")
-            if val and (
-                not business_context.get(key)
-                or len(str(val)) > len(str(business_context.get(key, "")))
-            ):
-                business_context[key] = val
-
-    industry = business_context.get("industry", "") or "business"
-    location = business_context.get("location", "")
-    business_name = business_context.get("business_name", "") or "your business"
-    business_type = business_context.get("business_type", "") or "business"
-
-    print(
-        f"🔍 Auto-research context: industry='{industry}', type='{business_type}', "
-        f"name='{business_name[:50]}', location='{location}'"
-    )
-    current_year = datetime.now().year
-    previous_year = current_year - 1
+    from services.business_identity_extractor import get_tagged_answer_for_question_tag
+    from services.auto_research_service import run_auto_research_pipeline
 
     try:
-        if detected_tag == "BUSINESS_PLAN.11":
-            product_info = ""
-            for h in reversed(history[-20:]):
-                content_text = h.get("content", "") or h.get("answer", "")
-                if h.get("role") == "user" and content_text and len(content_text) > 20:
-                    lower = content_text.lower()
-                    if lower.strip() not in (
-                        "accept",
-                        "draft",
-                        "modify",
-                        "yes",
-                        "no",
-                        "support",
-                        "scrapping",
-                    ):
-                        product_info = content_text[:200]
-                        break
-
-            business_idea = business_context.get("business_idea", "")
-            name_for_query = business_name if len(business_name) > 20 else ""
-            context_for_query = (
-                name_for_query or product_info or business_idea or f"{industry} {business_type}"
-            )
-            biz_label = (
-                name_for_query
-                or business_name
-                or f"a {business_type} in the {industry} sector"
-            )
-            search_query = (
-                f"Identify the top direct competitors for {biz_label}, "
-                f"a business that does: {context_for_query[:200]}. "
-                f"For each competitor, provide their competitive position "
-                f"(strengths, weaknesses, market share/positioning) in the "
-                f"{industry} sector, and give actionable insights for how "
-                f"{biz_label} should compete against or differentiate from them."
-            )
-            if location:
-                search_query += f" Geography: {location}."
-            print(f"🔍 Q11 competitor research query: {search_query}")
-            search_result = await conduct_web_search(search_query)
-            if is_valid_research_result(search_result):
-                reply_content += f"\n\n🔍 **Competitor Research Results:**\n\n{search_result}"
-                reply_content += f"\n\n*Research based on {industry} market data ({previous_year}-{current_year})*"
-                reply_content += "\n\nPlease review these findings. Is there anything you'd like me to adjust or explore further?"
-                auto_research_triggered = True
-                print("✅ Auto-research completed for Q11 - competitor analysis injected")
-            else:
-                fallback_query = (
-                    f"major competitors for {business_type} in {industry} "
-                    f"market analysis {current_year}"
-                )
-                print(f"🔍 Q11 fallback query: {fallback_query}")
-                search_result = await conduct_web_search(fallback_query)
-                if is_valid_research_result(search_result):
-                    reply_content += f"\n\n🔍 **Competitor Research:**\n\n{search_result}"
-                    reply_content += "\n\nPlease review these findings. Is there anything you'd like me to adjust or explore further?"
-                    auto_research_triggered = True
-                    print("✅ Auto-research fallback completed for Q11")
-
-        elif detected_tag == "BUSINESS_PLAN.12":
-            search_result = await conduct_web_search(
-                f"{industry} industry trends {previous_year} {current_year} market analysis impact"
-            )
-            if is_valid_research_result(search_result):
-                reply_content += f"\n\n🔍 **Industry Trends Research:**\n\n{search_result}"
-                reply_content += f"\n\n*Research based on {previous_year}-{current_year} data*"
-                reply_content += "\n\nHow do you think these trends will impact your business? Is there anything you'd like me to explore further?"
-                auto_research_triggered = True
-                print("✅ Auto-research completed for Q12 - industry trends injected")
-
-        elif detected_tag == "BUSINESS_PLAN.17":
-            search_result = await conduct_web_search(
-                f"{industry} {business_type} short-term operational needs startup launch requirements {location} {previous_year} hiring staff securing space"
-            )
-            if is_valid_research_result(search_result):
-                reply_content += f"\n\n🔍 **Suggested Short-Term Operational Needs for {business_name}:**\n\n{search_result}"
-                reply_content += f"\n\n*Research based on {industry} industry data ({previous_year}-{current_year})*"
-                reply_content += "\n\nIs there anything else you'd like to add or modify?"
-                auto_research_triggered = True
-                print("✅ Auto-research completed for Q17 - operational needs injected")
-
-        elif detected_tag == "BUSINESS_PLAN.23":
-            search_result = await conduct_web_search(
-                f"{industry} {business_type} short-term marketing needs advertising budget online presence {location} {previous_year}"
-            )
-            if is_valid_research_result(search_result):
-                reply_content += f"\n\n🔍 **Suggested Short-Term Marketing Needs for {business_name}:**\n\n{search_result}"
-                reply_content += f"\n\n*Research based on {industry} marketing data ({previous_year}-{current_year})*"
-                reply_content += "\n\nIs there anything else you'd like to add?"
-                auto_research_triggered = True
-                print("✅ Auto-research completed for Q23 - marketing needs injected")
-
-        elif detected_tag == "BUSINESS_PLAN.26":
-            search_result = await conduct_web_search(
-                f"{industry} business permits licenses required {location} zoning laws regulatory requirements {previous_year}"
-            )
-            if is_valid_research_result(search_result):
-                reply_content += f"\n\n🔍 **Permits & Licenses Research for {business_name}:**\n\n{search_result}"
-                reply_content += f"\n\n*Research based on {location} regulatory data ({previous_year}-{current_year})*"
-                reply_content += "\n\nPlease evaluate to confirm if this looks correct or if you have any questions."
-                auto_research_triggered = True
-                print("✅ Auto-research completed for Q26 - permits/licenses injected")
-
-        elif detected_tag == "BUSINESS_PLAN.27":
-            search_result = await conduct_web_search(
-                f"{industry} {business_type} business insurance policies needed liability property {location} {previous_year}"
-            )
-            if is_valid_research_result(search_result):
-                reply_content += f"\n\n🔍 **Suggested Insurance Policies for {business_name}:**\n\n{search_result}"
-                reply_content += f"\n\n*Research based on {industry} insurance requirements ({previous_year}-{current_year})*"
-                reply_content += "\n\nPlease evaluate to confirm if this looks correct or if you have any questions."
-                auto_research_triggered = True
-                print("✅ Auto-research completed for Q27 - insurance policies injected")
-
-        elif detected_tag == "BUSINESS_PLAN.34":
-            search_result = await conduct_web_search(
-                f"{industry} {business_type} startup costs main expenses production marketing salaries {location} {previous_year} monthly operating expenses"
-            )
-            if is_valid_research_result(search_result):
-                reply_content += f"\n\n🔍 **Estimated Costs & Expenses for {business_name}:**\n\n{search_result}"
-                reply_content += f"\n\n*Research based on {industry} industry cost data ({previous_year}-{current_year})*"
-                reply_content += "\n\nIs there anything else you'd like me to add?"
-                auto_research_triggered = True
-                print("✅ Auto-research completed for Q34 - costs/expenses injected")
-
-        elif detected_tag == "BUSINESS_PLAN.35":
-            search_result = await conduct_web_search(
-                f"{industry} {business_type} realistic scaling strategy milestones year 1 to 5 operational financial marketing expansion {location} {previous_year}"
-            )
-            if is_valid_research_result(search_result):
-                reply_content += f"\n\n🔍 **Suggested Scaling & Growth Plan for {business_name}:**\n\n{search_result}"
-                reply_content += f"\n\n*Research based on {industry} growth data ({previous_year}-{current_year})*"
-                reply_content += "\n\nPlease review this suggested plan. You can Accept to use it as your scaling answer and continue to the next question, or ask me to adjust anything."
-                auto_research_triggered = True
-                print("✅ Auto-research completed for Q35 - scaling plan injected")
-
-        elif detected_tag == "BUSINESS_PLAN.42":
-            search_query = (
-                f"contingency plans and risk management for {business_name}, "
-                f"a {business_type} in the {industry} industry. "
-                f"List specific potential challenges, obstacles, mitigation strategies, "
-                f"and early warning signs"
-            )
-            if location:
-                search_query += f" operating in {location}"
-            search_query += f" ({previous_year}-{current_year})"
-            print(f"🔍 Q42 contingency research query: {search_query}")
-            search_result = await conduct_web_search(search_query)
-            if is_valid_research_result(search_result):
-                reply_content += f"\n\n🔍 **Suggested Contingency Plans for {business_name}:**\n\n{search_result}"
-                reply_content += f"\n\n*Research based on {industry} risk analysis ({previous_year}-{current_year})*"
-                reply_content += "\n\nPlease review these suggestions. Is there anything you'd like me to adjust or explore further?"
-                auto_research_triggered = True
-                print("✅ Auto-research completed for Q42 - contingency plans injected")
-
+        appendix, success = await run_auto_research_pipeline(
+            detected_tag,
+            session_data,
+            history,
+            get_answer_for_tag=get_tagged_answer_for_question_tag,
+            conduct_web_search=conduct_web_search,
+            generate_fallback=_generate_auto_research_fallback,
+            is_valid_result=is_valid_research_result,
+        )
+        if appendix:
+            reply_content += appendix
+            auto_research_triggered = True
+            print(f"✅ Auto-research completed for {detected_tag}")
     except Exception as e:
         print(f"⚠️ Auto-research error for {detected_tag}: {e}")
         import traceback
@@ -1309,8 +1153,24 @@ async def apply_business_plan_auto_research(
 
     if not auto_research_triggered:
         print(f"⚠️ Auto-research for {detected_tag} did NOT produce results - generating fallback content")
+        business_context = extract_business_context_from_history(history)
+        if session_data:
+            saved_ctx = session_data.get("business_context") or {}
+            for key in ("industry", "location", "business_name", "business_type"):
+                val = saved_ctx.get(key, "")
+                if val and (
+                    not business_context.get(key)
+                    or len(str(val)) > len(str(business_context.get(key, "")))
+                ):
+                    business_context[key] = val
         fallback = await _generate_auto_research_fallback(
-            detected_tag, business_name, industry, business_type, location, session_data, history
+            detected_tag,
+            business_context.get("business_name", "") or "your business",
+            business_context.get("industry", "") or "business",
+            business_context.get("business_type", "") or "business",
+            business_context.get("location", ""),
+            session_data,
+            history,
         )
         reply_content += fallback
         auto_research_triggered = True
@@ -1349,7 +1209,13 @@ async def _dynamic_bp_reply_with_auto_research(
     }
 
 
-async def conduct_web_search(query, fast_mode: bool = False):
+async def conduct_web_search(
+    query,
+    fast_mode: bool = False,
+    research_kind: str | None = None,
+    validation_feedback: str = "",
+    venture_context_block: str = "",
+):
     """Generate research-quality content using AI knowledge base
     
     Note: This uses GPT-4o's training knowledge to provide comprehensive business research.
@@ -1358,13 +1224,17 @@ async def conduct_web_search(query, fast_mode: bool = False):
     Args:
         query: Research topic/query
         fast_mode: If True, use shorter timeout and simpler prompt for faster responses (default: False)
+        research_kind: Explicit template key from auto_research_service (preferred over keyword guessing)
+        validation_feedback: Corrective instructions from relevance validation loop (retry pass)
+        venture_context_block: Full questionnaire grounding from auto_research_service
     """
     try:
         print(f"🔍 Conducting AI-powered research: {query}")
         
-        # Limit query length reasonably
-        if len(query) > 150:
-            query = query[:150] + "..."
+        # Auto-research queries are venture-grounded and must not be over-truncated.
+        max_query_len = 150 if fast_mode else 600
+        if len(query) > max_query_len:
+            query = query[:max_query_len] + "..."
         
         # Simplified prompt for fast mode
         if fast_mode:
@@ -1374,98 +1244,77 @@ Include key points and current information. Keep response brief and actionable."
             timeout = 5.0  # Shorter timeout for fast mode
             max_tokens = 400  # Shorter response
         else:
-            query_lower = query.lower()
-            # Order matters: more-specific topics first. `is_competitor`
-            # comes BEFORE the generic fall-through because Q11's query
-            # already mentions "competitors", "market position", "strengths",
-            # "weaknesses" — and the generic template was treating that as
-            # vague "market data" instead of structuring it as a proper
-            # competitive landscape report.
-            is_competitor = any(kw in query_lower for kw in [
-                "competitor", "competing with", "competitive position",
-                "competitive landscape", "main competitors", "rival companies",
-            ])
-            is_permits_licenses = any(kw in query_lower for kw in ["permit", "license", "zoning", "regulatory"])
-            is_insurance = any(kw in query_lower for kw in ["insurance", "liability", "property insurance"])
-            is_costs = any(kw in query_lower for kw in ["startup cost", "main cost", "expense", "operating cost"])
-            is_scaling = any(kw in query_lower for kw in ["scaling", "growth plan", "expansion strategy", "long-term goals"])
-            is_contingency = any(kw in query_lower for kw in ["contingency", "risk management", "challenges", "obstacles"])
+            from services.auto_research_service import get_research_synthesis_sections
 
-            if is_competitor:
-                # Q11 (competitive analysis) — the prior version fell through
-                # to a generic 4-bullet template that mentioned "competitive
-                # landscape" as just one bullet. Users reported the auto-
-                # generated research did NOT clearly call out competitors,
-                # their position, and what it means for THEIR business. The
-                # template below enforces that structure: each competitor
-                # gets a name + positioning paragraph + an explicit
-                # implication clause aimed at the user's venture.
-                numbered_sections = (
-                    "1. **Direct Competitors (name 3-5 real companies)**: For each competitor write a block in this exact shape — "
-                    "`**<Company Name>** — <one-sentence description of what they do>. *Position:* <market share, scale, or "
-                    "where they sit in the market>. *Strengths:* <2-3 concrete strengths>. *Weaknesses:* <2-3 concrete "
-                    "weaknesses or gaps>.` Use REAL companies only. No 'Competitor A' placeholders.\n"
-                    "2. **Competitive Position Map**: One short paragraph summarising where these competitors cluster "
-                    "(price tier, target customer, feature focus, geography) so the founder can see the white space.\n"
-                    "3. **Insights for This Business**: 3-5 actionable insights specifically for the founder's business "
-                    "(named in the query). Each insight should reference at least one named competitor and explain HOW "
-                    "the founder can differentiate, exploit a gap, or learn from that competitor's strength/weakness. "
-                    "Format as bullets starting with a verb (e.g. 'Out-price Shopify on…', 'Counter Fiverr's high fees by…').\n"
-                    "4. **What to Watch**: 1-2 emerging or adjacent competitors the founder should keep an eye on as the "
-                    "category evolves."
-                )
-            elif is_permits_licenses:
-                numbered_sections = (
-                    "1. **Required Permits & Licenses**: List each specific permit/license, the issuing authority, and estimated cost/timeline\n"
-                    "2. **Actionable insights**: Step-by-step recommendations for obtaining them\n"
-                    "3. **Potential Service Providers**: Name real companies/platforms that help businesses obtain permits, licenses, and stay compliant (e.g., LegalZoom, MyCorporation). Include their strengths and weaknesses."
-                )
-            elif is_insurance:
-                numbered_sections = (
-                    "1. **Recommended Policies**: List each specific insurance type, what it covers, and estimated annual cost range\n"
-                    "2. **Actionable insights**: Practical recommendations for selecting the right coverage\n"
-                    "3. **Potential Service Providers**: Name real insurance providers or brokers relevant to this business type. Include their strengths and coverage specialties."
-                )
-            elif is_costs:
-                numbered_sections = (
-                    "1. **Specific findings**: Name real cost categories with real-world dollar ranges\n"
-                    "2. **Cost benchmarks**: Include real-world cost ranges and comparisons from similar businesses\n"
-                    "3. **Actionable insights**: Practical recommendations for managing and reducing costs"
-                )
-            elif is_scaling:
-                numbered_sections = (
-                    "1. **Year 1-2 Milestones**: Specific, measurable targets for the first two years (revenue, customers, team size, operations)\n"
-                    "2. **Year 3-5 Growth Strategy**: Concrete expansion plans — new markets, product lines, partnerships, and operational scaling\n"
-                    "3. **Key Resources Needed**: What the business needs to scale — hiring, technology, funding, infrastructure\n"
-                    "4. **Actionable Next Steps**: Immediate actions the founder should take to prepare for scaling"
-                )
-            elif is_contingency:
-                numbered_sections = (
-                    "1. **Potential Risks & Challenges**: List 4-6 specific, realistic risks this business type faces (financial, operational, competitive, regulatory, market)\n"
-                    "2. **Contingency Plan for Each Risk**: For every risk listed, provide a concrete mitigation strategy and action steps\n"
-                    "3. **Early Warning Signs**: Indicators the founder should monitor to catch problems early\n"
-                    "4. **Resources & Support**: Tools, advisors, or services that can help manage these risks"
-                )
+            if research_kind:
+                numbered_sections = get_research_synthesis_sections(research_kind)
             else:
-                numbered_sections = (
-                    "1. **Specific findings**: Name real companies, real trends, real data points\n"
-                    "2. **Market data**: Include market size, growth rates, and industry statistics where relevant\n"
-                    "3. **Actionable insights**: Practical recommendations based on the research\n"
-                    "4. **Competitive landscape**: Name actual competitors with specific strengths and weaknesses"
+                query_lower = query.lower()
+                # Order matters: more-specific topics first.
+                is_competitor = any(kw in query_lower for kw in [
+                    "competitor", "competing with", "competitive position",
+                    "competitive landscape", "main competitors", "rival companies",
+                ])
+                is_industry_trends = any(kw in query_lower for kw in [
+                    "industry trend", "trends affecting", "market trends", "trend research",
+                    "industry trends",
+                ])
+                is_permits_licenses = any(kw in query_lower for kw in ["permit", "license", "zoning", "regulatory"])
+                is_insurance = any(kw in query_lower for kw in ["insurance", "liability", "property insurance"])
+                is_costs = any(kw in query_lower for kw in ["startup cost", "main cost", "expense", "operating cost"])
+                is_scaling = any(kw in query_lower for kw in ["scaling", "growth plan", "expansion strategy", "long-term goals"])
+                is_contingency = any(kw in query_lower for kw in ["contingency", "risk management", "challenges", "obstacles"])
+                is_marketing = any(kw in query_lower for kw in ["marketing needs", "marketing channel", "short-term marketing"])
+                is_operational = any(kw in query_lower for kw in ["operational needs", "operational launch", "short-term operational"])
+
+                if is_competitor:
+                    numbered_sections = get_research_synthesis_sections("competitors")
+                elif is_industry_trends:
+                    numbered_sections = get_research_synthesis_sections("industry_trends")
+                elif is_operational:
+                    numbered_sections = get_research_synthesis_sections("operational_needs")
+                elif is_marketing:
+                    numbered_sections = get_research_synthesis_sections("marketing_needs")
+                elif is_permits_licenses:
+                    numbered_sections = get_research_synthesis_sections("permits_licenses")
+                elif is_insurance:
+                    numbered_sections = get_research_synthesis_sections("insurance")
+                elif is_costs:
+                    numbered_sections = get_research_synthesis_sections("costs")
+                elif is_scaling:
+                    numbered_sections = get_research_synthesis_sections("scaling")
+                elif is_contingency:
+                    numbered_sections = get_research_synthesis_sections("contingency")
+                else:
+                    numbered_sections = get_research_synthesis_sections("industry_trends")
+
+            correction_block = ""
+            if validation_feedback:
+                correction_block = (
+                    f"\n\nCORRECTION REQUIRED (previous answer failed relevance check):\n{validation_feedback}\n"
+                )
+
+            context_block = ""
+            if venture_context_block:
+                context_block = (
+                    f"\n\n{venture_context_block}\n\n"
+                    "You MUST align every recommendation with the founder's answers above. "
+                    "Do not contradict stated facilities, location, delivery model, or industry.\n"
                 )
 
             search_prompt = f"""You are a senior business research analyst providing a detailed analysis. 
 Topic: {query}
-
+{context_block}{correction_block}
 IMPORTANT: Provide SPECIFIC, DETAILED information based on your knowledge. Do NOT say you cannot browse the internet or access URLs.
 Do NOT give generic placeholder names like "Competitor A" or "Company X" - provide REAL company names and data.
+Stay focused on the topic — do not add sections that were not requested.
 
 Provide a comprehensive analysis with:
 {numbered_sections}
 
 Format your response with clear sections and bullet points. Be specific and data-driven."""
             timeout = 30.0  # Generous timeout for thorough research
-            max_tokens = 1000  # Increased for comprehensive research
+            max_tokens = 1200 if venture_context_block else 1000
         
         response = await client.chat.completions.create(
             model="gpt-4o",
@@ -2180,54 +2029,31 @@ def suggest_draft_if_relevant(reply, session_data, user_input, history):
     return reply
 
 def check_for_section_summary(current_tag, session_data, history):
-    """Check if we need to provide a section summary based on the current question tag
-    
-    TIMING: This checks if user just ANSWERED a section-ending question.
-    It should trigger AFTER user answers Q4, Q8, Q12, Q17, Q25, Q31, Q37, Q41, or Q45.
-    """
-    
+    """Check if we need to provide a section summary based on the current question tag."""
+    from services.business_plan_registry import get_section_boundary_info
+
     if not current_tag or not current_tag.startswith("BUSINESS_PLAN."):
         return None
-    
+
     try:
         question_num = int(current_tag.split(".")[1])
     except (ValueError, IndexError):
         return None
-    
-    # Define section boundaries - these are the LAST questions in each section
-    # When user answers these questions, we show a section summary BEFORE moving to next section
-    # Aligned with constant.py section definitions:
-    #   Section 1: Product/Service Details (Q1-Q4)
-    #   Section 2: Business Overview (Q5-Q7)
-    #   Section 3: Market Research (Q8-Q13)
-    #   Section 4: Location & Operations (Q14-Q17)
-    #   Section 5: Marketing & Sales Strategy (Q18-Q23)
-    #   Section 6: Legal & Regulatory Compliance (Q24-Q28)
-    #   Section 7: Revenue Model & Financials (Q29-Q34)
-    #   Section 8: Growth & Scaling (Q35-Q41)
-    #   Section 9: Challenges & Contingency Planning (Q42-Q45)
-    section_boundaries = {
-        4: "SECTION 1 SUMMARY REQUIRED: After BUSINESS_PLAN.04, provide:",
-        7: "SECTION 2 SUMMARY REQUIRED: After BUSINESS_PLAN.07, provide:",
-        13: "SECTION 3 SUMMARY REQUIRED: After BUSINESS_PLAN.13, provide:",
-        17: "SECTION 4 SUMMARY REQUIRED: After BUSINESS_PLAN.17, provide:",
-        23: "SECTION 5 SUMMARY REQUIRED: After BUSINESS_PLAN.23, provide:",
-        28: "SECTION 6 SUMMARY REQUIRED: After BUSINESS_PLAN.28, provide:",
-        34: "SECTION 7 SUMMARY REQUIRED: After BUSINESS_PLAN.34, provide:",
-        41: "SECTION 8 SUMMARY REQUIRED: After BUSINESS_PLAN.41, provide:",
-        45: "SECTION 9 SUMMARY REQUIRED: After BUSINESS_PLAN.45, provide:"
+
+    boundary = get_section_boundary_info(question_num)
+    if not boundary:
+        return None
+
+    print(
+        f"✅ SECTION SUMMARY TRIGGERED: User just answered Q{question_num}, "
+        f"showing {boundary['section_name']} section summary"
+    )
+    return {
+        "trigger_question": boundary["trigger_question"],
+        "section_id": boundary["section_id"],
+        "section_name": boundary["section_name"],
+        "summary_type": f"SECTION {boundary['section_id']} SUMMARY REQUIRED",
     }
-    
-    # Check if we're at a section boundary
-    if question_num in section_boundaries:
-        print(f"✅ SECTION SUMMARY TRIGGERED: User just answered Q{question_num}, showing {get_section_name(question_num)} section summary")
-        return {
-            "trigger_question": question_num,
-            "summary_type": section_boundaries[question_num],
-            "section_name": get_section_name(question_num)
-        }
-    
-    return None
 
 def get_section_name(question_num):
     """Get the section name based on question number.
@@ -3828,8 +3654,37 @@ async def build_business_grounding(session_data: Optional[dict], history: list) 
             ctx = extract_business_context_from_history(history)
             business_type = ctx.get("business_type", "")
 
+    from utils.business_context import is_meaningful_context_value
+
+    business_idea = bc.get("business_idea", "")
+    if not business_idea:
+        from services.business_identity_extractor import get_tagged_user_answer
+
+        idea = get_tagged_user_answer(history, "business_idea")
+        if is_meaningful_context_value(idea):
+            business_idea = idea
+
     if not business_type:
+        if is_meaningful_context_value(business_idea):
+            return (
+                "⚠️ VENTURE GROUNDING — READ BEFORE EVERY RESPONSE:\n\n"
+                f'Their business idea (from BP.01) is: "{business_idea[:900]}".\n'
+                "Every response must align with THIS venture — not a different industry, "
+                "business model, or generic template.\n\n"
+                "Rules:\n"
+                "1. NEVER assume a different industry or business category.\n"
+                "2. NEVER use generic SaaS/consulting/retail examples unless Q1 describes that.\n"
+                "3. Reference the founder's own Q1 answer when drafting or coaching."
+            )
         return ""
+
+    idea_line = ""
+    if is_meaningful_context_value(business_idea):
+        idea_line = (
+            f'Their business idea (from BP.01) is: "{business_idea[:900]}".\n'
+            "Every response must align with THIS venture — not a different industry, "
+            "business model, or generic template."
+        )
 
     bp01_line = ""
     if business_name and business_name not in ("Your Business", ""):
@@ -3837,6 +3692,8 @@ async def build_business_grounding(session_data: Optional[dict], history: list) 
             f'Their business name (from BP.05) is: "{business_name}".\n'
             f"Use this name when referencing their business in responses."
         )
+    if idea_line:
+        bp01_line = f"{idea_line}\n{bp01_line}".strip()
 
     return BUSINESS_TYPE_GROUNDING_PROMPT.format(
         business_type=business_type,
@@ -4371,11 +4228,10 @@ async def get_angel_reply(
     # Do NOT manually increment question numbers or use generate_next_question()
     # Let the AI follow the system prompt from constant.py
     # Check if this is a command that should not generate new questions
+    from services.questionnaire_commands import is_questionnaire_command, parse_scrapping_notes
+
     normalized_user_content = user_content.lower().strip()
-    is_command_response = (
-        normalized_user_content in ["draft", "support", "scrapping", "scraping", "draft more", "draft answer"]
-        or normalized_user_content.startswith("scrapping:")
-    )
+    is_command_response = is_questionnaire_command(user_content)
     
     # Check if this is an "Accept" command from Support/Draft/Scrapping
     is_accept_command = user_content.lower().strip() == "accept"
@@ -4420,71 +4276,18 @@ async def get_angel_reply(
             
             if not last_was_summary:
                 print(f"🎯 ACCEPT on section boundary Q{section_boundary_info['trigger_question']} after {preceding_command} - last msg was NOT a summary, generating section summary now")
-                
-                # Extract section Q&A pairs for comprehensive summary
-                section_qa_context = _extract_section_qa_pairs(
-                    history,
-                    section_boundary_info['trigger_question'],
-                    section_boundary_info['section_name']
+
+                from services.section_summary_service import generate_section_summary_text
+
+                reply_content = await generate_section_summary_text(
+                    client,
+                    history=history,
+                    section_id=section_boundary_info["section_id"],
+                    section_name=section_boundary_info["section_name"],
+                    user_turn="Accept",
+                    angel_system_prompt=ANGEL_SYSTEM_PROMPT,
                 )
-                
-                summary_instruction = f"""
-IMPORTANT: You have just completed the "{section_boundary_info['section_name']}" section. 
-You MUST provide a comprehensive section summary that covers ALL inputs from this entire section, not just the last question.
 
-HERE ARE ALL THE USER'S ANSWERS FOR THIS SECTION:
-{section_qa_context}
-
-You MUST summarize ALL of the above inputs in your summary. Do NOT only reference the most recent answer.
-
-Provide the summary in this EXACT format:
-
-🎯 **{section_boundary_info['section_name']} Section Complete**
-
-**Summary of Your Information:**
-[Recap ALL key information the user provided across EVERY question in this section. Include specific details, names, numbers, and choices they mentioned.]
-
-**Educational Insights:**
-[Provide 2-3 valuable business insights specifically related to {section_boundary_info['section_name']}]
-
-**Critical Considerations:**
-[Highlight 2-3 important watchouts and things to consider based on their specific answers]
-
-**Ready to Continue?**
-Please confirm that this information is accurate before we move to the next section. You can either accept this summary and continue, or let me know what you'd like to modify.
-
-[[ACCEPT_MODIFY_BUTTONS]]
-
-CRITICAL: 
-- End your response with [[ACCEPT_MODIFY_BUTTONS]] to trigger the Accept/Modify buttons
-- Do NOT ask the next question immediately
-- Do NOT include any question tags like [[Q:BUSINESS_PLAN.XX]] in this response
-- Do NOT include any "Thought Starter:", "Consider:", "Think about:", or similar guidance hints
-- This is a SUMMARY only - no follow-up questions or hints
-- Your summary MUST reference ALL answers from this section, not just the last one
-- Use exactly ONE blank line between sections; do NOT add extra blank lines after headings or between bullet points
-"""
-                # Build messages for summary generation
-                summary_msgs = [{"role": "system", "content": ANGEL_SYSTEM_PROMPT}]
-                extended_history = history[-30:] if len(history) > 30 else history
-                summary_msgs.extend(extended_history)
-                summary_msgs.append({"role": "user", "content": "Accept"})
-                summary_msgs.append({"role": "system", "content": summary_instruction})
-                
-                response = await client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=summary_msgs,
-                    temperature=0.7,
-                    max_tokens=1200,
-                    stream=False
-                )
-                reply_content = response.choices[0].message.content
-                
-                # Strip any question tags to prevent asked_q from updating
-                reply_content = re.sub(r'\[\[Q:[A-Z_]+\.\d+\]\]', '', reply_content)
-                # Clean the [[ACCEPT_MODIFY_BUTTONS]] tag (for display)
-                reply_content = reply_content.replace("[[ACCEPT_MODIFY_BUTTONS]]", "").strip()
-                
                 print(f"🔒 Section summary generated via Accept path - keeping asked_q at {current_tag}")
                 
                 return {
@@ -4509,8 +4312,8 @@ CRITICAL:
 
         if command == "draft":
             reply_content = await handle_draft_command("", history, session_data)
-        elif command.startswith("scrapping:"):
-            notes = user_content[10:].strip()
+        elif command.startswith("scrapping:") or command.startswith("scraping:"):
+            notes = parse_scrapping_notes(user_content)
             scrapping_result = await handle_scrapping_command("", notes, history, session_data)
             scrapping_result["show_accept_modify"] = True
             return scrapping_result
@@ -5005,79 +4808,17 @@ CRITICAL INSTRUCTIONS:
     
     if section_summary_info:
         print(f"🎯 SECTION SUMMARY TRIGGERED for {section_summary_info['section_name']} at question {current_tag_before_update}")
-        
-        # CRITICAL: Don't let the question number increment during section summary
-        # The summary shows AFTER answering the last question of a section
-        # We stay on the same question number until user accepts the summary
-        
-        # Extract ALL Q&A pairs from this section to provide full context for summary
-        # Section boundaries define which questions belong to each section
-        section_qa_context = _extract_section_qa_pairs(
-            history, 
-            section_summary_info['trigger_question'],
-            section_summary_info['section_name']
+
+        from services.section_summary_service import generate_section_summary_text
+
+        reply_content = await generate_section_summary_text(
+            client,
+            history=history,
+            section_id=section_summary_info["section_id"],
+            section_name=section_summary_info["section_name"],
+            user_turn=user_content,
+            angel_system_prompt=ANGEL_SYSTEM_PROMPT,
         )
-        
-        # Add section summary requirements to the system prompt
-        summary_instruction = f"""
-IMPORTANT: You have just completed the "{section_summary_info['section_name']}" section. 
-You MUST provide a comprehensive section summary that covers ALL inputs from this entire section, not just the last question.
-
-HERE ARE ALL THE USER'S ANSWERS FOR THIS SECTION:
-{section_qa_context}
-
-You MUST summarize ALL of the above inputs in your summary. Do NOT only reference the most recent answer.
-
-Provide the summary in this EXACT format:
-
-🎯 **{section_summary_info['section_name']} Section Complete**
-
-**Summary of Your Information:**
-[Recap ALL key information the user provided across EVERY question in this section. Include specific details, names, numbers, and choices they mentioned.]
-
-**Educational Insights:**
-[Provide 2-3 valuable business insights specifically related to {section_summary_info['section_name']}]
-
-**Critical Considerations:**
-[Highlight 2-3 important watchouts and things to consider based on their specific answers]
-
-**Ready to Continue?**
-Please confirm that this information is accurate before we move to the next section. You can either accept this summary and continue, or let me know what you'd like to modify.
-
-[[ACCEPT_MODIFY_BUTTONS]]
-
-CRITICAL: 
-- End your response with [[ACCEPT_MODIFY_BUTTONS]] to trigger the Accept/Modify buttons
-- Do NOT ask the next question immediately
-- Do NOT include any question tags like [[Q:BUSINESS_PLAN.XX]] in this response
-- Do NOT include any "Thought Starter:", "Consider:", "Think about:", or similar guidance hints
-- This is a SUMMARY only - no follow-up questions or hints
-- Your summary MUST reference ALL answers from this section, not just the last one
-- Use exactly ONE blank line between sections; do NOT add extra blank lines after headings or between bullet points
-"""
-        # Add this instruction to the messages
-        msgs.append({"role": "system", "content": summary_instruction})
-        
-        # Regenerate the response with section summary - use MORE history context
-        # Build messages with extended history for section summaries
-        summary_msgs = [msgs[0]]  # Keep system prompt
-        # Include more history for summaries (up to 30 messages to cover full sections)
-        extended_history = history[-30:] if len(history) > 30 else history
-        summary_msgs.extend(extended_history)
-        summary_msgs.append({"role": "user", "content": user_content})
-        summary_msgs.append({"role": "system", "content": summary_instruction})
-        
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=summary_msgs,
-            temperature=0.7,
-            max_tokens=1200,  # Increased for comprehensive summaries
-            stream=False
-        )
-        reply_content = response.choices[0].message.content
-        
-        # IMPORTANT: Clear any question tags from the summary response to prevent asked_q from updating
-        reply_content = re.sub(r'\[\[Q:[A-Z_]+\.\d+\]\]', '', reply_content)
         print(f"🔒 Section summary generated - keeping asked_q at {current_tag_before_update} until user accepts")
     
     # Ensure proper question formatting with line breaks and structure
@@ -5362,56 +5103,18 @@ def _strip_draft_transition_bleed(text: str) -> str:
 
 
 def _extract_section_qa_pairs(history: list, section_end_q: int, section_name: str) -> str:
-    """Extract all Q&A pairs from a specific section for comprehensive section summaries.
-    
-    Uses section boundaries to determine which questions belong to which section.
-    Returns a formatted string of all Q&A pairs for the section.
-    """
-    # Define section question ranges
-    section_ranges = {
-        "Product/Service Details": (1, 4),
-        "Business Overview": (5, 7),
-        "Market Research": (8, 13),
-        "Location & Operations": (14, 17),
-        "Marketing & Sales Strategy": (18, 23),
-        "Legal & Regulatory Compliance": (24, 28),
-        "Revenue Model & Financials": (29, 34),
-        "Growth & Scaling": (35, 41),
-        "Challenges & Contingency Planning": (42, 45),
-    }
-    
-    q_range = section_ranges.get(section_name, (1, section_end_q))
-    start_q, end_q = q_range
-    
-    # Scan through history to find Q&A pairs in this section's range
-    section_pairs = []
-    current_question = None
-    
-    for msg in history:
-        content = msg.get('content', '')
-        role = msg.get('role', '')
-        
-        if role == 'assistant' and content:
-            # Check if this message contains a question tag in our section range
-            tag_match = re.search(r'\[\[Q:BUSINESS_PLAN\.(\d+)\]\]', content)
-            if tag_match:
-                q_num = int(tag_match.group(1))
-                if start_q <= q_num <= end_q:
-                    # Extract just the question text (clean it up)
-                    clean_q = _extract_topline_question(content)
-                    current_question = f"Q{q_num}: {clean_q}"
-        
-        elif role == 'user' and content and current_question:
-            # Skip commands
-            if content.lower().strip() not in ['draft', 'support', 'scrapping', 'accept', 'modify', 'yes', 'no', 'draft more']:
-                if not content.lower().startswith(('scrapping:', 'draft', 'support')):
-                    section_pairs.append(f"{current_question}\n   → User's answer: {content[:500]}")
-                    current_question = None
-    
-    if section_pairs:
-        return "\n\n".join(section_pairs)
-    else:
-        return f"(No specific Q&A pairs found for {section_name} section - summarize based on conversation context)"
+    """Deprecated wrapper — use section_summary_service.collect_section_answer_records."""
+    from services.business_plan_registry import get_section_boundary_info
+    from services.section_summary_service import (
+        collect_section_answer_records,
+        format_section_answers_block,
+    )
+
+    boundary = get_section_boundary_info(section_end_q)
+    if not boundary:
+        return f"(No section boundary for question {section_end_q})"
+    records = collect_section_answer_records(history, section_id=boundary["section_id"])
+    return format_section_answers_block(records)
 
 
 def _extract_topline_question(full_message: str) -> str:
@@ -5470,77 +5173,76 @@ def _extract_topline_question(full_message: str) -> str:
 
 async def handle_draft_command(reply, history, session_data=None):
     """Handle the Draft command with comprehensive response generation"""
-    # Extract context from conversation history
-    context_summary = extract_conversation_context(history)
-    business_context = extract_business_context_from_history(history)
-    
-    # Get current question context for more targeted responses
-    # IMPORTANT: Use canonical question text from constant.py to avoid pulling in 
-    # acknowledgments, thought starters, and previous answer references from the full message
-    current_question = ""
-    if session_data and session_data.get("asked_q"):
-        asked_q = session_data.get("asked_q", "")
-        canonical = get_question_objective(asked_q)
-        if canonical:
-            current_question = canonical
-            print(f"🔍 Draft - Using canonical question for {asked_q}: {canonical[:80]}...")
-        else:
-            # Fallback to extracting from history
-            current_question = get_current_question_context(history, session_data)
-            # Clean the question text - extract only the topline question
-            current_question = _extract_topline_question(current_question)
-    else:
-        current_question = get_current_question_context(history, session_data)
-        current_question = _extract_topline_question(current_question)
-    
-    print(f"🔍 Draft - Final current_question: {current_question[:100]}...")
-    
-    # Conduct web search for research-backed drafts (for specific question types)
-    business_name = _sanitize_business_identity_text(
-        business_context.get("business_name"),
-        "your business",
+    from utils.business_context import is_meaningful_context_value, prompt_labels
+    from services.business_identity_extractor import get_tagged_answer_for_question_tag
+    from services.business_plan_draft_service import prepare_draft_venture_context
+    from services.business_plan_registry import (
+        get_question_meta,
+        should_use_web_research_for_draft,
+        validate_draft_prerequisites,
     )
-    industry = _sanitize_business_identity_text(
-        business_context.get("industry"),
-        "your industry",
-    )
-    location = business_context.get("location", "")
-    question_topic = get_question_topic(current_question)
-    business_context_for_draft = dict(business_context)
-    business_context_for_draft["business_name"] = business_name
-    business_context_for_draft["industry"] = industry
-    
-    # Trigger research ONLY for data-heavy questions that truly need external data
-    # Skip research for simple questions like mission statement/tagline to reduce latency
-    research_topics = ["competitor", "competitive analysis", "startup costs", "operational requirements", 
-                       "staffing needs", "target market", "sales projections", "financial planning",
-                       "expenses", "pricing", "market", "customer acquisition",
-                       "unique value", "value proposition", "differentiation", "clothing", "retail"]
-    
-    # Exclude mission statement/tagline from research - it doesn't need external data
-    skip_research_topics = ["mission statement", "tagline", "business name"]
-    
-    research_results = None
-    if (any(topic in question_topic.lower() for topic in research_topics) and 
-        not any(skip_topic in question_topic.lower() for skip_topic in skip_research_topics)):
-        # Only conduct research if throttling allows
-        if should_conduct_web_search():
-            research_query = f"{industry} {question_topic} {location} data statistics 2024"
-            print(f"🔍 Draft command - Conducting research: {research_query}")
-            research_results = await conduct_web_search(research_query)
-        else:
-            print(f"⏱️ Draft command - Skipping research due to throttling (reducing latency)")
-    
-    asked_q = (session_data or {}).get("asked_q", "")
-    is_business_name_question = asked_q in ("BUSINESS_PLAN.05", "BP.05")
 
-    # Generate draft content based on conversation history, question, and research
-    draft_content = await generate_draft_content(
+    asked_q = (session_data or {}).get("asked_q", "")
+    question_meta = get_question_meta(asked_q)
+
+    venture = await prepare_draft_venture_context(
+        session_data,
         history,
-        business_context_for_draft,
-        current_question,
-        research_results,
         asked_q=asked_q,
+        get_answer_for_tag=get_tagged_answer_for_question_tag,
+    )
+    business_context = venture.as_dict()
+
+    missing_prereqs = validate_draft_prerequisites(
+        history,
+        asked_q,
+        get_answer_for_tag=get_tagged_answer_for_question_tag,
+        business_context=business_context,
+    )
+    if missing_prereqs:
+        first = missing_prereqs[0]
+        return cap_full_command_assist_reply(
+            f"I need your answer to {first} before I can draft this question. "
+            "Please answer or accept that question, then use Draft again."
+        )
+
+    if not venture.has_anchor_idea():
+        return cap_full_command_assist_reply(
+            "I need your business idea from Question 1 before I can draft this answer. "
+            "Please answer or accept Question 1, then use Draft again."
+        )
+
+    labels = prompt_labels(business_context)
+    location = business_context.get("location") or ""
+
+    research_results = None
+    if should_use_web_research_for_draft(asked_q) and should_conduct_web_search():
+        research_parts = [
+            p
+            for p in (
+                business_context.get("industry"),
+                business_context.get("business_idea"),
+                question_meta.topic_label if question_meta else "",
+                location,
+            )
+            if is_meaningful_context_value(p)
+        ]
+        research_query = " ".join(research_parts) + " data statistics 2024"
+        print(f"🔍 Draft command - Conducting research: {research_query}")
+        research_results = await conduct_web_search(research_query)
+    elif should_use_web_research_for_draft(asked_q):
+        print("⏱️ Draft command - Skipping research due to throttling (reducing latency)")
+
+    is_business_name_question = bool(
+        question_meta and question_meta.is_business_name_question
+    )
+
+    draft_content = await generate_draft_content(
+        venture=venture,
+        asked_q=asked_q,
+        research_results=research_results,
+        thought_starters=get_thought_starters_for_tag(asked_q),
+        prompt_labels=labels,
     )
     draft_content = _strip_followup_prompts(draft_content)
     draft_content = _strip_draft_transition_bleed(draft_content)
@@ -5592,666 +5294,112 @@ def get_current_question_context(history, session_data=None):
     print("🔍 DEBUG - No question found in recent history")
     return ""
 
-def get_question_topic(current_question):
-    """Extract the main topic from the current question - prioritize topline question, not sub-questions.
-    
-    Uses lowercased question text for ALL keyword matching to ensure consistency.
-    Keywords are ordered from MOST specific to LEAST specific to avoid false matches.
-    """
-    if not current_question:
-        print("🔍 DEBUG - No current question provided to get_question_topic")
-        return "business planning"
-    
-    question_lower = current_question.lower()
-    
-    # Check for BUSINESS_PLAN tags first (most reliable)
-    if '[[q:business_plan.02]]' in question_lower:
-        print("🔍 DEBUG - Detected BUSINESS_PLAN.02 - mission statement/tagline topic")
-        return "mission statement"
-    
-    # Check for mission/tagline keywords
-    if any(keyword in question_lower for keyword in ['mission statement', 'tagline', 'business tagline']):
-        print("🔍 DEBUG - Detected mission statement topic")
-        return "mission statement"
-    
-    # INDUSTRY - must check BEFORE "product/service" to avoid false matches on "food services" etc.
-    if any(keyword in question_lower for keyword in ['what industry', 'which industry', 'industry does your business', 'business fall into', 'business fall under', 'industry sector', 'primary industry']):
-        print("🔍 DEBUG - Detected industry topic")
-        return "industry analysis"
-    
-    # BUSINESS STAGE
-    if any(keyword in question_lower for keyword in ['current stage', 'stage of your business', 'idea, currently building', 'idea, prototype', 'ready for launch']):
-        print("🔍 DEBUG - Detected business stage topic")
-        return "business stage"
-    
-    # BUSINESS NAME
-    if any(keyword in question_lower for keyword in ['business name', 'name your business', 'what will you name', 'name of your business']):
-        print("🔍 DEBUG - Detected business name topic")
-        return "business naming"
-    
-    # PROBLEM/SOLUTION (specific phrases first)
-    if any(keyword in question_lower for keyword in ['problem does your business solve', 'who has this problem', 'pain point']):
-        print("🔍 DEBUG - Detected problem-solution topic")
-        return "problem-solution fit"
-    
-    # COMPETITIVE ANALYSIS
-    if any(keyword in question_lower for keyword in ['competitor', 'competition', 'main competitors', 'strengths and weaknesses', 'competitive advantage', 'unique value proposition', 'what makes your business unique']):
-        print("🔍 DEBUG - Detected competitive analysis topic")
-        return "competitive analysis"
-    
-    # TARGET MARKET
-    if any(keyword in question_lower for keyword in ['target market', 'demographics', 'psychographics', 'behaviors', 'ideal customer']):
-        print("🔍 DEBUG - Detected target market topic")
-        return "target market definition"
-    
-    # LOCATION/OPERATIONS
-    if any(keyword in question_lower for keyword in ['location', 'space', 'facility', 'equipment', 'infrastructure', 'where will your business be located']):
-        print("🔍 DEBUG - Detected operational requirements topic")
-        return "operational requirements"
-    
-    # STAFFING
-    if any(keyword in question_lower for keyword in ['staff', 'hiring', 'team', 'employee', 'operational needs', 'initial staff']):
-        print("🔍 DEBUG - Detected staffing needs topic")
-        return "staffing needs"
-    
-    # SUPPLIERS/VENDORS
-    if any(keyword in question_lower for keyword in ['supplier', 'vendor', 'partner', 'relationship', 'key partners']):
-        print("🔍 DEBUG - Detected supplier relationships topic")
-        return "supplier and vendor relationships"
-    
-    # INTELLECTUAL PROPERTY (before general "product/service" check)
-    if any(keyword in question_lower for keyword in ['intellectual property', 'patents', 'trademarks', 'copyrights', 'proprietary technology', 'unique processes', 'formulas', 'legal protections']):
-        print("🔍 DEBUG - Detected intellectual property topic")
-        return "intellectual property"
-    
-    # STARTUP COSTS (before general "financial" check)
-    if any(keyword in question_lower for keyword in ['startup costs', 'estimated startup costs', 'one-time expenses', 'initial costs', 'launch costs']):
-        print("🔍 DEBUG - Detected startup costs topic")
-        return "startup costs"
-    
-    # PRICING
-    if any(keyword in question_lower for keyword in ['pricing', 'price', 'how much will you charge', 'pricing strategy', 'service fees', 'fee structure']):
-        print("🔍 DEBUG - Detected pricing topic")
-        return "pricing strategy"
-    
-    # SALES PROJECTIONS
-    if any(keyword in question_lower for keyword in ['projected sales', 'first year', 'sales projections', 'revenue projections']):
-        print("🔍 DEBUG - Detected sales projections topic")
-        return "sales projections"
-    
-    # SALES CHANNELS/LOCATION
-    if any(keyword in question_lower for keyword in ['where will you sell', 'sales location', 'sales channels', 'distribution channels', 'sales platforms']):
-        print("🔍 DEBUG - Detected sales location topic")
-        return "sales location"
-    
-    # FINANCIAL PLANNING (general)
-    if any(keyword in question_lower for keyword in ['financial', 'budget', 'costs', 'expenses', 'funding', 'investment']):
-        print("🔍 DEBUG - Detected financial planning topic")
-        return "financial planning"
-    
-    # CORE PRODUCT/SERVICE (last resort - uses broad keywords that could false-match)
-    if any(keyword in question_lower for keyword in ['key features and benefits', 'how does it work', 'main components', 'steps involved', 'value or results', 'core offering', 'what will you be offering']):
-        print("🔍 DEBUG - Detected core product/service topic")
-        return "core product or service"
-    
-    # MARKETING
-    if any(keyword in question_lower for keyword in ['marketing', 'advertising', 'promotion', 'brand awareness', 'reach your customers']):
-        print("🔍 DEBUG - Detected marketing topic")
-        return "marketing strategy"
-    
-    # LEGAL
-    if any(keyword in question_lower for keyword in ['legal', 'license', 'permit', 'regulation', 'compliance', 'legal structure']):
-        print("🔍 DEBUG - Detected legal requirements topic")
-        return "legal requirements"
-    
-    print("🔍 DEBUG - No specific topic detected, using default business planning")
-    return "business planning"
-
 async def generate_draft_content(
-    history,
-    business_context,
-    current_question="",
-    research_results=None,
+    *,
+    venture,
     asked_q: str = "",
+    research_results=None,
+    thought_starters: list[str] | None = None,
+    prompt_labels: dict | None = None,
+    expand_existing: bool = False,
 ):
-    """Generate draft content based on conversation history and the current question topic"""
-    # Extract recent messages (both user and assistant) to understand context
-    recent_messages = []
-    for msg in history[-8:]:  # Look at last 8 messages (4 exchanges)
-        if msg.get('content'):
-            recent_messages.append(msg['content'])
-    
-    # Debug logging
-    print(f"🔍 DEBUG - Recent messages for draft context: {recent_messages}")
-    print(f"🔍 DEBUG - Research results available for draft: {bool(research_results)}")
-    
-    # Generate contextual draft based on what they've been discussing
-    if not recent_messages:
-        return "Based on our conversation, here's a draft response that captures the key points we've discussed and provides a comprehensive answer to your current question."
-    
-    # Look for key topics in recent messages (both questions and responses)
-    recent_text = " ".join(recent_messages).lower()
-    print(f"🔍 DEBUG - Recent text for draft analysis: {recent_text[:200]}...")
-    
-    # Use the current_question parameter if provided, otherwise extract from history
-    if not current_question:
-        current_question = get_current_question_context(history, None)
-    
-    print(f"🔍 DEBUG - Current question context for draft: {current_question[:100]}...")
-    
-    # Extract business context
-    business_name = business_context.get("business_name", "your business")
-    industry = business_context.get("industry", "your industry")
-    business_type = business_context.get("business_type", "your business type")
-    location = business_context.get("location", "your location")
-    
-    # Extract previous answers from history for context
-    # IMPORTANT: Only include answers that are RELEVANT to the current question topic
-    # to prevent irrelevant information from bleeding into the draft
-    previous_answers = []
-    key_information = []  # Extract key facts like "sole employee", "no staff", etc.
-    current_topic_lower = current_question.lower() if current_question else ""
-    
-    # Identify the current question's section/topic for filtering
-    question_topic = get_question_topic(current_question)
-    
-    # Only extract key constraints (staffing, funding) - these are universally relevant
-    for msg in history:
-        if msg.get('role') == 'user' and len(msg.get('content', '')) > 10:
-            content = msg.get('content', '')
-            if content.lower() not in ['support', 'draft', 'scrapping', 'scraping', 'accept', 'modify', 'yes', 'no']:
-                content_lower = content.lower()
-                if any(phrase in content_lower for phrase in ['sole employee', 'only me', 'just me', 'no employees', 'no staff', 'working solo', 'i will be the only', 'i am the only']):
-                    key_information.append(f"CRITICAL: User stated they are the sole employee/owner - NO staff will be hired initially")
-                if any(phrase in content_lower for phrase in ['no funding', 'self-funded', 'personal savings', 'no investors']):
-                    key_information.append(f"CRITICAL: User stated funding approach")
-    
-    # Only include the most recent Q&A pair (the question being drafted for) 
-    # and core business info, NOT all previous unrelated answers
-    recent_qa_pairs = []
-    for i in range(len(history) - 1, max(0, len(history) - 6), -1):
-        msg = history[i]
-        if msg.get('role') == 'assistant' and msg.get('content') and '[[Q:' in msg.get('content', ''):
-            # Found the assistant's question - include it as context
-            recent_qa_pairs.append(f"Question: {msg['content'][:200]}")
-            break
-    
-    # Include business fundamentals (name, industry, idea) from early answers
-    for msg in history[:10]:  # Only first 10 messages for core business context
-        if msg.get('role') == 'user' and len(msg.get('content', '')) > 20:
-            content = msg.get('content', '')
-            if content.lower() not in ['support', 'draft', 'scrapping', 'scraping', 'accept', 'modify', 'yes', 'no']:
-                previous_answers.append(content[:200])
-    
-    recent_answers = previous_answers[-3:] if len(previous_answers) > 3 else previous_answers
-    
-    # Use AI to generate a comprehensive, personalized, research-backed draft
-    research_section = ""
-    no_research_guardrail = ""
-    if research_results:
-        research_section = f"""
-    
-    📊 RESEARCH DATA (INCORPORATE INTO DRAFT):
-        {research_results}
-    
-    Use this research to provide data-driven, factual content with citations.
-    """
-    else:
-        no_research_guardrail = """
-
-    NO-RESEARCH MODE (MANDATORY):
-    - Do NOT reference specific companies, brands, market leaders, or named examples.
-    - Do NOT state external facts/trends as if verified data.
-    - Keep recommendations practical and scenario-based using only user-provided context.
-    """
-    
-    is_name_question = asked_q in ("BUSINESS_PLAN.05", "BP.05") or (
-        question_topic == "business naming"
+    """Generate draft content using authoritative questionnaire context (same grounding path as Modify)."""
+    from utils.business_context import is_meaningful_context_value
+    from services.business_plan_draft_service import (
+        build_draft_messages,
+        resolve_draft_mode,
+        validate_draft_output,
     )
-    if is_name_question:
-        idea = business_context.get("business_idea", "") or ""
-        draft_prompt = f"""
-    The user is answering Business Plan question 5: business name (if decided).
+    from services.business_plan_registry import get_question_meta
 
-    Business idea context: {idea[:400] if idea else "Not provided yet"}
-    Industry (if known): {industry}
+    question_meta = get_question_meta(asked_q)
+    draft_mode = resolve_draft_mode(asked_q)
+    business_idea = getattr(venture, "business_idea", "") or ""
 
-    Output ONLY the proposed business name: 1–4 words, no prefix, no explanation, no tagline.
-    Examples of valid output: TowelNest | Blue Harbor Tea | Summit Legal Co
-    Do NOT output "Business Name:" or sentences like "it represents…".
-    If undecided, output exactly: Not decided yet
-    """
-    else:
-        draft_prompt = f"""
-    ⚠️ CRITICAL CONTEXT - READ FIRST:
-        This business is in the {industry} industry operating as a {business_type}.
-    ALL draft content must be specific to this business context.
-    {research_section}
-    {no_research_guardrail}
-    
-    Create a draft answer for this SPECIFIC business question ONLY: "{current_question}"
-    
-    ⚠️ CRITICAL: Your draft must ONLY address the question above. Do NOT include information about 
-    unrelated topics like tools, equipment, operations, or other business areas unless the question 
-    specifically asks about them. Stay focused on the exact topic of the question.
-    MANDATORY: Produce only material that helps complete THIS questionnaire item. Do not add sections that belong to other Business Plan questions or phases.
-    
-    Business Context (PRIMARY IDENTIFIERS):
-    - Business Name: {business_name}
-    - PRIMARY INDUSTRY: {industry}
-    - Business Structure: {business_type}
-    - Location: {location}
-    
-    Core Business Info (for context only - do NOT reference tools/equipment/resources unless asked):
-    {' | '.join(recent_answers) if recent_answers else 'No previous context available'}
-    
-    ⚠️ CONSTRAINTS TO RESPECT:
-    {chr(10).join(key_information) if key_information else 'No critical constraints identified'}
-    
-    IMPORTANT: If the user previously stated they are the sole employee/owner with no staff, 
-    your draft MUST reflect this. Do NOT suggest hiring employees or building a team if they 
-    explicitly stated they will work solo. Respect their previous answers completely.
-    
-    Generate a complete, well-structured draft answer that:
-    1. Directly answers the question with specific content for this business
-    2. Incorporates research findings, statistics, and data when available
-    3. Uses only user-provided facts or provided research facts (no fabricated numbers/claims)
-    4. Is personalized to {business_name} in the {industry} industry
-    5. Considers the {location} market and local factors with actual data
-    6. Provides concrete details and examples from the {industry} industry (not generic advice)
-    7. Is appropriate for a {business_type} business structure
-    8. Uses information from previous answers when relevant
-    9. Optional: one short bullet list (at most 3 bullets) only if it fits the word budget
-    10. ⚠️ CRITICAL WORD LIMIT: Your entire draft MUST be {COMMAND_ASSIST_MAX_WORDS} words or fewer. Be concise; do not exceed this limit.
-    11. NEVER mention unrelated industries.
-    12. Write in first person as the founder ("I/we"), ready to paste as an answer.
-    
-    ⚠️ CRITICAL FOR COST/FINANANCIAL QUESTIONS:
-    - If the question asks about costs, expenses, pricing, acquisition costs, startup costs, or any financial estimates:
-      * Provide numerical estimates ONLY when they come from provided research or explicit user inputs
-      * Include specific dollar amounts, ranges, or percentages (e.g., "$50-$200 per customer", "15-25% of revenue", "$10,000-$25,000")
-      * If no research/user number exists, use conservative ranges and label them as estimates
-      * Break down costs by category if applicable
-      * Do not invent specific market claims (e.g., CAGR, market size) unless present in provided research
-    
-    Keep structure light so the whole draft stays within {COMMAND_ASSIST_MAX_WORDS} words (e.g. one short opening, one tight paragraph or micro-list, optional one-line source hint if research was provided).
-    REMEMBER: Keep all examples and recommendations relevant to this business context.
-    
-    ⚠️ DO NOT include:
-    - "Follow-up prompts:" or follow-up questions
-    - Additional questions for the user
-    - "Would you like to explore..." or similar prompts
-    - Thought starters or tips
-    Just provide the draft content itself.
-    
-    NEVER include: "Let's move on", "next step", a new questionnaire question, bold interview questions,
-    "Thought Starter", brain emoji prompts, or any transition to a different Business Plan item.
-    """
-    
+    messages = build_draft_messages(
+        venture=venture,
+        asked_q=asked_q,
+        research_results=research_results,
+        thought_starters=thought_starters,
+        word_limit=COMMAND_ASSIST_MAX_WORDS,
+        expand_existing=expand_existing,
+    )
+    max_tokens = 32 if draft_mode == "business_name" else 800
+
     try:
         response = await client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "user", "content": draft_prompt}],
+            messages=messages,
             temperature=0.3,
-            max_tokens=32 if is_name_question else 800,
+            max_tokens=max_tokens,
         )
-        
-        ai_draft = response.choices[0].message.content
-        # Strip any follow-up prompts/questions the AI may have added
+
+        ai_draft = response.choices[0].message.content or ""
         ai_draft = _strip_followup_prompts(ai_draft)
         ai_draft = _strip_draft_transition_bleed(ai_draft)
-        if is_name_question:
+
+        if draft_mode == "business_name":
             from services.business_identity_extractor import extract_business_name_from_user_answer
 
             short_name = await extract_business_name_from_user_answer(ai_draft)
             ai_draft = short_name or ai_draft.strip()
+        elif draft_mode == "industry_label":
+            from services.business_identity_extractor import extract_industry_from_user_answer
+
+            label = await extract_industry_from_user_answer(ai_draft)
+            ai_draft = label or truncate_to_word_limit(ai_draft, 12)
         else:
             ai_draft = truncate_to_word_limit(ai_draft, COMMAND_ASSIST_MAX_WORDS)
+
+        validation_error = validate_draft_output(ai_draft, asked_q=asked_q)
+        if validation_error:
+            print(f"⚠️ Draft rejected: {validation_error}")
+            return validation_error
+
         word_count = len(ai_draft.split())
-        print(f"✅ Draft content generated with {len(ai_draft)} characters ({word_count} words){' (with research)' if research_results else ''}")
+        print(
+            f"✅ Draft content generated with {len(ai_draft)} characters ({word_count} words)"
+            f"{' (with research)' if research_results else ''}"
+        )
         return ai_draft
     except Exception as e:
-        print(f"❌ AI draft generation failed: {e}, falling back to template-based drafts")
-        # Fallback with research if available
-        if research_results:
-            return f"""Based on research findings for {business_name} in the {industry} industry:
-
-{research_results}
-
-This data can help you craft a comprehensive answer for your {location} market."""
-        pass
-    
-    # Check for specific business plan question topics based on current question
-    if any(keyword in current_question for keyword in ['problem does your business solve', 'who has this problem', 'problem', 'solve', 'pain point', 'need']):
-        return generate_problem_solution_draft(business_context, history)
-    
-    elif any(keyword in current_question for keyword in ['competitor', 'competition', 'main competitors', 'strengths and weaknesses', 'competitive advantage', 'unique value proposition', 'what makes your business unique']):
-        return generate_competitive_analysis_draft(business_context, history)
-    
-    elif any(keyword in current_question for keyword in ['target market', 'demographics', 'psychographics', 'behaviors', 'ideal customer']):
-        return generate_target_market_draft(business_context, history)
-    
-    elif any(keyword in current_question for keyword in ['location', 'space', 'facility', 'equipment', 'infrastructure', 'where will your business be located']):
-        return generate_operational_requirements_draft(business_context, history)
-    
-    elif any(keyword in current_question for keyword in ['staff', 'hiring', 'team', 'employee', 'operational needs', 'initial staff', 'staffing needs']):
-        # Check if user previously mentioned specific staff (like secretary, assistant, etc.)
-        history_text = " ".join([msg.get('content', '') for msg in history if msg.get('role') == 'user']).lower()
-        
-        # Extract previously mentioned staff from history
-        mentioned_staff = []
-        staff_keywords = ['secretary', 'assistant', 'receptionist', 'office manager', 'bookkeeper', 'accountant', 'staff', 'employee', 'worker', 'help']
-        
-        for msg in history:
-            if msg.get('role') == 'user':
-                content = msg.get('content', '')
-                content_lower = content.lower()
-                
-                # Look for patterns like "1 office secretary", "1 secretary", "a secretary", "secretary", etc.
-                for keyword in staff_keywords:
-                    # Pattern to match: (number)? (office )? (a/an )? keyword (s)?
-                    # Use word boundaries to avoid partial matches
-                    pattern = r'\b(\d+)?\s*(?:office\s+)?(?:a\s+|an\s+)?' + re.escape(keyword) + r's?\b'
-                    matches = re.finditer(pattern, content_lower)
-                    for match in matches:
-                        full_match = match.group(0)  # The full matched string
-                        number = match.group(1)  # The number group (if present)
-                        
-                        # Extract the full phrase including "office" if present
-                        if number:
-                            # Has a number, include it
-                            staff_mention = f"{number} {full_match.replace(number, '').strip()}"
-                        else:
-                            # No number, use the full match
-                            staff_mention = full_match.strip()
-                        
-                        # Clean up the mention (remove extra spaces, normalize)
-                        staff_mention = re.sub(r'\s+', ' ', staff_mention).strip()
-                        
-                        # Add to list if not already present
-                        if staff_mention and staff_mention not in mentioned_staff:
-                            mentioned_staff.append(staff_mention)
-                            print(f"🔍 DEBUG - Found staff mention in history: '{staff_mention}'")
-                        break  # Only process first match per keyword per message
-        
-        # Check if user previously stated they are sole employee
-        if any(phrase in history_text for phrase in ['sole employee', 'only me', 'just me', 'no employees', 'no staff', 'working solo', 'i will be the only', 'i am the only']):
-            return f"""Based on your previous answer that you will be the sole employee and owner, here's a draft for your staffing needs:
-
-**Initial Staffing Structure:**
-Since you've indicated you will be working solo initially, your staffing needs focus on your own skills and capabilities rather than hiring employees.
-
-**Key Considerations:**
-• You will handle all business functions yourself initially (operations, sales, marketing, customer service)
-• Focus on developing or acquiring the skills you need to run the business effectively
-• Consider contractors or freelancers for specialized tasks you can't handle yourself
-• Plan for potential future growth when you might need to hire your first employee
-
-**Skills Development:**
-Identify any skills or expertise you need to develop or acquire to successfully run the business solo. This might include technical skills, business management, marketing, or customer service capabilities.
-
-**Resource Planning:**
-As a sole employee, consider:
-• Time management and workload capacity
-• Tools and systems to maximize your productivity
-• When you might need to bring in contractors or part-time help
-• Long-term plan for when you're ready to hire your first employee
-
-This approach allows you to maintain full control while building the business foundation before expanding your team."""
-        elif mentioned_staff:
-            # User previously mentioned specific staff - reference it
-            staff_list = list(set(mentioned_staff))  # Remove duplicates
-            staff_summary = ", ".join(staff_list[:3])  # Limit to first 3 mentions
-            return f"""Based on your previous answers where you mentioned {staff_summary}, here's a draft for your staffing needs:
-
-**Initial Staffing Structure:**
-You've previously indicated your staffing needs include {staff_summary}. This is a great starting point for your business operations.
-
-**Key Considerations:**
-• {staff_summary} will help support your core business functions
-• Consider the specific roles and responsibilities for each position
-• Think about the qualifications and skills needed for these roles
-• Plan for how these staff members will integrate into your operations
-
-**Operational Integration:**
-• How will {staff_summary} support your daily operations?
-• What systems and processes will you need to manage this team effectively?
-• Consider training needs and onboarding processes
-• Plan for supervision and performance management
-
-**Resource Planning:**
-• Budget for salaries, benefits, and training
-• Workspace requirements for your team
-• Tools and equipment needed for each role
-• Consider part-time vs. full-time arrangements based on your needs
-
-This staffing structure will help you build a strong foundation for your business operations."""
-        else:
-            return generate_staffing_needs_draft(business_context, history)
-    
-    elif any(keyword in current_question for keyword in ['supplier', 'vendor', 'partner', 'relationship', 'key partners']):
-        return generate_supplier_relationships_draft(business_context, history)
-    
-    elif any(keyword in current_question for keyword in ['intellectual property', 'patents', 'trademarks', 'copyrights', 'proprietary technology', 'unique processes', 'formulas', 'legal protections']):
-        return generate_intellectual_property_draft(business_context, history)
-    
-    elif any(keyword in current_question for keyword in ['product', 'service', 'core offering', 'what will you be offering']):
-        business_name = business_context.get("business_name", "Your business")
-        industry = business_context.get("industry", "your industry")
-        business_type = business_context.get("business_type", "your business type")
-        
-        return f"""Based on your business vision, here's a draft for your core product or service: 
-
-{business_name} offers innovative solutions in the {industry} sector designed to help customers achieve their goals more efficiently. As a {business_type}, we focus on delivering value through specialized expertise and customer-centric approaches.
-
-**Core Features:**
-- Specialized solutions tailored to the {industry} market
-- Customer-focused service delivery
-- Innovative approaches to common challenges
-- Scalable solutions that grow with customer needs
-
-**Key Benefits:**
-- Improved efficiency and productivity for customers
-- Cost-effective solutions compared to alternatives
-- Expert guidance and support
-- Customized approaches for different customer segments
-
-**Customer Experience:**
-Customers interact with {business_name} through a streamlined process that focuses on understanding their specific needs and delivering tailored solutions. Our approach emphasizes clear communication, quality service, and measurable results.
-
-**Unique Value Proposition:**
-{business_name} combines industry expertise with innovative approaches to deliver superior solutions in the {industry} sector. Our focus on customer success and continuous improvement sets us apart from competitors.
-
-**Expected Outcomes:**
-Customers can expect improved results, enhanced efficiency, and ongoing support that helps them achieve their business objectives in the {industry} sector."""
-    
-    elif any(keyword in current_question for keyword in ['mission', 'tagline', 'mission statement', 'business stands for']):
-        business_name = business_context.get("business_name", "Your business")
-        industry = business_context.get("industry", "your industry")
-        
-        return f"""Based on your business vision, here's a draft mission statement:
-
-"{business_name} aims to deliver innovative solutions in the {industry} sector, empowering customers to achieve their goals through expert guidance, quality service, and continuous improvement."
-
-**Core Values:**
-- Customer-centric approach and service excellence
-- Innovation and continuous improvement
-- Integrity and transparency in all interactions
-- Commitment to delivering measurable results
-- Building long-term partnerships with customers
-
-**Purpose Statement:**
-We believe that every customer deserves solutions that are tailored to their specific needs and delivered with expertise and care. By focusing on understanding our customers' challenges and goals, we provide value that goes beyond expectations.
-
-**Unique Positioning:**
-{business_name} stands for combining industry expertise with personalized service, making professional solutions accessible and effective for customers in the {industry} sector."""
-    
-    elif any(keyword in current_question for keyword in ['sales', 'projected sales', 'first year', 'sales projections', 'revenue', 'income']):
-        return await generate_sales_projection_draft(business_context, current_question)
-    
-    elif any(keyword in current_question for keyword in ['startup costs', 'estimated startup costs', 'one-time expenses', 'initial costs', 'launch costs']):
-        return await generate_startup_costs_table_draft(business_context, current_question)
-    
-    elif any(keyword in current_question for keyword in ['monthly expenses', 'monthly operating expenses', 'recurring costs', 'operating expenses']):
-        return await generate_monthly_expenses_draft(business_context, current_question)
-    
-    elif any(keyword in current_question for keyword in ['customer acquisition cost', 'acquisition cost', 'customer acquisition', 'cost to acquire', 'cac']):
-        return await generate_customer_acquisition_cost_draft(business_context, current_question)
-    
-    elif any(keyword in current_question for keyword in ['pricing', 'price', 'pricing strategy', 'how will you price', 'pricing model']):
-        return await generate_pricing_with_cost_analysis_draft(business_context, current_question)
-    
-    elif any(keyword in current_question for keyword in ['financial', 'budget', 'costs', 'expenses', 'funding', 'investment']):
-        return "Based on your business requirements, here's a draft for your financial planning: Your financial plan should include startup costs, operating expenses, cash flow projections, and funding requirements. Consider fixed costs (rent, salaries, equipment) and variable costs (materials, marketing, commissions). Focus on creating realistic budgets, identifying funding sources, and planning for financial sustainability. Think about break-even analysis, profit margins, and financial contingency planning to ensure long-term viability."
-    
-    elif any(keyword in current_question for keyword in ['intellectual property', 'patents', 'trademarks', 'copyrights', 'proprietary technology', 'unique processes', 'formulas', 'legal protections']):
-        return generate_intellectual_property_draft(business_context, history)
-    
-    elif any(keyword in current_question for keyword in ['where will you sell', 'sales location', 'sales channels', 'where will you sell your services', 'distribution channels', 'sales platforms']):
-        business_name = business_context.get("business_name", "your business")
-        industry = business_context.get("industry", "your industry")
-        business_type = business_context.get("business_type", "your business type")
-        sales_location = business_context.get("sales_location", "")
-        
-        return f"""Based on your business goals, here's a draft for where you will sell your services:
-
-**Sales Channels:**
-• Online platforms: Website, e-commerce, social media, online marketplaces
-• Physical locations: Office, retail space, client sites, pop-up locations
-• Hybrid approach: Combination of online and in-person sales
-
-**Regulatory Considerations:**
-• Licensing requirements based on sales location (local, state, federal)
-• Tax obligations for different sales channels
-• Compliance with online sales regulations if applicable
-• Permits needed for physical locations
-
-**Key Milestones:**
-• Complete market research and validation
-• Develop working prototype
-• Create minimum viable product (MVP)
-• Conduct testing and validation
-• Prepare for full product launch
-
-**Timeline Considerations:**
-• Development phases: 3-6 months per phase
-• Testing periods: 2-4 weeks for each iteration
-• Validation steps: Continuous throughout development
-• Resource requirements: Technical team, testing equipment, market research
-
-**Validation Strategy:**
-Focus on validating your concept before full development through market research, prototype testing, and user feedback to ensure market fit and demand."""
-    
-    # Fallback to analyzing recent text if current question doesn't match
-    elif any(keyword in recent_text for keyword in ['problem does your business solve', 'who has this problem', 'problem', 'solve', 'pain point', 'need']):
-        return generate_problem_solution_draft(business_context, history)
-    
-    elif any(keyword in recent_text for keyword in ['competitor', 'competition', 'main competitors', 'strengths and weaknesses', 'competitive advantage', 'unique value proposition', 'what makes your business unique']):
-        return generate_competitive_analysis_draft(business_context, history)
-    
-    elif any(keyword in recent_text for keyword in ['target market', 'demographics', 'psychographics', 'behaviors', 'ideal customer']):
-        return generate_target_market_draft(business_context, history)
-    
-    elif any(keyword in recent_text for keyword in ['location', 'space', 'facility', 'equipment', 'infrastructure', 'where will your business be located']):
-        return "Based on your business needs, here's a draft for your operational requirements: Your business location should be strategically chosen to maximize accessibility for your target customers while considering operational efficiency. Key factors include proximity to suppliers, transportation access, zoning requirements, and cost considerations. Your space and equipment needs should align with your business operations, ensuring you have adequate facilities to serve your customers effectively while maintaining operational efficiency. Focus on factors like zoning, transportation access, costs, and scalability."
-    
-    elif any(keyword in recent_text for keyword in ['staff', 'hiring', 'team', 'employee', 'operational needs', 'initial staff', 'staffing needs']):
-        # Check if user previously stated they are sole employee
-        history_text = " ".join([msg.get('content', '') for msg in history if msg.get('role') == 'user']).lower()
-        if any(phrase in history_text for phrase in ['sole employee', 'only me', 'just me', 'no employees', 'no staff', 'working solo', 'i will be the only', 'i am the only']):
-            return "Based on your previous answer that you will be the sole employee and owner, here's a draft for your staffing needs: Since you've indicated you will be working solo initially, your staffing needs focus on your own skills and capabilities rather than hiring employees. You will handle all business functions yourself initially (operations, sales, marketing, customer service). Focus on developing or acquiring the skills you need to run the business effectively. Consider contractors or freelancers for specialized tasks you can't handle yourself. Plan for potential future growth when you might need to hire your first employee. Identify any skills or expertise you need to develop or acquire to successfully run the business solo. As a sole employee, consider time management, tools and systems to maximize productivity, when you might need contractors or part-time help, and your long-term plan for when you're ready to hire your first employee."
-        else:
-            return "Based on your business goals, here's a draft for your staffing needs: Your short-term operational needs should focus on identifying critical roles required for launch, including key personnel who can drive your core business functions. Consider hiring initial staff who bring essential skills and experience, securing appropriate workspace, and establishing operational processes. Prioritize roles that directly impact customer experience and business operations, ensuring you have the right team in place to execute your business plan effectively. Focus on identifying key positions, required qualifications, and your hiring timeline."
-    
-    elif any(keyword in recent_text for keyword in ['supplier', 'vendor', 'partner', 'relationship', 'key partners']):
-        return "Based on your business requirements, here's a draft for your supplier and vendor relationships: You'll need to identify key suppliers and vendors who can provide essential products, services, or resources for your business operations. Consider building relationships with reliable partners who offer competitive pricing, quality products, and consistent service. Key partners might include suppliers for raw materials, service providers for essential business functions, and strategic partners who can help you reach your target market or enhance your offerings. Focus on reliability, quality, pricing, and long-term partnership potential."
-    
-    elif any(keyword in recent_text for keyword in ['key features and benefits', 'how does it work', 'main components', 'steps involved', 'value or results']):
-        from utils.business_context import prompt_labels as _prompt_labels
-
-        _draft_labels = _prompt_labels(business_context)
-        return f"Based on your business vision, here's a draft for your key features and benefits: {_draft_labels['business_name']} offers advanced AI-powered features that provide significant productivity benefits to customers. The main components include intelligent voice recognition technology, automated text formatting, and seamless integration capabilities. Customers will experience dramatic time savings and improved accuracy through a process that involves uploading audio files, AI processing, and downloading formatted results. Focus on clearly articulating the technical aspects, user experience, and measurable results customers can expect from using your solution."
-    
-    elif any(keyword in recent_text for keyword in ['product', 'service', 'core offering', 'what will you be offering']):
-        return "Based on your business vision, here's a draft for your core product or service: Your core offering is [product/service description] designed to [key benefits]. Consider what specific features, benefits, or outcomes customers will receive and how customers will interact with or use your product/service. Focus on your unique value proposition and how you'll deliver exceptional customer experience. Think about the key features that differentiate you from competitors and the specific outcomes customers can expect."
-    
-    elif any(keyword in recent_text for keyword in ['intellectual property', 'patents', 'trademarks', 'copyrights', 'proprietary technology', 'unique processes', 'formulas', 'legal protections']):
-        return "Based on your business needs, here's a draft for your intellectual property strategy: Your business may have intellectual property assets including [patents/trademarks/copyrights] that protect your [unique processes/formulas/technology]. Consider what legal protections are important for your business, including patent applications for innovative processes, trademark registration for your brand, and copyright protection for original content. Focus on identifying your proprietary assets, understanding the legal requirements for protection, and developing a strategy to safeguard your competitive advantages."
-    
-    elif any(keyword in recent_text for keyword in ['where will you sell', 'sales location', 'sales channels', 'where will you sell your services', 'distribution channels', 'sales platforms']):
-        return "Based on your business goals, here's a draft for where you will sell your services: Consider the channels and platforms where your target customers are most likely to find and purchase your services. Think about online platforms (website, e-commerce, social media), physical locations (office, retail space, client sites), or hybrid approaches. Consider how your sales location affects regulatory requirements (licensing, permits, tax obligations), marketing strategy (local vs. online marketing, SEO, advertising), and operations (logistics, delivery, customer service). Also consider competitive analysis - where do your competitors sell, and how can you differentiate your sales approach?"
-    
-    elif any(keyword in recent_text for keyword in ['mission', 'tagline', 'mission statement', 'business stands for']):
-        return "Based on your business vision, here's a draft mission statement: [Business name] aims to [core purpose] by [key approach] to [target outcome]. Consider what your business stands for and how you would describe it in one compelling sentence. Think about your core values, purpose, and what makes you unique. Focus on creating a clear, inspiring statement that guides your business decisions and resonates with your target audience."
-    
-    elif any(keyword in recent_text for keyword in ['sales', 'projected sales', 'first year', 'sales projections', 'revenue', 'income']):
-        return generate_sales_projection_draft(business_context, current_question)
-    
-    elif any(keyword in recent_text for keyword in ['startup costs', 'estimated startup costs', 'one-time expenses', 'initial costs', 'launch costs']):
-        return "Based on your business needs, here's a draft for your startup costs: Your estimated startup costs should include essential one-time expenses like equipment purchases, initial inventory, legal fees, permits and licenses, website development, initial marketing campaigns, and office setup. Consider both essential startup costs and optional investments that could be deferred to manage cash flow. Focus on creating a comprehensive list of all one-time expenses needed to launch your business, including equipment, technology, legal requirements, and initial marketing. Think about equipment leasing vs. buying, bulk purchasing discounts, and phased implementation to optimize your startup investment."
-    
-    elif any(keyword in recent_text for keyword in ['financial', 'budget', 'costs', 'expenses', 'funding', 'investment']):
-        return "Based on your business requirements, here's a draft for your financial planning: Your financial plan should include startup costs, operating expenses, cash flow projections, and funding requirements. Consider fixed costs (rent, salaries, equipment) and variable costs (materials, marketing, commissions). Focus on creating realistic budgets, identifying funding sources, and planning for financial sustainability. Think about break-even analysis, profit margins, and financial contingency planning to ensure long-term viability."
-    
-    else:
-        return "Based on our conversation, here's a comprehensive draft response that addresses your current question with detailed insights and actionable recommendations tailored to your business context and goals. Consider breaking down complex questions into smaller parts and thinking through each aspect systematically."
+        print(f"❌ AI draft generation failed: {e}")
+        if is_meaningful_context_value(business_idea):
+            return (
+                f"Based on your business idea — {business_idea[:300]} — "
+                "here is a starting point for this question. Please personalize it further."
+            )
+        return "I couldn't generate a draft right now. Please try again or answer in your own words."
 
 async def handle_scrapping_command(reply, notes, history, session_data=None):
-    """Handle the Scrapping command with actual web search research.
-    
-    Performs the web search inline before returning so the frontend gets
-    the complete result immediately (no stuck 'Research in Progress' UI).
-    """
-    print(f"🔍 DEBUG - Scrapping command called with notes: '{notes}'")
-    
-    # Extract business context from history for targeted research
-    business_context = extract_business_context_from_history(history)
-    
-    # Get current question context for more targeted responses
-    current_question = get_current_question_context(history, session_data)
-    
-    # Generate scrapping content based on conversation history and current question
-    if notes and len(notes.strip()) > 3:
-        # Use the new refine function to actually refine user's input
-        scrapping_content = await refine_user_input(notes, business_context, current_question)
-    else:
-        # Fallback to generic content if no notes provided
-        scrapping_content = await generate_scrapping_content(history, business_context, notes, current_question)
-    
-    scrapping_response = f"Here's a refined version of your thoughts:\n\n{scrapping_content}\n\n"
-    
-    # Determine the web search query
-    if notes and len(notes.strip()) > 3:
-        search_query = notes.strip()
-    else:
-        from utils.business_context import prompt_labels as _scrapping_labels_fn
+    """Refine founder notes for the active Business Plan question (registry-grounded)."""
+    from services.business_identity_extractor import get_tagged_answer_for_question_tag
+    from services.business_plan_scrapping_service import run_scrapping_refinement
 
-        _scrapping_labels = _scrapping_labels_fn(business_context)
-        search_query = f"{_scrapping_labels['business_name']} {_scrapping_labels['industry']} {get_question_topic(current_question)}"
-    
-    # Actually perform the web search NOW (not deferred)
-    print(f"🔍 Scrapping - performing web search inline for: '{search_query}'")
-    try:
-        search_results = await conduct_web_search(search_query, fast_mode=False)
-        if search_results and len(search_results.strip()) > 20:
-            scrapping_response += f"**🔍 Research Results: {search_query}**\n\n"
-            scrapping_response += search_results + "\n\n"
-            print(f"✅ Scrapping - web search completed, {len(search_results)} chars")
-        else:
-            print(f"⚠️ Scrapping - web search returned empty/short results")
-            scrapping_response += f"**🔍 Research: {search_query}**\n\n"
-            scrapping_response += "I've analyzed the available information for your business context. The refined content above incorporates current best practices.\n\n"
-    except Exception as e:
-        print(f"❌ Scrapping - web search failed: {e}")
-        scrapping_response += f"**🔍 Research: {search_query}**\n\n"
-        scrapping_response += "Research is integrated into the refined content above based on current business best practices.\n\n"
-    
-    scrapping_response = cap_full_command_assist_reply(scrapping_response)
-    print(f"🔍 DEBUG - Scrapping response generated (capped), length: {len(scrapping_response)}")
+    asked_q = (session_data or {}).get("asked_q", "")
+    print(f"🔍 Scrapping command for {asked_q} with notes_len={len((notes or '').strip())}")
+
+    scrapping_content = await run_scrapping_refinement(
+        session_data=session_data,
+        history=history,
+        user_notes=notes or "",
+        asked_q=asked_q,
+        get_answer_for_tag=get_tagged_answer_for_question_tag,
+        conduct_web_search=conduct_web_search,
+        should_conduct_web_search=should_conduct_web_search,
+        openai_client=client,
+        word_limit=COMMAND_ASSIST_MAX_WORDS,
+    )
+    scrapping_content = truncate_to_word_limit(scrapping_content, COMMAND_ASSIST_MAX_WORDS)
+
+    scrapping_response = cap_full_command_assist_reply(
+        f"Here's a refined version of your thoughts:\n\n{scrapping_content}\n\n"
+    )
+    print(f"🔍 Scrapping response generated (capped), length: {len(scrapping_response)}")
     return {
         "reply": scrapping_response,
-        "web_search_status": {"is_searching": False, "query": search_query, "completed": True},
-        "immediate_response": None
+        "web_search_status": {"is_searching": False, "query": None, "completed": False},
+        "immediate_response": None,
     }
 
 async def refine_user_input(user_notes, business_context, current_question=""):
@@ -6461,18 +5609,21 @@ async def handle_support_command(reply, history, session_data=None):
     industry = business_context.get("industry", "business")
     location = business_context.get("location", "")
     
-    # Create targeted research query
-    question_topic = get_question_topic(current_question)
+    # Create targeted research query from registry (tag → objective), not keyword matching
+    asked_q = (session_data or {}).get("asked_q", "")
+    from services.business_plan_registry import get_question_meta
+
+    question_meta = get_question_meta(asked_q)
+    research_focus = (
+        question_meta.objective if question_meta else "business planning"
+    )
     current_year = datetime.now().year
     previous_year = current_year - 1
     primary_location = location or ""
-    
-    if question_topic == "competitive analysis":
-        research_query = (
-            f"top {industry} competitors in {primary_location} {previous_year} {current_year} market share recent developments"
-        )
-    else:
-        research_query = f"{industry} {question_topic} {primary_location} {previous_year} {current_year}"
+
+    research_query = (
+        f"{industry} {research_focus} {primary_location} {previous_year} {current_year}"
+    )
     
     print(f"🔍 Support command - Conducting research: {research_query}")
     
@@ -6487,7 +5638,7 @@ async def handle_support_command(reply, history, session_data=None):
         business_context,
         current_question,
         research_results,
-        question_topic,
+        question_objective=research_focus,
     )
 
     sources_section = format_support_sources_section(support_sources)
@@ -6508,7 +5659,7 @@ async def handle_support_command(reply, history, session_data=None):
     # reference block and must stay verbatim so the user can verify every claim.
     return "\n".join(sections).strip()
 
-async def generate_support_content(history, business_context, current_question="", research_results=None, question_topic=""):
+async def generate_support_content(history, business_context, current_question="", research_results=None, question_objective=""):
     """Generate support content with research-backed insights and citations"""
     # Extract recent messages (both user and assistant) to understand context
     recent_messages = []
@@ -6563,7 +5714,7 @@ async def generate_support_content(history, business_context, current_question="
     current_year = datetime.now().year
     previous_year = current_year - 1
     competitor_requirements = ""
-    if question_topic == "competitive analysis":
+    if "competitor" in (question_objective or "").lower():
         competitor_requirements = f"""
     
     ⚔️ COMPETITORS (entire reply still ≤{COMMAND_ASSIST_MAX_WORDS} words):
@@ -6774,30 +5925,33 @@ async def generate_support_content(history, business_context, current_question="
     
 
 async def handle_draft_more_command(reply, history, session_data=None):
-    """Handle the Draft Answer (formerly Draft More) command to create additional content"""
-    # Extract business context for verification
-    business_context = extract_business_context_from_history(history)
-    
-    # Get current question context - use canonical question to avoid content bleed
-    current_question = ""
-    if session_data and session_data.get("asked_q"):
-        canonical = get_question_objective(session_data.get("asked_q", ""))
-        if canonical:
-            current_question = canonical
-        else:
-            current_question = get_current_question_context(history, session_data)
-            current_question = _extract_topline_question(current_question)
-    else:
-        current_question = get_current_question_context(history, session_data)
-        current_question = _extract_topline_question(current_question)
-    
-    # Generate additional content based on current question
-    additional_content = await generate_additional_draft_content(history, business_context, current_question)
+    """Handle the Draft Answer (formerly Draft More) command to create additional content."""
+    from services.business_identity_extractor import get_tagged_answer_for_question_tag
+    from services.business_plan_draft_service import prepare_draft_venture_context
+
+    asked_q = (session_data or {}).get("asked_q", "")
+    venture = await prepare_draft_venture_context(
+        session_data,
+        history,
+        asked_q=asked_q,
+        get_answer_for_tag=get_tagged_answer_for_question_tag,
+    )
+    if not venture.has_anchor_idea():
+        return cap_full_command_assist_reply(
+            "I need your business idea from Question 1 before I can expand this draft. "
+            "Please answer or accept Question 1, then try again."
+        )
+
+    additional_content = await generate_draft_content(
+        venture=venture,
+        asked_q=asked_q,
+        research_results=None,
+        thought_starters=get_thought_starters_for_tag(asked_q),
+        expand_existing=True,
+    )
     additional_content = _strip_followup_prompts(additional_content)
     additional_content = _strip_draft_transition_bleed(additional_content)
-    
-    # Use consistent format with "Here's a draft" to trigger button detection
-    # NOTE: Do NOT append thought starters to draft responses - they introduce irrelevant context
+
     draft_more_response = f"Here's a draft for you:\n\n{additional_content}\n\n"
     return cap_full_command_assist_reply(draft_more_response)
 
@@ -9439,45 +8593,6 @@ In 2 sentences, provide constructive coaching that balances encouragement with a
     except Exception as exc:
         print(f"⚠️ Failed to generate dynamic critiquing insight: {exc}")
         return None
-
-def transform_question_objective(raw_text: str) -> str:
-    text = (raw_text or "").strip()
-    if not text:
-        return text
-    sentences = re.split(r'(?<=[.?!])\s+', text)
-    transformed: list[str] = []
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        if sentence.endswith("?"):
-            statement = convert_question_to_objective(sentence[:-1].strip())
-            transformed.append(statement)
-        else:
-            transformed.append(sentence)
-    return " ".join(transformed).strip()
-
-def convert_question_to_objective(question: str) -> str:
-    if not question:
-        return ""
-    replacements = [
-        (r"(?i)^what\s+are\s+your\s+", "Detail your "),
-        (r"(?i)^what\s+is\s+your\s+", "Explain your "),
-        (r"(?i)^what\s+is\s+the\s+", "Explain the "),
-        (r"(?i)^what\s+will\s+you\s+", "Outline how you will "),
-        (r"(?i)^how\s+will\s+you\s+", "Describe how you will "),
-        (r"(?i)^how\s+do\s+you\s+", "Describe how you "),
-        (r"(?i)^who\s+are\s+your\s+", "Identify your "),
-        (r"(?i)^who\s+is\s+your\s+", "Identify your "),
-        (r"(?i)^when\s+do\s+you\s+", "Clarify when you "),
-        (r"(?i)^where\s+will\s+you\s+", "Explain where you will "),
-        (r"(?i)^do\s+you\s+have\s+", "State whether you have "),
-        (r"(?i)^have\s+you\s+", "Indicate whether you have "),
-    ]
-    for pattern, replacement in replacements:
-        if re.match(pattern, question):
-            return re.sub(pattern, replacement, question, count=1)
-    return f"Address {question.lower()}"
 
 def remove_duplicate_paragraphs(text: str) -> str:
     if not text:

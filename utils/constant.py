@@ -342,8 +342,9 @@ CRITICAL RULES:
 
 [[Q:BUSINESS_PLAN.16]] What will be your primary method of delivering your product/service (e.g., shipping, in-person services, digital downloads)?
 
-[[Q:BUSINESS_PLAN.17]] Based on what you've input so far, here are some suggested short-term operational needs (e.g., hiring initial staff, securing space) to launch your business:
+[[Q:BUSINESS_PLAN.17]] Based on what you've input so far, here are some suggested short-term operational needs (e.g., equipment, vendors, staffing, permits) to launch your business:
 
+NOTE: This is an AUTO-RESEARCH question. The system AUTOMATICALLY researches and injects operational needs grounded in prior answers (especially location, facilities Q15, and delivery method Q16).
 NOTE: Provide suggestions based on their previous answers, then ask: "Is there anything else you'd like to add?"
 
 --- SECTION 5: MARKETING AND SALES STRATEGY ---

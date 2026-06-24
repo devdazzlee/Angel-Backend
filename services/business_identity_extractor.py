@@ -356,24 +356,68 @@ def get_tagged_user_answer(history: list | None, field: str) -> str:
     if not tags:
         return ""
 
+    question_tags = list(tags)
+    return _scan_substantive_answer_after_tagged_question(history, question_tags)
+
+
+_QUESTION_TAG_PATTERN = re.compile(
+    r"\[\[Q:(?P<phase>BUSINESS_PLAN|BP|GKY)\.(?P<num>\d{2})\]\]",
+    re.IGNORECASE,
+)
+
+
+def get_tagged_answer_for_question_tag(history: list | None, question_tag: str) -> str:
+    """Return the substantive user answer for a specific questionnaire tag (e.g. BUSINESS_PLAN.01)."""
+    if not history or not question_tag:
+        return ""
+    alt = (
+        question_tag.replace("BUSINESS_PLAN.", "BP.")
+        if question_tag.startswith("BUSINESS_PLAN.")
+        else question_tag.replace("BP.", "BUSINESS_PLAN.")
+    )
+    search_tags = {f"[[Q:{question_tag}]]", f"[[Q:{alt}]]"}
+    return _scan_substantive_answer_after_tagged_question(history, list(search_tags))
+
+
+def _scan_substantive_answer_after_tagged_question(
+    history: list,
+    search_tags: list[str],
+) -> str:
+    """
+    Find the latest assistant message containing one of search_tags, then return the
+    first substantive user reply before a different questionnaire tag is asked.
+    Skips command tokens (draft, accept, support, etc.).
+    """
+    from utils.business_context import _is_command_like_answer
+
     question_index: int | None = None
     for index, message in enumerate(history):
         if message.get("role") != "assistant":
             continue
         content = message.get("content") or ""
-        if any(tag in content for tag in tags):
+        if any(tag in content for tag in search_tags):
             question_index = index
 
     if question_index is None:
         return ""
 
-    answer_index = question_index + 1
-    if answer_index >= len(history):
-        return ""
-    answer_message = history[answer_index]
-    if answer_message.get("role") != "user":
-        return ""
-    return clean_context_value(answer_message.get("content"))
+    last_answer = ""
+    for idx in range(question_index + 1, len(history)):
+        msg = history[idx]
+        if msg.get("role") == "assistant":
+            content = msg.get("content") or ""
+            if "[[Q:" in content and not any(tag in content for tag in search_tags):
+                if _QUESTION_TAG_PATTERN.search(content):
+                    break
+            continue
+        if msg.get("role") != "user":
+            continue
+        raw = clean_context_value(msg.get("content"))
+        if not raw or _is_command_like_answer(raw):
+            continue
+        last_answer = raw
+
+    return last_answer
 
 
 async def extract_authoritative_identity_from_history(history: list | None) -> dict[str, str]:
@@ -397,14 +441,8 @@ async def extract_authoritative_identity_from_history(history: list | None) -> d
 
     extracted: dict[str, str] = {}
 
-    for field, question_index in question_index_by_field.items():
-        answer_index = question_index + 1
-        if answer_index >= len(history):
-            continue
-        answer_message = history[answer_index]
-        if answer_message.get("role") != "user":
-            continue
-        raw = clean_context_value(answer_message.get("content"))
+    for field, tags in TAGGED_QUESTION_FIELD_MAP.items():
+        raw = _scan_substantive_answer_after_tagged_question(history, list(tags))
         if not raw or _is_command_like_answer(raw):
             continue
 

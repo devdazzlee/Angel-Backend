@@ -1036,12 +1036,11 @@ async def patch_session_context_from_response(session_id, response_content, tag,
     NOT as top-level columns.  We merge new keys into the existing JSON object.
     """
     
-    # Skip extraction if this is a command word (Accept, Modify, Draft, etc.)
-    command_words = ["accept", "modify", "draft", "support", "scrapping", "scraping", "draft more", "ok", "okay", "yes", "no"]
-    response_lower = response_content.strip().lower()
-    
-    if response_lower in command_words:
-        print(f"🔧 Skipping session context extraction for command word: {response_content}")
+    from services.questionnaire_commands import is_questionnaire_command
+
+    # Skip extraction when this turn is a quick-action command, not a questionnaire answer.
+    if is_questionnaire_command(response_content):
+        print(f"🔧 Skipping session context extraction for command: {response_content[:80]}")
         return
     
     identity_tags = (
@@ -1085,6 +1084,12 @@ async def patch_session_context_from_response(session_id, response_content, tag,
         location = await extract_location_from_user_answer(response_content)
         if location:
             new_fields["location"] = location
+    elif tag in ("BUSINESS_PLAN.01", "BP.01"):
+        from utils.business_context import _is_command_like_answer, is_meaningful_context_value
+
+        idea = response_content.strip()
+        if is_meaningful_context_value(idea) and not _is_command_like_answer(idea):
+            new_fields["business_idea"] = idea
     elif not tag.startswith("GKY."):
         return
     elif tag == "GKY.01":  # Name and preferred name
@@ -1134,6 +1139,17 @@ async def handle_command(session_id: str, request: Request, payload: dict):
         if current_tag and draft_content:
             await patch_session_context_from_response(
                 session_id, draft_content, current_tag, session
+            )
+            # Refresh authoritative context so Roadmap/Implementation get BP.05 name, etc.
+            from utils.business_context import ensure_session_business_context
+            from services.angel_service import extract_business_context_from_history
+
+            await ensure_session_business_context(
+                session_id,
+                session,
+                fetch_history=fetch_chat_history,
+                extract_from_history=extract_business_context_from_history,
+                patch_session=lambda sid, updates: patch_session(sid, user_id, updates),
             )
 
         if current_tag:
@@ -1215,9 +1231,10 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                 phase_prefix = parts[0]
                 current_q_num = int(parts[1])
                 
-                # Calculate previous question number/phase
+                # Calculate previous question number/phase (including cross-phase)
                 previous_q_num = current_q_num - 1
                 previous_phase = phase_prefix
+                previous_tag_override = None
 
                 if previous_q_num < 1 and phase_prefix in PHASE_SEQUENCE:
                     current_index = PHASE_SEQUENCE.index(phase_prefix)
@@ -1227,18 +1244,15 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                         if total_questions and total_questions > 0:
                             previous_phase = candidate_phase
                             previous_q_num = total_questions
+                            previous_tag_override = f"{previous_phase}.{previous_q_num:02d}"
                             break
 
-                if previous_q_num < 1:
+                if previous_q_num < 1 and not previous_tag_override:
                     return {
                         "success": False,
                         "message": "Already at the first question"
                     }
-                
-                # Create previous question tag
-                previous_tag = f"{previous_phase}.{previous_q_num:02d}"
 
-                # Remove the current question and any responses after the previous question
                 history_response = (
                     supabase
                     .from_("chat_history")
@@ -1249,82 +1263,30 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                 )
                 history_records = history_response.data or []
 
-                # Find the LAST occurrence of the previous question BEFORE the current question
-                # This is important because going back to Q1 means we want the intro Q1, not a later Q1
-                target_index = None
-                previous_tag_marker = f"[[Q:{previous_tag}]]"
-                current_tag_marker = f"[[Q:{current_tag}]]" if current_tag else None
-                
-                print(f"🔍 Looking for previous question tag: {previous_tag_marker}")
-                print(f"🔍 Current question tag: {current_tag_marker}")
-                print(f"🔍 History has {len(history_records)} records")
-                
-                # Find the position of the current question first (if it exists)
-                current_question_index = None
-                if current_tag_marker:
-                    for idx in range(len(history_records) - 1, -1, -1):
-                        record = history_records[idx]
-                        if record.get("role") == "assistant" and current_tag_marker in (record.get("content") or ""):
-                            current_question_index = idx
-                            print(f"🔍 Found current question at index {idx}")
-                            break
-                
-                # Now find the last occurrence of previous question BEFORE the current question
-                search_end = current_question_index if current_question_index is not None else len(history_records)
-                
-                for idx in range(search_end - 1, -1, -1):
-                    record = history_records[idx]
-                    content = record.get("content") or ""
-                    if record.get("role") == "assistant" and previous_tag_marker in content:
-                        target_index = idx
-                        print(f"✅ Found previous question at index {idx} (before current at {current_question_index})")
-                        break
-                
-                if target_index is None:
-                    print(f"⚠️ Could not find previous question tag {previous_tag_marker} in history before index {search_end}")
-                    # Debug: Print all assistant messages with question tags
-                    for idx, record in enumerate(history_records[:search_end]):
-                        if record.get("role") == "assistant":
-                            content = record.get("content", "")
-                            if "[[Q:" in content:
-                                tag_match = content.find("[[Q:")
-                                tag_snippet = content[tag_match:tag_match+15] if tag_match >= 0 else "N/A"
-                                print(f"  Record {idx}: {tag_snippet}")
+                from services.go_back_service import (
+                    derive_review_answer_text,
+                    resolve_go_back_plan,
+                )
 
-                ids_to_remove = []
+                plan = resolve_go_back_plan(
+                    history_records,
+                    current_tag=current_tag,
+                    review_tag_override=previous_tag_override,
+                )
+                if not plan:
+                    return {
+                        "success": False,
+                        "message": "Cannot go back - previous question not found in history",
+                    }
 
-                if target_index is not None:
-                    # Remove the user's answer to the previous question AND everything after
-                    # This allows the user to re-answer the previous question
-                    # target_index = assistant message with previous question
-                    # target_index + 1 = user's answer to previous question (if exists)
-                    # target_index + 2 onwards = everything after
-                    
-                    # Start from target_index + 1 to include the user's answer to the previous question
-                    ids_to_remove = [
-                        rec["id"]
-                        for rec in history_records[target_index + 1:]
-                    ]
-                    print(f"🔍 Found previous question at index {target_index}, will delete {len(ids_to_remove)} records after it")
-                else:
-                    # Fallback: remove the latest assistant question and the following user response
-                    print(f"⚠️ Could not find previous question tag {previous_tag_marker} in history, using fallback")
-                    latest_assistant_index = None
-                    for idx in range(len(history_records) - 1, -1, -1):
-                        record = history_records[idx]
-                        if record.get("role") == "assistant" and "[[Q:" in (record.get("content") or ""):
-                            latest_assistant_index = idx
-                            break
-
-                    if latest_assistant_index is not None:
-                        # Delete the latest question and its answer
-                        ids_to_remove.append(history_records[latest_assistant_index]["id"])
-                        # Remove the immediate next user message (their answer to that question) if it exists
-                        if latest_assistant_index + 1 < len(history_records):
-                            next_record = history_records[latest_assistant_index + 1]
-                            if next_record.get("role") == "user":
-                                ids_to_remove.append(next_record["id"])
-                        print(f"🔍 Fallback: Found latest question at index {latest_assistant_index}, will delete {len(ids_to_remove)} records")
+                review_tag = plan["review_tag"]
+                review_phase = review_tag.split(".")[0]
+                ids_to_remove = plan["ids_to_remove"]
+                print(
+                    f"🔙 Go-back plan: review={review_tag}, "
+                    f"from_summary={plan['from_section_summary']}, "
+                    f"delete_after_answer={len(ids_to_remove)} rows"
+                )
 
                 if ids_to_remove:
                     try:
@@ -1393,77 +1355,44 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                         traceback.print_exc()
                         # Continue anyway - the session update will still happen
                 else:
-                    print(f"⚠️ No records to delete - target_index: {target_index}, history length: {len(history_records)}")
+                    print("⚠️ No records to delete after go-back trim")
 
-                # Update session to previous question
-                if previous_phase == phase_prefix:
+                if plan["from_section_summary"]:
+                    new_answered_count = answered_count
+                elif review_phase == phase_prefix:
                     new_answered_count = max(0, answered_count - 1)
                 else:
                     new_answered_count = max(
-                        0, TOTALS_BY_PHASE.get(previous_phase, 1) - 1
+                        0, TOTALS_BY_PHASE.get(review_phase, 1) - 1
                     )
 
                 updates = {
-                    "asked_q": previous_tag,
+                    "asked_q": review_tag,
                     "answered_count": new_answered_count,
-                    "current_phase": previous_phase
+                    "current_phase": review_phase,
                 }
-                
+
                 await patch_session(session_id, user_id, updates)
                 session.update(updates)
-                
-                # Re-fetch updated session
+
                 updated_session = await get_session(session_id, user_id)
-                
-                # Generate the previous question
-                client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                
-                question_prompt = f"""
-                The user wants to go back to the previous question.
-                Please display question {previous_tag} again.
-                Use the proper format with the [[Q:{previous_tag}]] tag.
-                """
-                
-                # Try to reuse the previously stored assistant question after trimming history
-                refreshed_history = await fetch_chat_history(session_id)
-                reply = None
-                reply_from_history = False
-                if refreshed_history:
-                    for item in reversed(refreshed_history):
-                        if item.get("role") == "assistant":
-                            content = item.get("content") or ""
-                            if "[[Q:" in content:
-                                reply = content
-                                reply_from_history = True
-                                break
 
-                # If we could not find the previous question (edge case), regenerate it
-                if not reply:
-                    response = await client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[
-                            {"role": "system", "content": ANGEL_SYSTEM_PROMPT},
-                            {"role": "user", "content": question_prompt}
-                        ],
-                        temperature=0.7,
-                        max_tokens=500
-                    )
-                    reply = response.choices[0].message.content
-                    reply_from_history = False
-                
-                reply = enforce_question_tag(reply, previous_tag)
+                reply = enforce_question_tag(plan["assistant_content"], review_tag)
+                review_answer_text = derive_review_answer_text(
+                    reply, plan.get("user_answer")
+                )
+                user_answer_raw = (plan.get("user_answer") or "").strip()
+                display_user_answer = (
+                    user_answer_raw
+                    if user_answer_raw.lower() not in ACCEPT_TOKENS
+                    else None
+                )
+                review_question_number = int(review_tag.split(".")[1])
 
-                if not reply_from_history:
-                    try:
-                        await save_chat_message(session_id, user_id, "assistant", reply)
-                    except Exception as save_error:
-                        print(f"Warning: failed to save regenerated go-back reply: {save_error}")
-                
-                # Calculate progress
                 current_phase = updated_session.get("current_phase", "GKY")
                 answered_count = updated_session.get("answered_count", 0)
                 current_tag = updated_session.get("asked_q", "")
-                
+
                 if current_phase in ("GKY", "BUSINESS_PLAN") and current_tag:
                     answered_count = derive_phase_answered_from_tag(
                         current_phase, current_tag, section_summary_pause=False
@@ -1484,7 +1413,14 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                     "result": {
                         "reply": reply,
                         "progress": phase_progress,
-                    }
+                        "show_accept_modify": True,
+                        "review_answer_text": review_answer_text,
+                        "display_user_answer": display_user_answer,
+                        "previous_answer": plan.get("user_answer"),
+                        "question_number": review_question_number,
+                        "is_section_summary": False,
+                        "go_back_review": True,
+                    },
                 }
                 
         except (ValueError, IndexError) as e:
