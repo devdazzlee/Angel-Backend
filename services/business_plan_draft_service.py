@@ -14,7 +14,7 @@ from services.questionnaire_grounding import (
     format_authoritative_context_block,
 )
 
-DraftMode = Literal["prose", "business_name", "industry_label"]
+DraftMode = Literal["prose", "business_name"]
 
 DRAFT_COMMAND_SYSTEM = """You draft Business Plan questionnaire answers for founders.
 
@@ -31,8 +31,6 @@ def resolve_draft_mode(asked_q: str) -> DraftMode:
         return "prose"
     if meta.is_business_name_question:
         return "business_name"
-    if meta.is_industry_question:
-        return "industry_label"
     return "prose"
 
 
@@ -87,21 +85,22 @@ def build_draft_messages(
 
     if draft_mode == "business_name":
         user_parts.append("Return only the business name (1–4 words) or: Not decided yet")
-        max_words = 6
-    elif draft_mode == "industry_label":
+    elif meta and meta.is_industry_question:
         user_parts.append(
-            "Return only a short industry label (2–6 words) derived from the business idea above."
+            "Write 2–4 complete sentences as a paste-ready answer. Name the primary industry "
+            "and the specific sub-sector(s) you target, using facts from the business idea "
+            "and prior answers. Cover the main question and the thought-starter angles above."
         )
-        max_words = 12
+        user_parts.append(f"Maximum length: {word_limit} words.")
     else:
         user_parts.append(f"Maximum length: {word_limit} words.")
     user_parts.append("Return only the draft answer body.")
 
     system_extra = ""
-    if draft_mode == "industry_label":
+    if meta and meta.is_industry_question:
         system_extra = (
-            "\nIndustry drafts must be a concise label, not a paragraph. "
-            "Derive the label from Q1 and prior answers only."
+            "\nIndustry drafts must be full prose (not a one-word or one-line label). "
+            "Include the industry, sub-sector, and how the venture fits — grounded in context."
         )
     elif draft_mode == "business_name":
         system_extra = (
@@ -127,10 +126,10 @@ def validate_draft_output(text: str, *, asked_q: str) -> str | None:
             "Please answer or accept Question 1 (your business idea), then try Draft again."
         )
     meta = get_question_meta(asked_q)
-    if meta and meta.is_industry_question and len(text.split()) > 15:
+    if meta and meta.is_industry_question and len(text.split()) < 8:
         return (
-            "Industry answer must be a short label (a few words), not a paragraph. "
-            "Try Draft again or type your industry directly."
+            "Industry draft was too brief. It must name the industry, sub-sector(s), "
+            "and how the business fits — try Draft again."
         )
     return None
 

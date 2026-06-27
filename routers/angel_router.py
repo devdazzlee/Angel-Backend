@@ -1264,6 +1264,7 @@ async def go_back_to_previous_question(session_id: str, request: Request):
                 history_records = history_response.data or []
 
                 from services.go_back_service import (
+                    ACCEPT_TOKENS,
                     derive_review_answer_text,
                     resolve_go_back_plan,
                 )

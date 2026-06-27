@@ -2028,11 +2028,18 @@ def suggest_draft_if_relevant(reply, session_data, user_input, history):
     
     return reply
 
-def check_for_section_summary(current_tag, session_data, history):
+def check_for_section_summary(current_tag, session_data, history=None):
     """Check if we need to provide a section summary based on the current question tag."""
     from services.business_plan_registry import get_section_boundary_info
+    from utils.section_summary import section_summary_already_pending
 
     if not current_tag or not current_tag.startswith("BUSINESS_PLAN."):
+        return None
+
+    if section_summary_already_pending(history):
+        print(
+            f"⏭️ Section summary already pending at {current_tag} — skip re-trigger"
+        )
         return None
 
     try:
@@ -3910,6 +3917,36 @@ async def get_angel_reply(
             user_name=user_name,
             user_prefs=user_prefs,
         )
+
+    from services.questionnaire_commands import is_questionnaire_command
+    from utils.section_summary import (
+        get_last_assistant_content,
+        section_summary_already_pending,
+    )
+
+    _is_accept_early = user_content.lower().strip() == "accept"
+    if (
+        session_data
+        and session_data.get("current_phase") == "BUSINESS_PLAN"
+        and not _is_accept_early
+        and not is_questionnaire_command(user_content)
+        and section_summary_already_pending(history)
+    ):
+        cached_summary = get_last_assistant_content(history)
+        print(
+            "⏭️ Section summary already pending — returning cached summary (no LLM)"
+        )
+        return {
+            "reply": cached_summary,
+            "web_search_status": {
+                "is_searching": False,
+                "query": None,
+                "completed": False,
+            },
+            "immediate_response": None,
+            "patch_session": None,
+            "show_accept_modify": True,
+        }
     
     # Check if user wants to start from a specific question (from uploaded plan analysis)
     # This MUST happen early, before any other processing
@@ -4286,10 +4323,11 @@ async def get_angel_reply(
                     section_name=section_boundary_info["section_name"],
                     user_turn="Accept",
                     angel_system_prompt=ANGEL_SYSTEM_PROMPT,
+                    session_data=session_data,
                 )
 
                 print(f"🔒 Section summary generated via Accept path - keeping asked_q at {current_tag}")
-                
+
                 return {
                     "reply": reply_content,
                     "web_search_status": {"is_searching": False, "query": None, "completed": False},
@@ -4714,7 +4752,9 @@ CRITICAL INSTRUCTIONS:
     # Don't show if user clicked Accept (they want to proceed from summary)
     if not is_accept_command and not is_command_response:
         # Check if we just completed a section-ending question
-        section_summary_info = check_for_section_summary(current_tag_before_update, session_data, history)
+        section_summary_info = check_for_section_summary(
+            current_tag_before_update, session_data, history
+        )
     
     # Extract question tag from reply and update session data BEFORE sequence validation
     # IMPORTANT: Don't update asked_q if we're showing a section summary
@@ -4746,7 +4786,8 @@ CRITICAL INSTRUCTIONS:
         reply_content,
         session_data,
         history,
-        is_command_response=is_command_response,
+        # Accept advances the questionnaire — still inject research for the next auto-research tag.
+        is_command_response=is_command_response and not is_accept_command,
     )
 
     # Also strip floating sub-instruction lines for Q11 that AI generates as separate paragraphs
@@ -4818,6 +4859,7 @@ CRITICAL INSTRUCTIONS:
             section_name=section_summary_info["section_name"],
             user_turn=user_content,
             angel_system_prompt=ANGEL_SYSTEM_PROMPT,
+            session_data=session_data,
         )
         print(f"🔒 Section summary generated - keeping asked_q at {current_tag_before_update} until user accepts")
     
@@ -4999,6 +5041,17 @@ CRITICAL INSTRUCTIONS:
     if auto_research_triggered:
         button_detection["show_buttons"] = True
         print(f"✅ Auto-research triggered - forcing show_accept_modify=True")
+
+    from services.auto_research_service import is_auto_research_reply
+
+    if is_auto_research_reply(reply_content):
+        button_detection["show_buttons"] = True
+        print("✅ Auto-research content detected - forcing show_accept_modify=True")
+
+    # Section summaries always require Accept before the next section
+    if section_summary_info:
+        button_detection["show_buttons"] = True
+        print("✅ Section summary generated - forcing show_accept_modify=True")
     
     # Clean up internal tags before sending to user
     # Remove [[ACCEPT_MODIFY_BUTTONS]] tag - it's only for backend detection, not display
@@ -5343,11 +5396,6 @@ async def generate_draft_content(
 
             short_name = await extract_business_name_from_user_answer(ai_draft)
             ai_draft = short_name or ai_draft.strip()
-        elif draft_mode == "industry_label":
-            from services.business_identity_extractor import extract_industry_from_user_answer
-
-            label = await extract_industry_from_user_answer(ai_draft)
-            ai_draft = label or truncate_to_word_limit(ai_draft, 12)
         else:
             ai_draft = truncate_to_word_limit(ai_draft, COMMAND_ASSIST_MAX_WORDS)
 

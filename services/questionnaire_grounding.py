@@ -203,8 +203,8 @@ def format_authoritative_context_block(
             )
         elif meta.is_industry_question:
             lines.append(
-                "- Output ONLY a short industry label (2–6 words), e.g. "
-                "'SaaS business software' or 'Towing and recovery services'"
+                "- Write 2–4 sentences naming the primary industry and specific sub-sector(s) "
+                "you target, grounded in the business idea and prior answers."
             )
         if meta.draft_grounding:
             lines.append(f"- {meta.draft_grounding}")

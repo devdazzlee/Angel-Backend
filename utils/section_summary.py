@@ -12,12 +12,26 @@ SECTION_SUMMARY_MARKERS = (
 )
 
 
+def get_last_assistant_content(history: list | None) -> str:
+    if not history:
+        return ""
+    for message in reversed(history):
+        if message.get("role") == "assistant":
+            return (message.get("content") or "").strip()
+    return ""
+
+
+def section_summary_already_pending(history: list | None) -> bool:
+    """True when the latest assistant turn is already a section-end summary awaiting Accept."""
+    return is_section_summary_reply(get_last_assistant_content(history))
+
+
 def is_section_summary_reply(
     reply: str | None,
     *,
     show_accept_modify: bool = False,
 ) -> bool:
     """True when the assistant message is a section-end summary awaiting Accept."""
-    if not show_accept_modify or not reply:
+    if not reply:
         return False
     return any(marker in reply for marker in SECTION_SUMMARY_MARKERS)

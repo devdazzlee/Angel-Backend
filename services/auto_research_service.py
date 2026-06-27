@@ -572,6 +572,25 @@ def format_research_header(ctx: AutoResearchContext) -> str:
     return f"\n\n{headers.get(ctx.tag, '🔍 **Research Results:**')}\n\n"
 
 
+def is_auto_research_reply(reply: str | None) -> bool:
+    """True when reply includes injected auto-research (Q11, Q12, Q17, etc.)."""
+    if not reply:
+        return False
+    return "🔍 **" in reply and any(
+        token in reply
+        for token in (
+            "Research Results",
+            "Industry Trends Research",
+            "Suggested Short-Term",
+            "Permits & Licenses Research",
+            "Suggested Insurance",
+            "Estimated Costs",
+            "Suggested Scaling",
+            "Suggested Contingency",
+        )
+    )
+
+
 def build_auto_research_fallback_instruction(ctx: AutoResearchContext) -> str:
     """
     Venture-grounded fallback prompt — same context contract as primary auto-research.
