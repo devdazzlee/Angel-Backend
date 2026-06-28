@@ -4756,7 +4756,18 @@ CRITICAL INSTRUCTIONS:
             current_tag_before_update, session_data, history
         )
     
-    # Extract question tag from reply and update session data BEFORE sequence validation
+    # Validate the BP question sequence FIRST — while session["asked_q"] still holds the
+    # question the user just answered. The model sometimes jumps ahead (e.g. 39 → 41) or
+    # repeats a question; validate corrects the [[Q:..]] tag against that baseline.
+    # This MUST run before we derive the new asked_q below: if asked_q is updated from the
+    # raw tag first, validate then sees asked_q == reply tag, treats it as "aligned", and
+    # never corrects the jump — leaving session["asked_q"] off-by-one. The Draft command
+    # drafts for session["asked_q"], so that desync made it answer the wrong question.
+    reply_content = validate_business_plan_sequence(
+        reply_content, session_data, answered_question_num=bp_answered_question_num
+    )
+
+    # Extract the (now validated) question tag from reply and update session data.
     # IMPORTANT: Don't update asked_q if we're showing a section summary
     patch_session = {}
     tag_match = re.search(r"\[\[Q:([A-Za-z_]+\.\d+)\]\]", reply_content, re.IGNORECASE)
@@ -4826,12 +4837,10 @@ CRITICAL INSTRUCTIONS:
     
     # Clean up excessive blank lines (3+ newlines → 2)
     reply_content = re.sub(r'\n{3,}', '\n\n', reply_content)
-    
-    # Validate business plan question sequence (now with updated session data)
-    reply_content = validate_business_plan_sequence(
-        reply_content, session_data, answered_question_num=bp_answered_question_num
-    )
-    
+
+    # (BP sequence validation now runs earlier — before asked_q is derived — so the
+    # corrected tag drives asked_q. See the note above the tag-extraction block.)
+
     # Fix verification flow to separate verification from next question
     # reply_content = fix_verification_flow(reply_content, session_data)
     

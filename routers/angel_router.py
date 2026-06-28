@@ -664,6 +664,19 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
     
     is_command_response = any(indicator in assistant_reply for indicator in command_indicators)
 
+    # Quick-action commands (Support / Draft / Draft Answer / Scrapping) return tag-less
+    # informational replies, so the reply-text sniff above misses them — a "Support" message
+    # was then treated as an answer to the current question and advanced asked_q to the next
+    # one (e.g. 02 → 03), which made the Draft command target the wrong question. Detect them
+    # from the USER's message instead. Accept/Modify are intentionally excluded: Accept
+    # legitimately advances the questionnaire, and Modify is handled via modify_intent below.
+    from services.questionnaire_commands import is_questionnaire_command
+
+    _user_msg = payload.content.strip().lower()
+    if _user_msg not in ("accept", "modify") and is_questionnaire_command(payload.content):
+        is_command_response = True
+        print(f"🔧 Quick-action command '{_user_msg}' — not an answer; asked_q will not advance")
+
     # Structured Modify (/chat with payload.modify): revise-in-place — never advance questionnaire.
     if modify_intent:
         is_command_response = True
