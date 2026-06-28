@@ -3151,6 +3151,97 @@ def provide_critiquing_feedback(user_msg, session_data, history):
     # No critique needed - answer is substantive
     return None
 
+
+# ── Answer-relevance gate ────────────────────────────────────────────────────
+# Scores a Business Plan answer 1–5 against the current question. We deliberately
+# keep this lenient: only truly hostile or totally off-topic input is blocked.
+# Any answer with even slight relevance — including honest "I don't know" — passes.
+# Cutoff is the HIGHEST score that is still rejected (score <= cutoff → reject).
+ANSWER_RELEVANCE_CUTOFF = 2  # reject scores 1–2; accept and advance on 3+
+
+ANSWER_RELEVANCE_JUDGE_SYSTEM = (
+    "You score a USER ANSWER to a business-plan questionnaire from 1 to 5 for relevance to the "
+    "CURRENT QUESTION. Be lenient — customers may give brief or honest answers and must not be "
+    "pushed back on. Use this exact scale:\n\n"
+    "1 — Insults, swearing, gibberish, or completely random characters/words with no meaning.\n"
+    "2 — Totally off-topic: the answer is about something with ZERO relation to the question "
+    "(e.g. 'I like red cars' for a question about legal compliance).\n"
+    "3 — Has at least SLIGHT relevance to the question. This INCLUDES brief answers, partial answers, "
+    "and honest uncertainty such as 'I don't know', 'maybe', 'not sure yet', or 'haven't decided'.\n"
+    "4 — Relevant and reasonably complete; answers the main question.\n"
+    "5 — Detailed, specific, and well-thought-out; covers all aspects of the question.\n\n"
+    "When unsure between 2 and 3, choose 3 (accept). Only use 1 or 2 for clearly hostile or wholly "
+    "unrelated input.\n\n"
+    'Respond with ONLY compact JSON: {"score": <1-5>, "critique": "<for score 1 or 2 ONLY: one or two '
+    "professional, polite sentences that, without scolding, tell the user this doesn't address the "
+    'question and invite them to answer or use Support; for score 3-5 use an empty string>"}'
+)
+
+
+async def evaluate_answer_relevance(
+    user_content: str,
+    asked_q: str,
+    history: list,
+    session_data: dict,
+) -> tuple[int, str]:
+    """Return (score 1-5, critique). Fails open (score=4) on any error so a judge
+    outage never blocks a legitimate user from progressing."""
+    from services.business_plan_registry import get_question_meta
+
+    meta = get_question_meta(asked_q)
+    question_text = meta.prompt_text if meta else asked_q
+    judge_user = (
+        f'CURRENT QUESTION:\n"{question_text}"\n\n'
+        f'USER ANSWER:\n"{user_content.strip()}"'
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o",
+            temperature=0,
+            max_tokens=160,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": ANSWER_RELEVANCE_JUDGE_SYSTEM},
+                {"role": "user", "content": judge_user},
+            ],
+        )
+        data = json.loads(resp.choices[0].message.content or "{}")
+        try:
+            score = int(data.get("score", 4))
+        except (TypeError, ValueError):
+            score = 4
+        score = max(1, min(5, score))
+        critique = (data.get("critique") or "").strip()
+        print(f"🔎 Answer relevance for {asked_q}: score={score}/5")
+        return score, critique
+    except Exception as exc:
+        logger.warning("Answer-relevance judge failed (%s) — defaulting to accept", exc)
+        return 4, ""
+
+
+def build_answer_reprompt(asked_q: str, critique: str) -> str:
+    """Build the rejection reply FRESH so nothing stacks: just the critique, a clean
+    canonical re-ask (same [[Q:..]] tag keeps asked_q put), one thought starter, and a
+    single Support/Draft offer. Never reuse the prior assistant message — doing so
+    dragged in the previous acknowledgement and duplicated the offer on each retry."""
+    from services.business_plan_registry import get_question_meta
+
+    meta = get_question_meta(asked_q)
+    question_text = meta.prompt_text if meta else "Please share your answer for this question."
+    if not critique:
+        critique = (
+            "That doesn't quite address this question — let's stay on it. Share your answer "
+            "below, or use Support for guidance."
+        )
+    starters = get_thought_starters_for_tag(asked_q)
+    starter_line = f"\n\n🧠 Thought Starter: {starters[0]}" if starters else ""
+    offer = (
+        "\n\n💡 Not sure where to start? Select **\"Support\"** for guidance on this question, "
+        "or **\"Draft\"** and I'll draft an answer from what you've already shared."
+    )
+    return f"{critique}\n\n[[Q:{asked_q}]]\n\n**{question_text}**{starter_line}{offer}"
+
+
 def _get_current_topic_keywords(asked_q: str) -> list:
     """Get topic-related keywords for the current question to allow follow-up questions."""
     topic_keywords = {
@@ -4373,6 +4464,42 @@ async def get_angel_reply(
             "show_accept_modify": True
         }
     
+    # ── Answer-relevance gate (Business Plan) ──
+    # Only block truly hostile or totally off-topic input (score 1–2): stay on the
+    # question, critique politely, and offer Support — do NOT advance. Anything with
+    # even slight relevance (3+), including a brief or honest "I don't know", advances
+    # normally with no extra pushback.
+    if (
+        session_data
+        and session_data.get("current_phase") == "BUSINESS_PLAN"
+        and not is_accept_command
+        and not is_command_response
+    ):
+        from services.questionnaire_commands import is_questionnaire_command
+        from utils.section_summary import section_summary_already_pending
+
+        _asked_q_now = session_data.get("asked_q", "")
+        _ans_norm = user_content.strip().lower()
+        _is_plain_answer = (
+            len(user_content.strip()) > 0
+            and _asked_q_now.startswith("BUSINESS_PLAN.")
+            and _ans_norm not in ("accept", "modify", "yes", "no", "ok", "okay", "proceed", "skip", "next")
+            and not is_questionnaire_command(user_content)
+            and not section_summary_already_pending(history)
+        )
+        if _is_plain_answer:
+            _score, _critique = await evaluate_answer_relevance(
+                user_content, _asked_q_now, history, session_data
+            )
+            if _score <= ANSWER_RELEVANCE_CUTOFF:
+                print(f"🛑 Answer scored {_score}/5 for {_asked_q_now} — staying on question, not advancing")
+                return {
+                    "reply": build_answer_reprompt(_asked_q_now, _critique),
+                    "web_search_status": {"is_searching": False, "query": None, "completed": False},
+                    "immediate_response": None,
+                    "show_accept_modify": False,
+                }
+
     eff_aff, eff_cfb = compute_effective_tone_intensities(
         session_data,
         user_prefs,
@@ -4590,7 +4717,7 @@ CRITICAL INSTRUCTIONS:
                 + accept_next_hint
             ),
         })
-        
+
     msgs.append({"role": "user", "content": user_content})
 
     # Question index the user is answering this turn (session may mutate later in this handler).
