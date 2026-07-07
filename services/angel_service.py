@@ -6673,20 +6673,43 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     # OPTIMIZED: Use asyncio with timeout to prevent blocking - only do 2 quick searches
     # If searches timeout, continue without them (artifact will still be comprehensive)
-    async def quick_search(query, timeout=5):
+    async def quick_search(query, timeout=5, research_kind: str | None = None):
         try:
-            return await asyncio.wait_for(conduct_web_search(query), timeout=timeout)
+            return await asyncio.wait_for(
+                conduct_web_search(query, research_kind=research_kind), timeout=timeout
+            )
         except asyncio.TimeoutError:
             print(f"⏱️ Search timeout for: {query[:50]}... (continuing without it)")
             return None
         except Exception as e:
             print(f"⚠️ Search error for {query[:50]}: {str(e)} (continuing without it)")
             return None
-    
+
     # Only do 2 essential searches (market and competitor) with timeout
-    # This prevents long delays while still providing valuable research
-    market_research_task = quick_search(f"market analysis {industry} {location} {previous_year}", timeout=8)
-    competitor_research_task = quick_search(f"top competitors {industry} business model analysis {previous_year}", timeout=8)
+    # This prevents long delays while still providing valuable research.
+    #
+    # conduct_web_search() doesn't do a literal query lookup — the query string
+    # only picks which fixed "numbered_sections" output contract to hand the
+    # model (see get_research_synthesis_sections), and that's what actually
+    # shapes the response. Without an explicit research_kind, it falls back to
+    # keyword-guessing the query text, and no keyword bucket recognizes market
+    # size/TAM/CAGR wording — so it silently fell through to the
+    # "industry_trends" contract (hence Market Trends always populated fine,
+    # while Market Size/Growth never did: the model was never asked for those
+    # figures no matter how the query itself was worded).
+    # Passing research_kind="market_size_growth" explicitly selects the
+    # contract that actually asks for a TAM figure and a CAGR/growth-rate
+    # figure, instead of leaving it to fragile keyword matching.
+    market_research_task = quick_search(
+        f"{industry} market size and growth rate {location} {previous_year}-{current_year}",
+        timeout=8,
+        research_kind="market_size_growth",
+    )
+    competitor_research_task = quick_search(
+        f"top competitors {industry} business model analysis {previous_year}",
+        timeout=8,
+        research_kind="competitors",
+    )
     
     # Run searches in parallel and wait for both (or timeout)
     market_research, competitor_research = await asyncio.gather(
@@ -6773,12 +6796,20 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     - Read through the conversation history above carefully
     - Extract ACTUAL business information from user's answers
     - Replace ALL placeholders like "[Extract from conversation]" with REAL data from the conversation
-    - If information is not found in the conversation, state "Not yet specified" instead of using placeholders
     - Use the actual business name: {labels['business_name']}
     - Use the actual industry: {labels['industry']}
     - Use the actual location: {labels['location']}
     - Extract mission statements, value propositions, target markets, revenue models, etc. from actual user answers
-    - DO NOT make up information - only use what's in the conversation history
+    - DO NOT make up information — every figure must come from the conversation above OR the "Deep Research
+      Conducted" block above (never invent a number that appears in neither)
+    - Market Size and Market Growth Rate (in the Market Research Findings Table and the Target Market
+      Segmentation Table's Size/Growth Rate columns) are NEVER asked as questionnaire questions — they exist
+      ONLY in the "Deep Research Conducted → Market Analysis" text above. Read that text and extract the
+      concrete TAM/market-size figure and the growth-rate/CAGR figure from it; cite it as "Industry Reports"
+      source type
+    - Only write "Not yet specified" for a field after checking BOTH the conversation history AND the Deep
+      Research Conducted block and confirming the information is in neither — do not default to it just
+      because the conversation alone doesn't mention it
     
     **Reference Document**: Business Plan Deep Research Questions V2
     
@@ -6839,20 +6870,20 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     | Research Area | Findings | Source Type |
     |---------------|----------|-------------|
-    | **Market Size** | [Extract from conversation and research] | [Government/Academic/Industry] |
-    | **Market Growth** | [Extract from conversation and research] | [Government/Academic/Industry] |
+    | **Market Size** | [The TAM/market-size figure from Deep Research Conducted → Market Analysis] | Industry Reports |
+    | **Market Growth** | [The growth-rate/CAGR figure from Deep Research Conducted → Market Analysis] | Industry Reports |
     | **Target Demographics** | [Extract from conversation] | User Input |
     | **Customer Needs** | [Extract from conversation] | User Input |
     | **Market Trends** | [From research conducted] | Industry Reports |
     | **Market Opportunity** | [Extract from conversation] | User Input |
-    
+
     ### Target Market Segmentation Table
-    
+
     | Segment | Description | Size | Growth Rate | Priority |
     |---------|-------------|------|-------------|----------|
-    | **Primary Segment** | [Extract from conversation] | [Estimate] | [From research] | High |
-    | **Secondary Segment** | [Extract from conversation] | [Estimate] | [From research] | Medium |
-    | **Tertiary Segment** | [Extract from conversation] | [Estimate] | [From research] | Low |
+    | **Primary Segment** | [Extract from conversation] | [Share of the Market Size figure above for this segment] | [The growth-rate/CAGR figure from Deep Research Conducted → Market Analysis] | High |
+    | **Secondary Segment** | [Extract from conversation] | [Share of the Market Size figure above for this segment] | [The growth-rate/CAGR figure from Deep Research Conducted → Market Analysis] | Medium |
+    | **Tertiary Segment** | [Extract from conversation] | [Share of the Market Size figure above for this segment] | [The growth-rate/CAGR figure from Deep Research Conducted → Market Analysis] | Low |
     
     [Then provide detailed paragraphs expanding on each section above]
     

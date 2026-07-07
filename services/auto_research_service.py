@@ -314,6 +314,17 @@ def get_research_synthesis_sections(research_kind: str) -> str:
             "3. **Early Warning Signs**: Indicators to monitor.\n"
             "4. **Resources & Support**: Tools and advisors."
         ),
+        "market_size_growth": (
+            "1. **Market Size**: Give ONE specific total addressable market (TAM) or serviceable-market "
+            "dollar figure for this exact industry/segment and location, plus the year it applies to. "
+            "You MUST state a number (use your best current estimate if an exact figure isn't known) — "
+            "never respond with 'not available' or 'varies'.\n"
+            "2. **Market Growth Rate**: Give ONE specific annual growth rate or CAGR percentage for this "
+            "market, plus the forecast period it covers (e.g. '6.2% CAGR, 2024-2029'). You MUST state a "
+            "percentage — never respond with 'not available' or 'varies'.\n"
+            "3. **Basis**: 1-2 sentences on what the size/growth figures are grounded in (e.g. industry "
+            "reports, government data, comparable market benchmarks)."
+        ),
     }
     return sections.get(
         research_kind,
