@@ -518,6 +518,28 @@ class BudgetService:
                     actual_cat = 'revenue'
                     actual_sub = 'revenue'
 
+                # Revenue lines carry a "Price: $X, Volume: Y" breakdown (see the
+                # prompt in generate_estimated_expenses_from_business_plan) — the
+                # frontend always derives the displayed Revenue Projection from
+                # price × volume (never a stored lump sum), so without these two
+                # fields a revenue row shows Price $0.00 / Volume 1 while the total
+                # column still showed the old lump `amount` — a contradiction the
+                # user sees as "phantom" revenue. Recompute `amount` from the
+                # parsed figures too, so the stored total can never drift from them.
+                estimated_price: Optional[float] = None
+                estimated_volume: Optional[int] = None
+                if actual_cat == 'revenue' and description:
+                    price_match = re.search(r'price:\s*\$?([\d,.]+)', description, re.IGNORECASE)
+                    volume_match = re.search(r'volume:\s*([\d,.]+)', description, re.IGNORECASE)
+                    if price_match and volume_match:
+                        try:
+                            estimated_price = float(price_match.group(1).replace(',', ''))
+                            estimated_volume = int(float(volume_match.group(1).replace(',', '')))
+                            amount = estimated_price * estimated_volume
+                        except ValueError:
+                            estimated_price = None
+                            estimated_volume = None
+
                 items.append(BudgetItemCreate(
                     id=str(uuid.uuid4()),
                     name=name,
@@ -525,6 +547,8 @@ class BudgetService:
                     subcategory=actual_sub,
                     estimated_amount=amount,
                     actual_amount=None,
+                    estimated_price=estimated_price,
+                    estimated_volume=estimated_volume,
                     description=description,
                     is_custom=False,
                 ))

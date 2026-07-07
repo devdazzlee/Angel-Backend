@@ -2978,8 +2978,8 @@ FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS (with these exact section headers in thi
 - [Add 4-8 more startup cost line items specific to this business]
 
 **Monthly Revenue Projection**
-- [Primary Revenue Stream Name]: $X,XXX (Description of this revenue source)
-- [Secondary Revenue Stream Name]: $X,XXX (Description of this revenue source)
+- [Primary Revenue Stream Name]: $X,XXX (Price: $XX.XX/unit, Volume: XXX units/month — Description of this revenue source)
+- [Secondary Revenue Stream Name]: $X,XXX (Price: $XX.XX/unit, Volume: XXX units/month — Description of this revenue source)
 - [Add 2-5 more revenue streams specific to this business]
 
 **Monthly Operating Expenses**
@@ -2994,6 +2994,11 @@ IMPORTANT:
 - Extract actual costs, pricing, and revenue details from the business plan conversation above
 - For Startup Costs: include one-time pre-launch expenses (registration, equipment, branding, initial inventory, etc.)
 - For Monthly Revenue Projection: include each revenue stream with realistic monthly projected amounts based on the user's pricing and target market
+- For Monthly Revenue Projection ONLY: every line MUST include "Price: $XX.XX/unit, Volume: XXX units/month" in
+  the parenthetical exactly in that wording (substitute a natural unit like "per customer", "per order", "per
+  session" for "unit" if it reads better, but keep the "Price: $" and "Volume: " labels literally so they can be
+  parsed). The leading dollar amount MUST equal Price × Volume — never state a total that doesn't match its own
+  price and volume figures.
 - For Monthly Operating Expenses: include ALL recurring monthly costs (rent, salaries, payroll, contractors, marketing, software, utilities, COGS, materials, etc.)
 - Amounts must be realistic for {location}
 - Return ONLY the formatted list with the three section headers, no additional text."""
@@ -3023,9 +3028,9 @@ IMPORTANT:
 - Office / Workspace Setup: $2,000 (Furnishing and setup costs)
 
 **Monthly Revenue Projection**
-- Primary Revenue Stream: $5,000 (Main source of income)
-- Secondary Revenue Stream: $2,000 (Additional revenue source)
-- Other Income: $500 (Miscellaneous income)
+- Primary Revenue Stream: $5,000 (Price: $50.00/unit, Volume: 100 units/month — Main source of income)
+- Secondary Revenue Stream: $2,000 (Price: $20.00/unit, Volume: 100 units/month — Additional revenue source)
+- Other Income: $500 (Price: $25.00/unit, Volume: 20 units/month — Miscellaneous income)
 
 **Monthly Operating Expenses**
 - Rent / Workspace: $1,500 (Monthly office or workspace rental)
