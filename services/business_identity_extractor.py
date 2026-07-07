@@ -401,7 +401,6 @@ def _scan_substantive_answer_after_tagged_question(
     if question_index is None:
         return ""
 
-    last_answer = ""
     for idx in range(question_index + 1, len(history)):
         msg = history[idx]
         if msg.get("role") == "assistant":
@@ -415,9 +414,16 @@ def _scan_substantive_answer_after_tagged_question(
         raw = clean_context_value(msg.get("content"))
         if not raw or _is_command_like_answer(raw):
             continue
-        last_answer = raw
+        # Return the FIRST substantive reply — it's the direct answer to the
+        # question just asked. Anything the user sends afterward but before the
+        # next tagged question (a clarifying follow-up, an aside, a comment on
+        # Angel's coaching remarks) is not a redefinition of that answer and must
+        # not silently overwrite it. Legitimate revisions go through "go back",
+        # which deletes the stale history rows before the new answer is added, so
+        # there is never more than one real answer to scan here for that case.
+        return raw
 
-    return last_answer
+    return ""
 
 
 async def extract_authoritative_identity_from_history(history: list | None) -> dict[str, str]:
