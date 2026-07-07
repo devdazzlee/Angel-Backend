@@ -425,6 +425,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         show_accept_modify = angel_response.get("show_accept_modify", False)
         business_plan_artifact = angel_response.get("business_plan_artifact", None)
         awaiting_gky_proceed = angel_response.get("awaiting_gky_proceed", False)
+        is_auto_research = angel_response.get("is_auto_research", False)
     else:
         # Backward compatibility
         assistant_reply = angel_response
@@ -436,6 +437,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
         show_accept_modify = False
         business_plan_artifact = None
         awaiting_gky_proceed = False
+        is_auto_research = False
 
     # CRITICAL: Don't save assistant reply to chat history if it's a transition
     # Transitions should show modals, not appear in chat
@@ -1016,6 +1018,7 @@ async def post_chat(session_id: str, request: Request, payload: ChatRequestSchem
             "question_number": question_number,
             "is_section_summary": is_section_summary,
             "awaiting_gky_proceed": awaiting_gky_proceed,
+            "is_auto_research": is_auto_research,
         }
     }
 

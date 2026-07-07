@@ -5180,7 +5180,14 @@ CRITICAL INSTRUCTIONS:
 
     from services.auto_research_service import is_auto_research_reply
 
-    if is_auto_research_reply(reply_content):
+    # Single authoritative "is this an auto-research turn" fact, computed once here
+    # and handed to the frontend verbatim. The frontend used to re-derive this same
+    # fact from a separately hand-maintained regex on the message text, which could
+    # silently drift out of sync with the header strings this file actually emits —
+    # that mismatch is what caused accepted auto-research answers to vanish instead
+    # of being preserved in the chat history.
+    is_auto_research = bool(auto_research_triggered) or is_auto_research_reply(reply_content)
+    if is_auto_research:
         button_detection["show_buttons"] = True
         print("✅ Auto-research content detected - forcing show_accept_modify=True")
 
@@ -5205,7 +5212,8 @@ CRITICAL INSTRUCTIONS:
         "web_search_status": web_search_status,
         "immediate_response": immediate_response,
         "patch_session": patch_session if patch_session else None,
-        "show_accept_modify": button_detection.get("show_buttons", False)
+        "show_accept_modify": button_detection.get("show_buttons", False),
+        "is_auto_research": is_auto_research,
     }
 
 def _strip_contradictory_guardrail(reply_content: str) -> str:
@@ -5782,21 +5790,35 @@ async def generate_scrapping_content(history, business_context, notes, current_q
 
 async def handle_support_command(reply, history, session_data=None):
     """Handle the Support command with aggressive web search research"""
-    # Extract business context for verification
-    business_context = extract_business_context_from_history(history)
-    
+    # Ground Support in the same authoritative venture context Draft and the
+    # main chat use (session business_context + tagged Q&A history), instead
+    # of re-deriving a business profile from raw keyword matching. That old
+    # heuristic path is what produced generic "small business" advice for a
+    # steakhouse's facilities question — it never saw the founder's actual
+    # industry/business-idea answers.
+    from services.business_identity_extractor import get_tagged_answer_for_question_tag
+    from services.business_plan_draft_service import prepare_draft_venture_context
+    from services.business_plan_registry import get_question_meta
+
+    asked_q = (session_data or {}).get("asked_q", "")
+
+    venture = await prepare_draft_venture_context(
+        session_data,
+        history,
+        asked_q=asked_q,
+        get_answer_for_tag=get_tagged_answer_for_question_tag,
+    )
+    business_context = venture.as_dict()
+
     # Get current question context for more targeted responses
     current_question = get_current_question_context(history, session_data)
-    
+
     # ALWAYS conduct web search for Support command
     business_name = business_context.get("business_name", "business")
     industry = business_context.get("industry", "business")
     location = business_context.get("location", "")
-    
-    # Create targeted research query from registry (tag → objective), not keyword matching
-    asked_q = (session_data or {}).get("asked_q", "")
-    from services.business_plan_registry import get_question_meta
 
+    # Create targeted research query from registry (tag → objective), not keyword matching
     question_meta = get_question_meta(asked_q)
     research_focus = (
         question_meta.objective if question_meta else "business planning"
@@ -5823,6 +5845,8 @@ async def handle_support_command(reply, history, session_data=None):
         current_question,
         research_results,
         question_objective=research_focus,
+        venture=venture,
+        asked_q=asked_q,
     )
 
     sources_section = format_support_sources_section(support_sources)
@@ -5843,8 +5867,18 @@ async def handle_support_command(reply, history, session_data=None):
     # reference block and must stay verbatim so the user can verify every claim.
     return "\n".join(sections).strip()
 
-async def generate_support_content(history, business_context, current_question="", research_results=None, question_objective=""):
+async def generate_support_content(
+    history,
+    business_context,
+    current_question="",
+    research_results=None,
+    question_objective="",
+    venture=None,
+    asked_q="",
+):
     """Generate support content with research-backed insights and citations"""
+    from services.questionnaire_grounding import format_authoritative_context_block
+
     # Extract recent messages (both user and assistant) to understand context
     recent_messages = []
     for msg in history[-8:]:  # Look at last 8 messages (4 exchanges)
@@ -5874,16 +5908,20 @@ async def generate_support_content(history, business_context, current_question="
     industry = business_context.get("industry", "your industry")
     business_type = business_context.get("business_type", "your business type")
     location = business_context.get("location", "your location")
-    
-    # Extract previous answers from history for better context
-    previous_answers = []
-    for msg in history[-10:]:
-        if msg.get('role') == 'user' and len(msg.get('content', '')) > 20:
-            content = msg.get('content', '')
-            # Skip command words
-            if content.lower() not in ['support', 'draft', 'scrapping', 'scraping', 'accept', 'modify']:
-                previous_answers.append(content[:200])
-    
+
+    # Ground prior-answer context in the tagged questionnaire history (same
+    # source Draft uses) rather than guessing from the last N raw chat lines
+    # — that guesswork previously fed the model whatever text happened to
+    # fall in a window, unrelated to the founder's actual prior answers.
+    if venture is not None:
+        authoritative_context_block = format_authoritative_context_block(
+            venture, asked_q=asked_q
+        )
+    else:
+        authoritative_context_block = (
+            f'- Business idea: "{business_context.get("business_idea", "")}"'
+        )
+
     # Generate dynamic support using AI model with research results and citations
     research_section = ""
     if research_results:
@@ -5926,8 +5964,7 @@ async def generate_support_content(history, business_context, current_question="
     - Business Structure: {business_type}
     - Location: {location}
 
-    Previous Context from Conversation:
-    {' | '.join(previous_answers[-3:]) if previous_answers else 'No previous context available'}
+    {authoritative_context_block}
 
     📦 OUTPUT CONTRACT — RETURN A SINGLE JSON OBJECT, NOTHING ELSE:
         {{
