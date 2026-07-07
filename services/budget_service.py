@@ -557,6 +557,36 @@ class BudgetService:
     @staticmethod
     async def generate_initial_expenses(user_id: str, session_id: str) -> List[BudgetItemCreate]:
         try:
+            # Idempotency guard: this is the one-time AI seed for a brand-new
+            # budget. The caller always persists whatever this returns as NEW
+            # items (create_or_update_budget inserts anything without a
+            # matching existing id), so calling this twice for a session that
+            # already has items would duplicate every startup cost, revenue
+            # stream, and operating expense — which is exactly what happened
+            # when the frontend effect that triggers this fired more than once
+            # (React StrictMode double-invoke in dev, or a fast remount/race
+            # in prod). Returning the existing items instead of regenerating
+            # makes this endpoint safe to call any number of times.
+            budget_id = _ensure_budget_exists(user_id, session_id)
+            existing_response = supabase.table("budget_items").select("*").eq("budget_id", budget_id).execute()
+            if existing_response.data:
+                return [
+                    BudgetItemCreate(
+                        id=row["id"],
+                        name=row["name"],
+                        category=row["category"],
+                        subcategory=row.get("subcategory"),
+                        estimated_amount=row.get("estimated_amount", 0),
+                        actual_amount=row.get("actual_amount"),
+                        estimated_price=row.get("estimated_price"),
+                        estimated_volume=row.get("estimated_volume"),
+                        description=row.get("description"),
+                        is_custom=row.get("is_custom", True),
+                        is_selected=row.get("is_selected", True),
+                    )
+                    for row in existing_response.data
+                ]
+
             session_response = supabase.table("chat_sessions").select("*").eq(
                 "id", session_id
             ).eq("user_id", user_id).execute()
