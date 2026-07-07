@@ -24,7 +24,13 @@ class ProviderIntent(TypedDict):
 
 class ServiceProviderTableGenerator:
     """Generate comprehensive service provider tables with local providers"""
-    
+
+    # Floor for total providers (local + nationwide) shown per category, so a
+    # step never surfaces just the 2 nationwide fallbacks. See
+    # _get_predefined_providers_with_local, which distributes the local-side
+    # shortfall across the category's provider types.
+    MIN_TOTAL_PROVIDERS = 5
+
     def __init__(self):
         self.provider_categories = {
             "legal": {
@@ -363,7 +369,7 @@ class ServiceProviderTableGenerator:
 
         default: ProviderIntent = {
             "search_role": "Business service provider",
-            "local_provider_types": ["Business Consultant"],
+            "local_provider_types": ["Business Consultant", "Industry Advisor", "Local Service Provider"],
             "static_keywords": [],
             "exclude_consumer_industry": False,
             "guidance": "Recommend professionals or services that help complete the step.",
@@ -372,21 +378,23 @@ class ServiceProviderTableGenerator:
         category_defaults: Dict[str, ProviderIntent] = {
             "legal": {
                 "search_role": "Attorney or legal compliance professional",
-                "local_provider_types": ["Business Attorney", "Business Formation Lawyer"],
+                "local_provider_types": [
+                    "Business Attorney", "Business Formation Lawyer", "Registered Agent / Filing Service",
+                ],
                 "static_keywords": ["legal", "attorney", "law", "formation", "compliance"],
                 "exclude_consumer_industry": False,
                 "guidance": "Recommend law firms or legal services — not unrelated businesses.",
             },
             "financial": {
                 "search_role": "CPA, accountant, or financial services firm",
-                "local_provider_types": ["CPA/Accountant", "Small Business Banker"],
+                "local_provider_types": ["CPA/Accountant", "Small Business Banker", "Bookkeeping Service"],
                 "static_keywords": ["accounting", "cpa", "tax", "bookkeeping", "bank"],
                 "exclude_consumer_industry": False,
                 "guidance": "Recommend accounting, tax, or banking partners.",
             },
             "marketing": {
                 "search_role": "Marketing agency or branding professional",
-                "local_provider_types": ["Marketing Agency", "Brand Designer"],
+                "local_provider_types": ["Marketing Agency", "Brand Designer", "Local SEO/Social Media Specialist"],
                 "static_keywords": ["marketing", "advertising", "brand", "seo", "social"],
                 "exclude_consumer_industry": True,
                 "guidance": "Recommend agencies or freelancers who provide marketing services — not other consumer brands in the same industry.",
@@ -410,14 +418,14 @@ class ServiceProviderTableGenerator:
             },
             "technology": {
                 "search_role": "IT consultant or software vendor",
-                "local_provider_types": ["IT Consultant", "Web Development Agency"],
+                "local_provider_types": ["IT Consultant", "Web Development Agency", "Managed IT Services Provider"],
                 "static_keywords": ["software", "it", "technology", "hosting", "cloud"],
                 "exclude_consumer_industry": False,
                 "guidance": "Recommend technology vendors and IT service providers.",
             },
             "consulting": {
                 "search_role": "Business consultant or industry advisor",
-                "local_provider_types": ["Business Consultant", "Industry Advisor"],
+                "local_provider_types": ["Business Consultant", "Industry Advisor", "Local Business Coach"],
                 "static_keywords": ["consulting", "advisor", "mentor", "sbdc"],
                 "exclude_consumer_industry": False,
                 "guidance": "Recommend advisors who help execute the step.",
@@ -585,14 +593,24 @@ class ServiceProviderTableGenerator:
 
         local_providers: List[Dict[str, Any]] = []
         if location:
-            for provider_type in intent["local_provider_types"][:3]:
+            provider_types = intent["local_provider_types"][:3] or ["Business Consultant"]
+            # Distribute the shortfall against MIN_TOTAL_PROVIDERS across the
+            # available provider types in a single request per type (never
+            # re-request the same type — generate_actual_local_providers caches
+            # by (location, category, provider_type), so a second call for the
+            # same type would just return the same cached rows instead of more).
+            target_local = max(self.MIN_TOTAL_PROVIDERS - len(static_providers), len(provider_types))
+            base_count, remainder = divmod(target_local, len(provider_types))
+            for i, provider_type in enumerate(provider_types):
+                count_for_type = base_count + (1 if i < remainder else 0)
+                count_for_type = max(count_for_type, 1)
                 try:
                     generated = await self.generate_actual_local_providers(
                         provider_type=provider_type,
                         category=category,
                         business_context=business_context,
                         location=location,
-                        count=1,
+                        count=count_for_type,
                         task_context=task_context,
                         provider_intent=intent,
                     )
