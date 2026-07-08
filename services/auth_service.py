@@ -129,6 +129,9 @@ async def create_user(
         "display_name": full_name,
     }
 
+    frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+    redirect_url = f"{frontend_url}/auth/confirm"
+
     try:
         # Use admin API to create user WITHOUT sending confirmation email
         # This prevents the automatic email from being sent
@@ -141,22 +144,24 @@ async def create_user(
                 "email_confirm": False,  # Don't confirm email yet
                 "user_metadata": user_data
             })
-            
+
             if admin_response.user is None:
                 raise ValueError("User not created")
-            
+
             user_id = admin_response.user.id
             response_user = admin_response.user
-            
+
         except Exception as admin_error:
-            # Fallback to regular sign_up if admin API fails
+            # Fallback to regular sign_up if admin API fails. This still auto-sends
+            # Supabase's confirmation email, so it must carry the same redirect_to
+            # as the manual resend below, or the link sends users to the bare Site URL.
             logger.warning(f"Admin API user creation failed, using sign_up: {admin_error}")
             response = supabase_auth.auth.sign_up({
                 "email": email,
                 "password": password,
                 "options": {
                     "data": user_data,
-                    "email_redirect_to": None
+                    "email_redirect_to": redirect_url
                 }
             })
             
@@ -215,10 +220,6 @@ async def create_user(
     # Send confirmation email immediately after signup
     # (Changed from waiting for Terms/Privacy acceptance since flow now shows those after login)
     try:
-        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
-        frontend_url = frontend_url.rstrip('/')
-        redirect_url = f"{frontend_url}/auth/confirm"
-        
         supabase_url = os.getenv("SUPABASE_URL")
         service_role = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         if supabase_url and service_role:
