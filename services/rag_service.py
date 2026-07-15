@@ -45,8 +45,25 @@ class RAGResearchEngine:
         }
     
     async def conduct_comprehensive_research(self, query: str, business_context: Dict[str, Any], research_depth: str = "standard") -> Dict[str, Any]:
-        """Conduct comprehensive research using multiple authoritative sources with caching"""
-        
+        """Answer the user's actual research question, grounded in real live web search.
+
+        This used to fan the query out across ~7-10 fake "site:X <query>" calls to a
+        non-search LLM completion (`conduct_web_search`), which classified the query into
+        one of 9 rigid keyword-matched templates (Industry Trends / Regulatory / Costs /
+        ...) and silently defaulted to "Industry Trends" for anything that didn't match a
+        narrow phrase list — so a question like "how should I price my subscription tiers"
+        got answered with a generic industry-trends essay instead of an answer to what was
+        actually asked. That's the root cause of "it ignored my input": the literal text
+        the user typed was present in the prompt, but the *instructions* the model had to
+        follow were swapped out for an unrelated fixed template.
+
+        This now makes one real, grounded call via OpenAI's Responses API web-search tool,
+        instructed to directly answer the literal question using the business's actual
+        context (name, industry, location, type) — no section-template substitution. Real
+        citations from the search are appended as a Sources list so the answer is
+        independently verifiable, not just plausible-sounding.
+        """
+
         # Check cache first for performance
         cache_key = build_cache_key(query, business_context, research_depth)
         if cache_key in self.cache:
@@ -54,7 +71,7 @@ class RAGResearchEngine:
             # Fix datetime comparison: ensure both are timezone-aware or both are naive
             cached_timestamp = cached_entry["timestamp"]
             now = datetime.now()
-            
+
             # If cached timestamp is timezone-aware, make now aware too (or vice versa)
             if cached_timestamp.tzinfo is not None and now.tzinfo is None:
                 # Cached is aware, now is naive - compare as naive
@@ -62,63 +79,115 @@ class RAGResearchEngine:
             elif cached_timestamp.tzinfo is None and now.tzinfo is not None:
                 # Cached is naive, now is aware - make now naive
                 now = now.replace(tzinfo=None)
-            
+
             if (now - cached_timestamp).seconds < self.cache_ttl:
                 print(f"📋 Using cached research for: {query[:50]}...")
                 return cached_entry["data"]
 
-        persistent_cached = get_cached_entry("rag_research", cache_key)
+        persistent_cached = get_cached_entry("rag_research_v2", cache_key)
         if persistent_cached:
             print(f"📦 Using persistent cached research for: {query[:50]}...")
             # Use timezone-naive datetime for consistency
             self.cache[cache_key] = {"data": persistent_cached, "timestamp": datetime.now().replace(tzinfo=None) if datetime.now().tzinfo else datetime.now()}
             return persistent_cached
-        
-        # Enhance query with business context
-        enhanced_query = self._enhance_query(query, business_context)
-        
+
         # For implementation phase, use minimal research for speed
         if research_depth == "implementation_fast":
             return await self._conduct_fast_research(query, business_context)
-        
-        # Determine research scope based on depth
-        research_sources = self._get_research_sources(research_depth)
-        
-        # Limit sources for faster processing
-        if research_depth == "standard":
-            # Reduce to 2 sources per category for speed
-            limited_sources = {}
-            for category, sources in research_sources.items():
-                limited_sources[category] = sources[:2]
-            research_sources = limited_sources
-        
-        # Conduct parallel research across different source categories
-        research_tasks = []
-        for category, sources in research_sources.items():
-            for source in sources:
-                task = self._research_single_source(source, enhanced_query, category)
-                research_tasks.append(task)
-        
-        # Execute research tasks in parallel
-        research_results = await asyncio.gather(*research_tasks, return_exceptions=True)
-        
-        # Process and organize results
-        organized_results = self._organize_research_results(research_results, research_sources)
-        
-        # Generate comprehensive analysis
-        analysis = await self._generate_research_analysis(organized_results, query, business_context)
-        
+
+        search_context_size = {
+            "basic": "low",
+            "standard": "medium",
+            "comprehensive": "high",
+            "deep": "high",
+        }.get(research_depth, "medium")
+
+        business_name = business_context.get('business_name') or 'the venture'
+        industry = business_context.get('industry') or 'General Business'
+        location = business_context.get('location') or ''
+        business_type = business_context.get('business_type') or 'Startup'
+
+        context_lines = [
+            f"- Business: {business_name}",
+            f"- Industry: {industry}",
+            f"- Business type: {business_type}",
+        ]
+        if location:
+            context_lines.append(f"- Location: {location}")
+
+        prompt = f"""
+        Answer the following business research question directly and specifically. Search
+        the web for current, real information — do not answer from general knowledge alone.
+
+        QUESTION: "{query}"
+
+        BUSINESS CONTEXT (use this to tailor the answer to THIS business specifically — do
+        not give generic advice that ignores it):
+        {chr(10).join(context_lines)}
+
+        Requirements:
+        - Answer the actual question asked. Do not substitute a different, more generic topic.
+        - Be specific and concrete: real numbers, named sources, named regulations, or named
+          companies where relevant — not vague generalities.
+        - Structure the answer with markdown headings and bullet points suited to what was
+          asked. Do not force in unrelated sections (e.g. "Regulatory Requirements" or
+          "Market Opportunities") when the question isn't about those things.
+        - End with a short "Actionable Recommendations" section: 2-4 concrete next steps for
+          this specific business.
+        """
+
+        sources: List[Dict[str, str]] = []
+        try:
+            web_search_tool: Dict[str, Any] = {
+                "type": "web_search_preview",
+                "search_context_size": search_context_size,
+            }
+            if location:
+                web_search_tool["user_location"] = {"type": "approximate", "city": location}
+
+            response = await client.responses.create(
+                model="gpt-4o",
+                instructions=(
+                    "You are a senior business research analyst. You answer the specific "
+                    "question asked, grounded in real web search results, tailored to the "
+                    "business described. You never substitute a generic template for the "
+                    "actual question."
+                ),
+                tools=[web_search_tool],
+                input=prompt,
+                max_output_tokens=2000,
+            )
+
+            analysis = response.output_text or "No research data available for analysis."
+
+            # Collect the real citations the search tool returned, so the answer is
+            # independently verifiable rather than just plausible-sounding.
+            seen_urls = set()
+            for output_item in response.output:
+                if getattr(output_item, "type", None) != "message":
+                    continue
+                for content in getattr(output_item, "content", []) or []:
+                    for annotation in getattr(content, "annotations", []) or []:
+                        if getattr(annotation, "type", None) == "url_citation" and annotation.url not in seen_urls:
+                            seen_urls.add(annotation.url)
+                            sources.append({"title": annotation.title or annotation.url, "url": annotation.url})
+
+            if sources:
+                analysis += "\n\n## Sources\n" + "\n".join(f"- [{s['title']}]({s['url']})" for s in sources)
+
+        except Exception as e:
+            analysis = f"Research failed: {str(e)}"
+
         result = {
             "query": query,
-            "enhanced_query": enhanced_query,
             "business_context": business_context,
             "research_depth": research_depth,
-            "research_results": organized_results,
+            "sources": sources,
             "analysis": analysis,
             "timestamp": datetime.now().isoformat(),
-            "sources_consulted": len([r for r in research_results if not isinstance(r, Exception)])
+            "sources_consulted": len(sources),
         }
-        
+
         # Cache the result - use timezone-naive datetime for consistency
         now = datetime.now()
         if now.tzinfo is not None:
@@ -127,8 +196,8 @@ class RAGResearchEngine:
             'data': result,
             'timestamp': now
         }
-        set_cached_entry("rag_research", cache_key, result)
-        
+        set_cached_entry("rag_research_v2", cache_key, result)
+
         return result
     
     async def _conduct_fast_research(self, query: str, business_context: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,52 +250,6 @@ class RAGResearchEngine:
 
         set_cached_entry("rag_research_fast", cache_key, result, ttl_seconds=1800)
         return result
-    
-    def _enhance_query(self, query: str, business_context: Dict[str, Any]) -> str:
-        """Enhance query with business context for more targeted research"""
-        
-        enhancements = []
-        
-        if business_context.get('industry'):
-            enhancements.append(f"industry: {business_context['industry']}")
-        
-        if business_context.get('location'):
-            enhancements.append(f"location: {business_context['location']}")
-        
-        if business_context.get('business_type'):
-            enhancements.append(f"business type: {business_context['business_type']}")
-        
-        if business_context.get('business_name'):
-            enhancements.append(f"business: {business_context['business_name']}")
-        
-        # Add current year for relevance
-        current_year = datetime.now().year
-        enhancements.append(f"year: {current_year}")
-        
-        enhanced_query = f"{query}"
-        if enhancements:
-            enhanced_query += f" {' '.join(enhancements)}"
-        
-        return enhanced_query
-    
-    def _get_research_sources(self, depth: str) -> Dict[str, List[str]]:
-        """Get research sources based on depth level"""
-        
-        if depth == "comprehensive":
-            return self.authoritative_sources
-        elif depth == "standard":
-            # Return most important sources from each category
-            return {
-                "government": self.authoritative_sources["government"][:3],
-                "academic": self.authoritative_sources["academic"][:2],
-                "industry_reports": self.authoritative_sources["industry_reports"][:3],
-                "professional": self.authoritative_sources["professional"][:2]
-            }
-        else:  # "basic"
-            return {
-                "government": self.authoritative_sources["government"][:2],
-                "industry_reports": self.authoritative_sources["industry_reports"][:2]
-            }
     
     async def _research_single_source(self, source: str, query: str, category: str) -> Dict[str, Any]:
         """Research a single source"""
@@ -286,54 +309,6 @@ class RAGResearchEngine:
                 })
         
         return organized
-    
-    async def _generate_research_analysis(self, organized_results: Dict[str, Any], original_query: str, business_context: Dict[str, Any]) -> str:
-        """Generate comprehensive analysis from research results"""
-        
-        # Prepare research data for analysis
-        research_data = []
-        for category, results in organized_results["by_category"].items():
-            for result in results:
-                if result["result"]:
-                    research_data.append(f"Source: {result['source']} ({category})\n{result['result']}")
-        
-        if not research_data:
-            return "No research data available for analysis."
-        
-        analysis_prompt = f"""
-        Analyze the following research data and provide comprehensive insights for the business question: "{original_query}"
-        
-        Business Context:
-        - Industry: {business_context.get('industry', 'General Business')}
-        - Location: {business_context.get('location', 'United States')}
-        - Business Type: {business_context.get('business_type', 'Startup')}
-        
-        Research Data:
-        {chr(10).join(research_data[:10])}  # Limit to first 10 sources to avoid token limits
-        
-        Provide a comprehensive analysis that includes:
-        1. Key Findings: Most important insights from the research
-        2. Industry Trends: Current trends and developments
-        3. Regulatory Requirements: Legal and compliance considerations
-        4. Best Practices: Recommended approaches and strategies
-        5. Market Opportunities: Potential opportunities identified
-        6. Risk Factors: Potential challenges and risks
-        7. Actionable Recommendations: Specific next steps
-        
-        Format the analysis as structured, actionable guidance that the user can immediately implement.
-        """
-        
-        try:
-            response = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": analysis_prompt}],
-                temperature=0.3,
-                max_tokens=2000
-            )
-            
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"Analysis generation failed: {str(e)}"
     
     async def validate_user_input(self, user_input: str, business_context: Dict[str, Any], question_type: str) -> Dict[str, Any]:
         """Validate user input against research-backed standards"""

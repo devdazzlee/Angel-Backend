@@ -2,8 +2,11 @@ from openai import AsyncOpenAI
 import os
 import json
 import re
+import asyncio
+import phonenumbers
 from datetime import datetime
 from typing import Dict, List, Any, Optional, TypedDict
+from urllib.parse import urlparse
 from services.rag_service import research_service_providers_rag
 from services.specialized_agents_service import agents_manager
 from utils.business_context import prompt_labels
@@ -122,7 +125,22 @@ class ServiceProviderTableGenerator:
         task_context: str = "",
         provider_intent: Optional[ProviderIntent] = None,
     ) -> List[Dict[str, Any]]:
-        """Generate local provider listings aligned to the active implementation step."""
+        """Find REAL local businesses via live web search — grounded, not generated.
+
+        Plain chat completions have no access to real-world data, so asking one to
+        "generate realistic local businesses" always produced fabricated names,
+        addresses, and phone numbers (e.g. near-identical "Liaquatabad Legal ___"
+        listings, or a 555-01XX number — the block reserved for fictional use).
+
+        This uses OpenAI's Responses API with the built-in `web_search_preview`
+        tool, so the model is actually searching the live web rather than
+        completing a plausible-sounding pattern. As a second, independent check,
+        every candidate's claimed website is verified against the URLs the
+        search tool actually cited (`url_citation` annotations) — if a result's
+        website isn't backed by a real citation the search performed, it's
+        dropped rather than trusted. If nothing verifiable turns up, this
+        returns an empty list — no placeholder, no invented fallback business.
+        """
 
         intent = provider_intent or self._resolve_provider_intent(task_context, category, business_context)
         fields = self._extract_task_context_fields(task_context)
@@ -140,13 +158,22 @@ class ServiceProviderTableGenerator:
             return _local_providers_cache[cache_key][:count]
 
         prompt = f"""
-        Generate a list of {count} REALISTIC local businesses in {location} that can help a founder complete this implementation step.
+        Search the web for up to {count} REAL, currently operating businesses that could help a
+        founder complete this implementation step. The founder's business is in {location}. If
+        that names a specific neighborhood or district within a larger city, don't restrict the
+        search to that neighborhood alone — a provider anywhere in the surrounding city/metro
+        area that can realistically serve a business there counts as local (a business attorney
+        or CPA across town is still genuinely usable; use your judgment on what "serves this
+        area" reasonably means here). Only include a business if it actually turned up in your
+        search results — never invent, guess, or complete a plausible name, address, phone
+        number, or email. If you find fewer than {count} genuine matches, return fewer. If you
+        find none, return an empty list.
 
         IMPLEMENTATION STEP (what the user is trying to accomplish):
         - Step: {step_title}
         - Details: {step_description}
 
-        Provider type to generate: {provider_type}
+        Provider type to search for: {provider_type}
         Role: {intent['search_role']}
 
         Business context (for tailoring only — do NOT recommend consumer-facing competitors):
@@ -160,51 +187,188 @@ class ServiceProviderTableGenerator:
         - Recommend VENDORS, SUPPLIERS, WHOLESALERS, PROFESSIONALS, or B2B SERVICES that help the founder complete the step.
         - DO NOT recommend other {labels['industry']} businesses that sell the same product/service directly to consumers (competitors).
         - DO NOT recommend mobile trucks, shops, or brands that operate the same kind of business as the user.
-        - Each listing must clearly be a supplier/vendor/partner — not a rival business.
+        - Every "website" value must be copied exactly from a URL you actually found while searching — do not construct or guess a URL.
+        - If you report a "phone", it MUST be in full international format starting with "+"
+          and the correct country calling code for where the business is actually located
+          (e.g. "+92 21 1234567" for Karachi, Pakistan — NOT a bare local number, and NOT a
+          different country's number). If you are not confident of the correct country code,
+          leave phone as "" rather than guess or default to a US-style number.
+        - Leave email or address as "" if your search results didn't clearly show it — never fabricate a plausible-looking value.
 
-        For each business provide JSON fields: name, type, local (always true), description, specialties,
-        estimated_cost, contact_method, key_considerations, address, rating (4.0-5.0)
-
-        Return JSON: {{"providers": [ ... ]}}
+        After searching, respond with ONLY a JSON object — no prose, no markdown fences — in this shape:
+        {{"providers": [{{"name": "", "type": "", "description": "", "specialties": "", "estimated_cost": "", "phone": "", "email": "", "website": "", "key_considerations": "", "address": ""}}]}}
         """
-        
+
         try:
-            response = await client.chat.completions.create(
+            # "high" search context = the model considers more of what it finds before
+            # answering, which reduces false negatives (real businesses that exist but
+            # get missed) without changing the no-fabrication rules above.
+            web_search_tool: Dict[str, Any] = {
+                "type": "web_search_preview",
+                "search_context_size": "high",
+            }
+            if location:
+                # This field is a soft geo-bias hint for the search tool, not a hard filter —
+                # passing the full "Neighborhood, City" string is fine even though it isn't a
+                # bare city name.
+                web_search_tool["user_location"] = {"type": "approximate", "city": location}
+
+            response = await client.responses.create(
                 model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are a local business directory expert. Generate realistic local business listings."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=2000,
-                response_format={"type": "json_object"}
+                instructions=(
+                    "You are a rigorous local-business researcher. You only report businesses "
+                    "you actually find via web search. You never fabricate a name, address, "
+                    "phone number, email, or website — an empty result is always better than "
+                    "a made-up one."
+                ),
+                tools=[web_search_tool],
+                input=prompt,
+                max_output_tokens=2500,
             )
-            
-            result = json.loads(response.choices[0].message.content)
+
+            raw_text = response.output_text or ""
+            json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+            if not json_match:
+                print(
+                    f"⚠️ [providers:{provider_type}] no JSON object found in model output "
+                    f"(len={len(raw_text)}); raw tail: {raw_text[-300:]!r}"
+                )
+                _local_providers_cache[cache_key] = []
+                return []
+
+            result = json.loads(json_match.group())
             providers = result.get("providers", result.get("businesses", []))
+
+            # Confirm a real web search actually happened this turn, and collect the domains
+            # of any pages the model opened while doing it.
+            #
+            # NOTE: `url_citation` annotations (the obvious-looking way to verify a claimed
+            # website) only attach to inline citations within *written prose* — they never
+            # populate when the model's final output is pure JSON with no prose, which is
+            # exactly what we require it to output. Relying on that was silently rejecting
+            # every real, correctly-grounded result (verified via diagnostic logging: real
+            # businesses with real phone numbers/addresses/domains were coming back from
+            # search and then getting thrown away because `cited_domains` was always empty).
+            # `web_search_call` items are the structurally correct signal — they record
+            # whether the tool was actually invoked, independent of prose vs. JSON output.
+            search_performed = False
+            opened_domains = set()
+            for output_item in response.output:
+                if getattr(output_item, "type", None) != "web_search_call":
+                    continue
+                search_performed = True
+                action = getattr(output_item, "action", None)
+                if getattr(action, "type", None) == "open_page":
+                    url = getattr(action, "url", None)
+                    if url:
+                        opened_domains.add(self._domain(url))
+
+            # A claimed website matching a page the model actually opened is the strongest
+            # possible evidence, logged here for visibility. But requiring it as a hard gate
+            # isn't viable: the model frequently answers from a search-result snippet without
+            # opening the page, and per-URL verification isn't reliably obtainable from this
+            # API when the output is JSON. The real, structural safeguard is `search_performed`
+            # below — if the tool was never invoked at all, nothing is trustworthy regardless
+            # of what the JSON claims.
+            if providers and opened_domains:
+                confirmed = sum(
+                    1 for p in providers
+                    if self._domain(str(p.get("website") or "")) in opened_domains
+                )
+                print(f"    (of these, {confirmed} website(s) match a page the model actually opened)")
+
+            verified = providers if search_performed else []
+            if providers and not search_performed:
+                print(f"⚠️ [providers:{provider_type}] model returned providers but never called web_search — discarding as ungrounded")
 
             industry = (labels.get("industry") or "").lower()
             filtered = [
-                p for p in providers
+                p for p in verified
                 if not self._looks_like_competitor(p, industry, intent)
             ]
-            providers = filtered or providers
-            
-            # Ensure all providers have required fields
-            for provider in providers:
+            verified = filtered or verified
+
+            # Diagnostics: this pipeline drops candidates at up to two points (search never
+            # invoked / competitor filter), and without visibility into which one fired, "why
+            # are there so few providers" is unanswerable from outside. This makes the funnel
+            # explicit in the logs.
+            print(
+                f"🔎 [providers:{provider_type}] model returned {len(providers)}, "
+                f"search_performed={search_performed}, {len(verified)} passed grounding+competitor filter"
+            )
+            if providers and not verified:
+                print(f"    dropped candidates: {json.dumps(providers, default=str)[:800]}")
+
+            for provider in verified:
                 provider["local"] = True
-                if "type" not in provider:
+                if not provider.get("type"):
                     provider["type"] = f"Local {provider_type}"
-                    
-            # Cache the results
-            _local_providers_cache[cache_key] = providers
-            
-            return providers
-            
+                # A malformed/wrong-country phone number is worse than no phone number —
+                # validate and normalize it, or drop it, rather than display it as-is.
+                provider["phone"] = self._normalize_phone(provider.get("phone", ""))
+
+            _local_providers_cache[cache_key] = verified
+            return verified[:count]
+
         except Exception as e:
-            print(f"Error generating local providers: {e}")
+            tail = locals().get("raw_text", "")[-300:]
+            print(f"❌ [providers:{provider_type}] error: {e}" + (f"; raw tail: {tail!r}" if tail else ""))
             return []
-    
+
+    @staticmethod
+    def _domain(url: str) -> str:
+        """Normalize a URL down to a bare, lowercase, www-stripped domain for comparison."""
+        try:
+            netloc = urlparse(url if "://" in url else f"https://{url}").netloc.lower()
+            return netloc[4:] if netloc.startswith("www.") else netloc
+        except Exception:
+            return url.strip().lower()
+
+    @staticmethod
+    def _normalize_phone(phone: str) -> str:
+        """Validate a phone number with libphonenumber and format it with its country code.
+
+        The model is instructed to always include the correct "+<country code>" prefix, but
+        instructions alone don't guarantee it — a bare local number, or a number from the
+        wrong country, is worse than showing nothing (a founder could try to call it and get
+        a wrong number or a dead end). `phonenumbers` (Google's libphonenumber) is a real,
+        deterministic validator, not a guess: if the number doesn't parse as a genuine,
+        internationally-dialable number, it's dropped instead of shown malformed.
+        """
+        phone = (phone or "").strip()
+        if not phone:
+            return ""
+        try:
+            parsed = phonenumbers.parse(phone, None)  # None: requires the "+" prefix already present
+            if not phonenumbers.is_valid_number(parsed):
+                return ""
+            return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+        except phonenumbers.NumberParseException:
+            return ""
+
+    @classmethod
+    def _dedupe_providers(cls, providers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Drop repeat listings of the same real business found via different searches."""
+        seen_names = set()
+        seen_domains = set()
+        deduped: List[Dict[str, Any]] = []
+        for provider in providers:
+            name_key = re.sub(r"\s+", " ", str(provider.get("name") or "")).strip().lower()
+            website = str(provider.get("website") or "").strip()
+            domain_key = cls._domain(website) if website else ""
+
+            if name_key and name_key in seen_names:
+                continue
+            if domain_key and domain_key in seen_domains:
+                continue
+
+            if name_key:
+                seen_names.add(name_key)
+            if domain_key:
+                seen_domains.add(domain_key)
+            deduped.append(provider)
+        return deduped
+
     # Map known Implementation phase names (and their normalized internal
     # ids) deterministically to provider categories. The frontend sends the
     # phase name as `category` on the /implementation/service-providers
@@ -601,22 +765,38 @@ class ServiceProviderTableGenerator:
             # same type would just return the same cached rows instead of more).
             target_local = max(self.MIN_TOTAL_PROVIDERS - len(static_providers), len(provider_types))
             base_count, remainder = divmod(target_local, len(provider_types))
+
+            # Each of these is a real, "high" search-context web search, which can easily take
+            # several seconds. Running them one-at-a-time (the old `for ... await` here) serialized
+            # up to 3 of them, multiplying the total wait and making the whole request more likely
+            # to hit a timeout partway through — which silently truncated the result to whichever
+            # provider_type happened to finish first, i.e. "very few local providers." Firing them
+            # concurrently cuts total latency roughly 3x for the same real searches.
+            search_tasks = []
             for i, provider_type in enumerate(provider_types):
                 count_for_type = base_count + (1 if i < remainder else 0)
                 count_for_type = max(count_for_type, 1)
-                try:
-                    generated = await self.generate_actual_local_providers(
-                        provider_type=provider_type,
-                        category=category,
-                        business_context=business_context,
-                        location=location,
-                        count=count_for_type,
-                        task_context=task_context,
-                        provider_intent=intent,
-                    )
-                    local_providers.extend(generated)
-                except Exception as e:
-                    print(f"Error generating local providers for {provider_type}: {e}")
+                search_tasks.append(self.generate_actual_local_providers(
+                    provider_type=provider_type,
+                    category=category,
+                    business_context=business_context,
+                    location=location,
+                    count=count_for_type,
+                    task_context=task_context,
+                    provider_intent=intent,
+                ))
+
+            results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            for provider_type, result in zip(provider_types, results):
+                if isinstance(result, Exception):
+                    print(f"Error generating local providers for {provider_type}: {result}")
+                else:
+                    local_providers.extend(result)
+
+        # Different provider_type searches (e.g. "Business Attorney" and "Legal Advisor")
+        # can each independently turn up the same real business — dedupe by name and by
+        # website domain before combining, so it isn't listed twice.
+        local_providers = self._dedupe_providers(local_providers)
 
         combined = local_providers + static_providers
         industry = (prompt_labels(business_context).get("industry") or "").lower()
@@ -814,209 +994,6 @@ class ServiceProviderTableGenerator:
                 "key_considerations": "Considerations",
                 "estimated_cost": "Contact for pricing",
                 "contact_method": "Website or phone",
-                "specialties": "General services"
-            }
-        ])
-    
-    async def _create_structured_providers(self, category: str, category_info: Dict[str, Any], business_context: Dict[str, Any], location: str, rag_results: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Create structured provider data"""
-        
-        # Generate providers using AI with RAG research
-        from utils.business_context import prompt_labels
-
-        labels = prompt_labels(business_context)
-        target_location = location or labels['location']
-        provider_prompt = f"""
-        Generate a comprehensive list of service providers for {category_info['name']} based on the following context:
-        
-        Business Context:
-        - Industry: {labels['industry']}
-        - Location: {labels['location']}
-        - Business Type: {labels['business_type']}
-        - Business Name: {labels['business_name']}
-        
-        Target Location: {target_location}
-        
-        Subcategories: {', '.join(category_info['subcategories'])}
-        
-        Research Data: {rag_results.get('recommendations', 'No specific research data available')}
-        
-        Generate at least 5 providers with the following structure for each:
-        1. Name: Specific company/service name
-        2. Type: Type of service (e.g., "Online Service", "Local Professional", "National Firm")
-        3. Local: Boolean indicating if they serve the target location
-        4. Description: Detailed description of services offered
-        5. Key Considerations: Important factors to consider when choosing this provider
-        6. Estimated Cost: Cost range or pricing model
-        7. Contact Method: How to reach them
-        8. Specialties: Specific areas of expertise
-        
-        Ensure you include:
-        - At least 2 local providers (marked as Local: true)
-        - Mix of online and offline services
-        - Different price points and service levels
-        - Providers suitable for startups/small businesses
-        
-        Format as JSON array of provider objects.
-        """
-        
-        try:
-            response = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": provider_prompt}],
-                temperature=0.4,
-                max_tokens=2000
-            )
-            
-            # Parse the response as JSON
-            providers_text = response.choices[0].message.content
-            
-            # Extract JSON from the response
-            import re
-            json_match = re.search(r'\[.*\]', providers_text, re.DOTALL)
-            if json_match:
-                providers = json.loads(json_match.group())
-            else:
-                # Fallback: create providers from text
-                providers = self._parse_providers_from_text(providers_text, category_info)
-            
-            # Ensure we have the required structure
-            structured_providers = []
-            for provider in providers:
-                structured_provider = {
-                    "name": provider.get("name", "Provider Name"),
-                    "type": provider.get("type", "Service Provider"),
-                    "local": provider.get("local", False),
-                    "description": provider.get("description", "Service description"),
-                    "key_considerations": provider.get("key_considerations", "Considerations"),
-                    "estimated_cost": provider.get("estimated_cost", "Contact for pricing"),
-                    "contact_method": provider.get("contact_method", "Website or phone"),
-                    "specialties": provider.get("specialties", "General services")
-                }
-                structured_providers.append(structured_provider)
-            
-            return structured_providers
-            
-        except Exception as e:
-            # Fallback: generate basic providers
-            return self._generate_fallback_providers(category, category_info, business_context, location)
-    
-    def _parse_providers_from_text(self, text: str, category_info: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Parse providers from text response"""
-        
-        providers = []
-        lines = text.split('\n')
-        
-        current_provider = {}
-        for line in lines:
-            line = line.strip()
-            if line.startswith('Name:'):
-                if current_provider:
-                    providers.append(current_provider)
-                current_provider = {"name": line.replace('Name:', '').strip()}
-            elif line.startswith('Type:'):
-                current_provider["type"] = line.replace('Type:', '').strip()
-            elif line.startswith('Local:'):
-                current_provider["local"] = 'true' in line.lower()
-            elif line.startswith('Description:'):
-                current_provider["description"] = line.replace('Description:', '').strip()
-            elif line.startswith('Key Considerations:'):
-                current_provider["key_considerations"] = line.replace('Key Considerations:', '').strip()
-            elif line.startswith('Estimated Cost:'):
-                current_provider["estimated_cost"] = line.replace('Estimated Cost:', '').strip()
-            elif line.startswith('Contact Method:'):
-                current_provider["contact_method"] = line.replace('Contact Method:', '').strip()
-            elif line.startswith('Specialties:'):
-                current_provider["specialties"] = line.replace('Specialties:', '').strip()
-        
-        if current_provider:
-            providers.append(current_provider)
-        
-        return providers
-    
-    def _generate_fallback_providers(self, category: str, category_info: Dict[str, Any], business_context: Dict[str, Any], location: str) -> List[Dict[str, Any]]:
-        """Generate fallback providers when AI generation fails"""
-        labels = prompt_labels(business_context)
-        industry_label = labels["industry"]
-
-        fallback_providers = {
-            "legal": [
-                {
-                    "name": "Local Business Attorney",
-                    "type": "Legal Professional",
-                    "local": True,
-                    "description": f"Local attorney specializing in {industry_label} law and business formation",
-                    "key_considerations": "Industry experience, local knowledge, cost structure",
-                    "estimated_cost": "$200-500/hour",
-                    "contact_method": "Local bar association or referrals",
-                    "specialties": "Business formation, contracts, compliance"
-                },
-                {
-                    "name": "LegalZoom",
-                    "type": "Nationwide Service",
-                    "local": False,
-                    "description": "Online legal document preparation and business formation services",
-                    "key_considerations": "Cost-effective, standardized, limited customization",
-                    "estimated_cost": "$99-399",
-                    "contact_method": "Online platform",
-                    "specialties": "Business formation, document preparation"
-                }
-            ],
-            "financial": [
-                {
-                    "name": "Local CPA Firm",
-                    "type": "Accounting Professional",
-                    "local": True,
-                    "description": f"Certified Public Accountant specializing in {industry_label} accounting",
-                    "key_considerations": "Industry expertise, local tax knowledge, ongoing support",
-                    "estimated_cost": "$150-300/hour",
-                    "contact_method": "Local CPA directory or referrals",
-                    "specialties": "Tax preparation, bookkeeping, financial planning"
-                },
-                {
-                    "name": "QuickBooks ProAdvisor",
-                    "type": "Nationwide Service",
-                    "local": False,
-                    "description": "Certified QuickBooks professionals for accounting setup and training",
-                    "key_considerations": "QuickBooks expertise, remote support, cost-effective",
-                    "estimated_cost": "$50-150/hour",
-                    "contact_method": "QuickBooks ProAdvisor directory",
-                    "specialties": "QuickBooks setup, training, bookkeeping"
-                }
-            ],
-            "marketing": [
-                {
-                    "name": "Local Marketing Agency",
-                    "type": "Marketing Professional",
-                    "local": True,
-                    "description": f"Full-service marketing agency with {industry_label} experience",
-                    "key_considerations": "Local market knowledge, full-service capabilities, ongoing support",
-                    "estimated_cost": "$2,000-10,000/month",
-                    "contact_method": "Local business directory or referrals",
-                    "specialties": "Digital marketing, branding, local SEO"
-                },
-                {
-                    "name": "HubSpot Partner",
-                    "type": "Nationwide Service",
-                    "local": False,
-                    "description": "Certified HubSpot partners for inbound marketing and CRM setup",
-                    "key_considerations": "HubSpot expertise, inbound marketing, scalable solutions",
-                    "estimated_cost": "$1,000-5,000/month",
-                    "contact_method": "HubSpot Partner directory",
-                    "specialties": "Inbound marketing, CRM, marketing automation"
-                }
-            ]
-        }
-        
-        return fallback_providers.get(category, [
-            {
-                "name": f"Local {category_info['name']} Provider",
-                "type": "Local Professional",
-                "local": True,
-                "description": f"Local provider specializing in {category_info['name']}",
-                "key_considerations": "Local expertise, personalized service",
-                "estimated_cost": "Contact for pricing",
-                "contact_method": "Local directory or referrals",
                 "specialties": "General services"
             }
         ])
