@@ -46,3 +46,5 @@ python-docx==1.2.0
 autopep8==2.3.2
 stripe==10.5.0
 resend>=2.23.0
+gunicorn==23.0.0
+
