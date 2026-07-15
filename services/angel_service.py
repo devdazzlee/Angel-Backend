@@ -8052,6 +8052,11 @@ WHAT YOU MUST NOT DO:
         ack_length_hint = "ONE SHORT sentence affirming the user's previous answer in one clause"
         ack_word_cap = 30
 
+    missing_question_note = (
+        "\n\nNOTE: This information was missing from the user's uploaded business plan. "
+        "Mention this contextually in ONE clause."
+    ) if is_missing_question else ""
+
     ack_user_prompt = f"""{critical_context_warning}You are writing ONLY the acknowledgment paragraph that precedes the next questionnaire question. The system supplies the canonical question itself — you must NOT include it, rewrite it, or invent your own.
 
 Business context:
@@ -8084,7 +8089,7 @@ Your task — return STRICT JSON matching the schema with ONE field:
 ✅ GOOD example (regular question): "Got it — having a clear MVP focus will keep early development tight."
 ❌ BAD example (drifts + transitions + too long): "Certainly, Ahmed. For HealSync Technologies as a small business in the HealthTech industry, focusing on AI-powered healthcare software is a strategic choice. Your emphasis on accessibility for smaller providers can set you apart. Now, let's explore your short-term goals to better understand your strategic direction."
 
-{business_info_summary}{('\n\nNOTE: This information was missing from the user' + chr(39) + 's uploaded business plan. Mention this contextually in ONE clause.') if is_missing_question else ''}
+{business_info_summary}{missing_question_note}
 
 Return the JSON now. Acknowledgment only. {ack_word_cap}-word cap. No transitions. No questions."""
 
