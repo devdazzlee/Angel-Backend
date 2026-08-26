@@ -6812,6 +6812,14 @@ async def generate_business_plan_artifact(session_data, conversation_history):
       ONLY in the "Deep Research Conducted → Market Analysis" text above. Read that text and extract the
       concrete TAM/market-size figure and the growth-rate/CAGR figure from it; cite it as "Industry Reports"
       source type
+    - Competitor names, strengths, weaknesses, and market position (in the Competitive Landscape Table) are
+      NEVER asked as questionnaire questions — they exist ONLY in the "Deep Research Conducted → Competitor
+      Analysis" text above, formatted as blocks like "**<Company Name>** — <what they do>. *Position:* ...
+      *Strengths:* ... *Weaknesses:* ...". Read that text and use 3 of those REAL company names (with their
+      stated strengths/weaknesses/position) as the competitor rows. NEVER write literal placeholder text such
+      as "Competitor 1", "Competitor A", or "Company X" — if the Competitor Analysis text is genuinely
+      "Research pending" with no company names in it, write "Research pending" in that row instead of a
+      fake or generic name
     - Only write "Not yet specified" for a field after checking BOTH the conversation history AND the Deep
       Research Conducted block and confirming the information is in neither — do not default to it just
       because the conversation alone doesn't mention it
@@ -6898,9 +6906,9 @@ async def generate_business_plan_artifact(session_data, conversation_history):
     
     | Competitor | Strengths | Weaknesses | Market Position | Our Advantage |
     |------------|-----------|------------|------------------|---------------|
-    | **[Competitor 1]** | [From research] | [From research] | [From research] | [Extract from conversation] |
-    | **[Competitor 2]** | [From research] | [From research] | [From research] | [Extract from conversation] |
-    | **[Competitor 3]** | [From research] | [From research] | [From research] | [Extract from conversation] |
+    | **[Real company name from Deep Research Conducted → Competitor Analysis]** | [From that same research] | [From that same research] | [From that same research] | [Extract from conversation] |
+    | **[Real company name from Deep Research Conducted → Competitor Analysis]** | [From that same research] | [From that same research] | [From that same research] | [Extract from conversation] |
+    | **[Real company name from Deep Research Conducted → Competitor Analysis]** | [From that same research] | [From that same research] | [From that same research] | [Extract from conversation] |
     
     ### SWOT Analysis Table
     
