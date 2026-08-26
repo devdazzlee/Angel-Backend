@@ -43,9 +43,13 @@ async def generate_founderport_style_roadmap(session_data, history):
     location = labels["location"]
     industry = labels["industry"]
     business_type = labels["business_type"]
+    # Default to "LLC" (the common choice for a new small business) rather than a
+    # descriptive placeholder like "the chosen legal structure" — that string gets
+    # substituted directly into prompt text (e.g. "Register as a California ___"),
+    # so a non-concrete default leaks straight into the generated roadmap.
     legal_structure = clean_context_value(
         session_data.get("business_structure") or session_data.get("legal_structure")
-    ) or "the chosen legal structure"
+    ) or "LLC"
     
     # Extract state from location if possible
     state = extract_state_from_location(location)
