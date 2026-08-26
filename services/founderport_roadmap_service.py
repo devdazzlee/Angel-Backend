@@ -50,7 +50,11 @@ async def generate_founderport_style_roadmap(session_data, history):
     # Extract state from location if possible
     state = extract_state_from_location(location)
     
-    # Extract all business plan answers for context
+    # Extract all business plan answers for context.
+    # Business Plan has 45 questions; answers alone commonly run 8,000-20,000+ characters,
+    # so keep the full set (gpt-4o's context window handles this easily) — truncating to
+    # a few thousand characters silently drops later answers (permits/compliance, funding,
+    # scaling, etc.) from the roadmap prompt entirely.
     # Handle both list of dicts and string formats
     if isinstance(history, str):
         # If history is a string (from smart_trim_history), extract user messages differently
@@ -78,7 +82,7 @@ async def generate_founderport_style_roadmap(session_data, history):
     - Business Type: {business_type}
     
     **User's Business Plan Answers:**
-    {conversation_text[:3000]}
+    {conversation_text[:24000]}
     
     Generate a roadmap with these 8 STAGES (not phases):
     
@@ -93,10 +97,11 @@ async def generate_founderport_style_roadmap(session_data, history):
     | Task | Description | Dependencies | Angel's Role | Status |
     |------|-------------|--------------|--------------|--------|
     | 1.1 Incorporate {business_name} | Register as a {state} {legal_structure}. File Articles of Incorporation/Organization. | None | Provide filing links, draft description text | ⏳ |
-    | 1.2 File Trademarks for {business_name} | Protect branding before public marketing. USPTO filing. | Legal counsel | Provide USPTO filing links, draft description | ⏳ |
-    | 1.3 Create IP & Copyright Plan | Secure intellectual property and written assets. | Formation complete | Schedule copyright filing reminder | ⏳ |
-    | 1.4 Confirm Development Infrastructure | Set up cloud hosting, database, and core tech stack. | None | Generate config checklist | ⏳ |
-    | 1.5 Implement NDA & Contract Controls | Ensure contracts and IP clauses are in place. | Legal setup | Store executed agreements securely | ⏳ |
+    | 1.2 Obtain Permits & Licenses | Identify and secure every permit/license {business_name} needs to legally operate as a {industry} business in {location} — the SPECIFIC ones for this industry (e.g., a liquor/alcohol license for any business serving alcohol, health department permits for food service, environmental or hazardous-materials compliance for auto repair/industrial operations, professional or occupational licensing for regulated trades). Use the business plan's permits and compliance answers (Questions 26 and 28) as the source of truth. | Formation complete | Identify required permits by industry and location; provide application links; track approval status | ⏳ |
+    | 1.3 File Trademarks for {business_name} | Protect branding before public marketing. USPTO filing. | Legal counsel | Provide USPTO filing links, draft description | ⏳ |
+    | 1.4 Create IP & Copyright Plan | Secure intellectual property and written assets. | Formation complete | Schedule copyright filing reminder | ⏳ |
+    | 1.5 Confirm Development Infrastructure | Set up cloud hosting, database, and core tech stack. | None | Generate config checklist | ⏳ |
+    | 1.6 Implement NDA & Contract Controls | Ensure contracts and IP clauses are in place. | Legal setup | Store executed agreements securely | ⏳ |
     
     ### **Stage 2 — Financial Planning & Funding**
     **Goal**: Establish financial systems and secure necessary funding for {business_name}.
@@ -183,11 +188,18 @@ async def generate_founderport_style_roadmap(session_data, history):
     7. Status indicators: ✅ (complete), ⏳ (in progress), 🔜 (upcoming)
     8. Make it look EXACTLY like the Founderport roadmap example
     9. **MANDATORY — Stage 6 (Public Launch)**: MUST include task "Obtain Business Insurance" before "Launch Publicly". Use insurance policies from the business plan (Question 27 / legal & compliance section). Do not omit insurance from the roadmap.
-    
+    10. **MANDATORY — Stage 1 (Foundation & Setup)**: MUST include task "Obtain Permits & Licenses" naming the SPECIFIC permit(s)/license(s) this exact business needs based on its industry ({industry}) — e.g. a liquor/alcohol license for any business serving alcohol, health department permits for food service, environmental or hazardous-materials compliance for auto repair/industrial businesses, professional/occupational licensing for regulated trades. Ground this in the business plan's permits and compliance answers (Questions 26 and 28) when they are present in the answers above. Never use a generic "obtain necessary permits" placeholder — name the actual permit/license type required. Do not omit this task from the roadmap.
+
     Generate the complete roadmap now with all 8 stages and specific tasks for {business_name}.
     """
     
     insurance_detail = extract_insurance_context_from_history(history, session_data)
+    permits_detail = extract_permits_context_from_history(history, session_data)
+
+    def finalize(content: str) -> str:
+        content = ensure_public_launch_insurance_task(content, insurance_detail)
+        content = ensure_foundation_permits_task(content, permits_detail, industry)
+        return content
 
     try:
         response = await client.chat.completions.create(
@@ -197,12 +209,12 @@ async def generate_founderport_style_roadmap(session_data, history):
             max_tokens=4500  # Increased for comprehensive 8-stage roadmap
         )
         roadmap_content = response.choices[0].message.content or ""
-        return ensure_public_launch_insurance_task(roadmap_content, insurance_detail)
+        return finalize(roadmap_content)
     except Exception as e:
         print(f"Error generating Founderport-style roadmap: {e}")
         # Fallback to basic structure
         fallback = generate_fallback_roadmap(business_name, founder_name, location, legal_structure, state)
-        return ensure_public_launch_insurance_task(fallback, insurance_detail)
+        return finalize(fallback)
 
 def extract_insurance_context_from_history(history, session_data=None) -> str:
     """
@@ -259,6 +271,117 @@ def extract_insurance_context_from_history(history, session_data=None) -> str:
     if len(combined) > 220:
         combined = combined[:217].rstrip() + "..."
     return f"Policies to confirm: {combined}"
+
+
+def extract_permits_context_from_history(history, session_data=None) -> str:
+    """
+    Pull permit/license/compliance specifics from Business Plan Q26 & Q28 discussion
+    (e.g. "liquor license", "health department permit", "EPA hazardous waste") so
+    Stage 1 can name the actual requirement instead of a generic placeholder.
+    """
+    snippets: list[str] = []
+    keywords = (
+        "permit",
+        "license",
+        "licence",
+        "licensing",
+        "zoning",
+        "regulatory",
+        "regulation",
+        "compliance",
+        "health department",
+        "liquor",
+        "alcohol",
+        "environmental",
+        "hazardous",
+        "certification",
+        "inspection",
+    )
+
+    if isinstance(history, list):
+        for msg in history:
+            if not isinstance(msg, dict):
+                continue
+            content = (msg.get("content") or "").strip()
+            if len(content) < 40:
+                continue
+            lower = content.lower()
+            if any(kw in lower for kw in keywords):
+                snippets.append(content[:600])
+
+    if isinstance(history, str):
+        for line in history.splitlines():
+            lower = line.lower()
+            if any(kw in lower for kw in keywords):
+                snippets.append(line[:400])
+
+    if session_data and isinstance(session_data.get("business_context"), dict):
+        ctx = session_data["business_context"]
+        for key in ("permits_licenses", "permits_summary", "compliance_plan", "compliance"):
+            val = ctx.get(key)
+            if isinstance(val, str) and val.strip():
+                snippets.append(val.strip()[:400])
+
+    if not snippets:
+        return ""
+
+    combined = " ".join(snippets[-2:])
+    combined = re.sub(r"\s+", " ", combined).strip()
+    if len(combined) > 220:
+        combined = combined[:217].rstrip() + "..."
+    return f"Requirements to confirm: {combined}"
+
+
+def _build_stage1_permits_row(industry: str = "", permits_detail: str = "") -> str:
+    """Canonical permits/licensing task row for Stage 1 — Foundation & Setup."""
+    industry_phrase = f" for a {industry} business" if industry and industry != "this industry" else ""
+    detail = f" {permits_detail.strip()}" if permits_detail and permits_detail.strip() else ""
+    return (
+        "| Obtain Permits & Licenses | "
+        f"Identify and secure every permit/license required to legally operate{industry_phrase} "
+        "(e.g. liquor/alcohol license if serving alcohol, health department permits for food service, "
+        "environmental or hazardous-materials compliance for auto repair/industrial operations, "
+        f"professional or occupational licensing for regulated trades).{detail} | "
+        "Formation complete | "
+        "Identify required permits by industry and location; provide application links; track approval status | "
+        "🔜 |"
+    )
+
+
+def ensure_foundation_permits_task(roadmap_content: str, permits_detail: str = "", industry: str = "") -> str:
+    """
+    Guarantee Stage 1 — Foundation & Setup includes a permits/licensing task.
+    Mirrors ensure_public_launch_insurance_task: the LLM occasionally omits it
+    despite the explicit instruction, so this enforces the requirement at the source.
+    """
+    if not roadmap_content or not roadmap_content.strip():
+        return roadmap_content
+
+    stage1_match = re.search(
+        r"(#{2,3}\s*(?:\*\*)?Stage\s*1\s*[—–-]\s*Foundation\s*(?:&|and)\s*Setup(?:\*\*)?.*?)"
+        r"(?=#{2,3}\s*(?:\*\*)?Stage\s*2|\Z)",
+        roadmap_content,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not stage1_match:
+        return roadmap_content
+
+    stage1_block = stage1_match.group(1)
+    if re.search(r"permit|licens", stage1_block, re.IGNORECASE):
+        return roadmap_content
+
+    row = _build_stage1_permits_row(industry, permits_detail)
+
+    table_header = re.search(
+        r"(\| Task \| Description \| Dependencies \| Angel's Role \| Status \|\n\|[-\s|:]+\|\n)",
+        stage1_block,
+        flags=re.IGNORECASE,
+    )
+    if not table_header:
+        return roadmap_content
+
+    insert_at = stage1_match.start(1) + table_header.end()
+    return roadmap_content[:insert_at] + row + "\n" + roadmap_content[insert_at:]
 
 
 def ensure_public_launch_insurance_task(roadmap_content: str, insurance_detail: str = "") -> str:
