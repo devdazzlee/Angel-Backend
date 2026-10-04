@@ -39,6 +39,9 @@ htmlcov/
 .env
 .env.*
 
+# Ephemeral guest chat store (not claimed yet)
+.guest_sessions/
+
 # SQLite DB or local DB
 *.db
 *.sqlite3

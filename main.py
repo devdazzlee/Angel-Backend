@@ -23,6 +23,7 @@ from routers.stripe_router import router as stripe_router
 from routers.preferences_router import router as preferences_router
 from routers.budget_router import router as budget_router
 from routers.contact_router import router as contact_router
+from routers.guest_angel_router import router as guest_angel_router
 
 # Middlewares
 from middlewares.auth import verify_auth_token
@@ -100,6 +101,7 @@ app.include_router(stripe_router, prefix="/stripe")
 app.include_router(preferences_router)
 app.include_router(budget_router, prefix="/api")
 app.include_router(contact_router, prefix="/support")
+app.include_router(guest_angel_router, prefix="/guest")
 
 # ✅ Global Exception Handlers
 app.add_exception_handler(AuthApiError, supabase_auth_exception_handler)
